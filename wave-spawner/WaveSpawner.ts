@@ -32,6 +32,7 @@
 
 import { IRandomSource, MathRandomSource } from '../_core/types';
 import { clampNum, safeDt } from '../_core/math';
+import { needCount } from '../_core/guard';
 
 // ============================================================
 // 数据结构
@@ -510,7 +511,18 @@ export class WaveSpawner {
     for (const entry of wave.entries) {
       const delay = Math.max(0, entry.delay ?? 0);
       const interval = Math.max(0, entry.interval ?? 0);
-      for (let i = 0; i < entry.count; i++) {
+      /**
+       * 【⚠️ count 必须有上界】
+       *
+       * 它直接就是下面这个 push 循环的次數，且每个元素都会常驻
+       * `_pending` 队列直到生成。实测 `count: Infinity`：
+       * 退出码 124（卡死），且在卡死前会先吃光内存——
+       * 因为每次 push 都往数组里塞一个对象。
+       *
+       * 波次配置常来自关卡编辑器或配置表，属于外部输入。
+       */
+      const count = needCount(entry.count, `wave[${wave.id}].entry[${entry.id}].count`);
+      for (let i = 0; i < count; i++) {
         this._pending.push({
           entryId: entry.id,
           waveIndex: this._waveIndex,
