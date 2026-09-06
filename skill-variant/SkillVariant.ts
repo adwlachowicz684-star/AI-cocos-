@@ -432,21 +432,25 @@ export function applyPatch(target: Record<string, unknown>, p: Patch): void {
 
     case 'add':
       assertNumber(oldVal, p, 'add');
+      assertOperand(p, 'add');
       cur[last] = (oldVal as number) + (p.value as number);
       break;
 
     case 'mul':
       assertNumber(oldVal, p, 'mul');
+      assertOperand(p, 'mul');
       cur[last] = (oldVal as number) * (p.value as number);
       break;
 
     case 'max':
       assertNumber(oldVal, p, 'max');
+      assertOperand(p, 'max');
       cur[last] = Math.max(oldVal as number, p.value as number);
       break;
 
     case 'min':
       assertNumber(oldVal, p, 'min');
+      assertOperand(p, 'min');
       cur[last] = Math.min(oldVal as number, p.value as number);
       break;
 
@@ -471,6 +475,37 @@ export function applyPatch(target: Record<string, unknown>, p: Patch): void {
       }
       break;
     }
+  }
+}
+
+/**
+ * 校验**操作数**（`p.value`）是有限数字
+ *
+ * 【⚠️ 为什么需要它：`assertNumber` 只校验了目标字段】
+ *
+ * 老实现只对 `oldVal`（路径指向的现有值）做校验，
+ * 操作数 `p.value` 直接 `as number` 强转后参与运算。实测：
+ * ```js
+ * applyPatch({ dmg: 10 }, { op: 'add', path: 'dmg', value: NaN })       // → NaN
+ * applyPatch({ dmg: 10 }, { op: 'mul', path: 'dmg', value: Infinity })  // → Infinity
+ * applyPatch({ dmg: 10 }, { op: 'add', path: 'dmg', value: 'abc' })     // → "10abc" !!
+ * ```
+ *
+ * 前两条把伤害变成不可用的非有限值；
+ * 第三条更隐蔽——`number + string` 在 JS 里是**字符串拼接**，
+ * 字段类型从 number 悄悄变成了 string，
+ * 后续 `dmg * 2` 得 NaN（`"10abc" * 2`），
+ * 而错误现场离这条补丁已经很远了。
+ *
+ * 补丁值来自遗物/词条配置表，属于外部输入，必须守。
+ */
+function assertOperand(p: Patch, op: string): void {
+  const v = p.value;
+  if (typeof v !== 'number' || !Number.isFinite(v)) {
+    throw new Error(
+      `${op} 要求 value 是有限数字，"${p.path}" 的 value 实际是 ` +
+        `${JSON.stringify(v)}（${typeof v}）`
+    );
   }
 }
 
