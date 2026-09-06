@@ -248,6 +248,43 @@ Cocos 靠 `.meta` 里的 uuid 追踪资源，只复制 `.ts` 会导致资源引�
 > 会出现**编译通过、真机崩溃**。
 >
 > 所以正确做法是 **`lib` 与 `target` 一起抬**，或确认目标平台支持 ES2019。
+
+### 4.1.2 ⚠️ 复制到 Cocos 项目后：`strict: false` 会让「判别联合」收窄失效
+
+本库自带 `tsconfig.json` 是 `strict: true`，而 **Cocos 生成的 tsconfig 默认 `strict: false`**。
+这会让一类代码在库里编译全绿、拷进项目后报错——即"判别联合"（discriminated union）：
+
+```typescript
+type R = { ok: true } | { ok: false; reason: 'too-few' | 'not-all-ready' };
+
+const r = canStart();
+if (r.ok) return null;      // ← strict:false 下**不收窄**
+return r.reason;            // ← 报 TS2339: Property 'reason' does not exist
+```
+
+**根因**：布尔字面量判别式的收窄**依赖 `strictNullChecks`**。关闭后 TS 认为
+`r` 仍可能是 `{ ok: true }`，于是访问只存在于失败分支的字段时报错。
+
+实测（TypeScript 5.9.3）：
+
+| 写法 | `strict:true` | `strict:false` |
+|---|---|---|
+| `if (r.ok) return null;` | ✅ 收窄 | ❌ 不收窄（TS2339 + TS2322） |
+| `if (!('reason' in r)) return null;` | ✅ 收窄 | ✅ 收窄 |
+
+**`in` 运算符收窄是结构判定，不依赖 `strictNullChecks`**，两种模式下都稳。
+
+本库源码已全部改用 `in` 收窄（`matchmaking/Lobby.ts` 是最后一处，2026-09-06 修），
+因此在默认配置的 Cocos 项目里应当零报错。若你自己的代码里用了本库返回的
+`{ ok: true } | { ok: false; ... }`，**请照此写法**，不要依赖 `r.ok` 做收窄。
+
+> 💡 **为什么不直接要求 `strict: true`？**
+> 因为 rule7 的判据是"复制过去改 0 行"。要求使用方改配置，等于把成本转嫁给使用方。
+> 库自己去适配目标环境才对。
+>
+> 若你确实切到了 `strict: true`，反而会暴露另一类问题：真实 Cocos 引擎的
+> `EventTouch.getID()` 声明为 `number | null`，而本库自带的 `typings/cc.d.ts`
+> 是最小桩、声明为 `number`。本库已对三处调用做了判空，两套声明下都能编译。
 > 只抬一个的代价是"本地一切正常，上线白屏"。
 
 ### 4.2 一个完整例子：从摇杆到伤害
