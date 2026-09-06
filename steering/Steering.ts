@@ -75,6 +75,7 @@
  * ```
  */
 import { safeDt } from '../_core/math';
+import { needPositive } from '../_core/guard';
 export interface IVec2 {
   x: number;
   y: number;
@@ -112,7 +113,21 @@ export function createAgent(
     force: v2(),
     maxSpeed: opts.maxSpeed ?? 100,
     maxForce: opts.maxForce ?? 200,
-    mass: opts.mass ?? 1,
+    /**
+     * 【⚠️ mass 必须为正的有限数】
+     *
+     * 实测：`createAgent(v2(), v2(), { mass: 0 })` 后再 `integrate()`，
+     * 位置与速度全部变成 **NaN**。
+     *
+     * 链路：`ax = force.x / mass` → `0/0 = NaN` 或 `x/0 = Infinity`，
+     * 一旦 NaN 进入 `vel`，后续 `pos += vel * dt` 永久是 NaN。
+     * 而 `integrate` 里的 `speed > limit && speed > 1e-9` 对 NaN 恒为 false，
+     * **限速也救不回来**——NaN 不可恢复，只能重置整个 agent。
+     *
+     * 表现为"某个单位突然消失"（渲染层拿到 NaN 坐标不绘制），
+     * 且不报错。质量常被用来表达"无敌/不可推动"，0 是很容易写出的值。
+     */
+    mass: needPositive(opts.mass ?? 1, 'agent.mass'),
     radius: opts.radius ?? 1,
   };
 }
