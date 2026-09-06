@@ -34,6 +34,8 @@
  * 【无引擎依赖】
  */
 
+import { assertSafePath } from '../_core/guard';
+
 // ==================== 类型 ====================
 
 /** 补丁运算 */
@@ -382,6 +384,22 @@ export function applyPatch(target: Record<string, unknown>, p: Patch): void {
   if (parts.length === 0) {
     throw new Error('path 为空');
   }
+
+  /**
+   * 【⚠️ 必须在写入前拦下原型污染路径】
+   *
+   * 实测：
+   * ```js
+   * applyPatch({}, { op: 'set', path: '__proto__.skillPolluted', value: true });
+   * ({}).skillPolluted // → true
+   * ```
+   * 这不是"改坏了 target"，而是**整个进程的所有对象都被污染**——
+   * 之后任何 `if (obj.skillPolluted)` 都会为真，
+   * 且污染不可逆、无报错、排查时没人会想到源头在一个补丁路径字符串里。
+   *
+   * 补丁路径来自遗物/词条配置表，属于**外部输入**，必须守。
+   */
+  assertSafePath(parts, p.path);
 
   const last = parts[parts.length - 1];
   let cur: Record<string, unknown> = target;
