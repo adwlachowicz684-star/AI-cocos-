@@ -92,8 +92,28 @@ export class EventBus<Events extends object> {
     return () => {
       if (!active) return;
       active = false; // 幂等：重复调用不会误删别人的监听器
+
+      // 从**当初注册时的那个 Set**里摘除，保证 fn 的引用一定被释放
       set!.delete(fn as Handler<never>);
-      if (set!.size === 0) this._map.delete(name);
+
+      /**
+       * 【⚠️ 只有当这个 Set 仍然是该事件的当前监听器集合时，才允许摘掉整条】
+       *
+       * 少了 `=== set` 这层校验会误伤无辜：
+       *
+       * ```
+       * const off1 = bus.on('a', f1);
+       * bus.off('a');              // 整条删掉，set1 变成孤儿
+       * bus.on('a', f2);           // 新建 set2，_map['a'] = set2
+       * off1();                    // set1.delete(f1) → set1 空了
+       *                            // → 老实现继续执行 _map.delete('a')，把 set2 一起干掉
+       * bus.emit('a', ...);        // f2 静默不执行
+       * ```
+       *
+       * 症状是"注册之后监听器莫名其妙不触发"，
+       * 而注册和取消隔了很远，几乎不可能联想到某个旧的 off()。
+       */
+      if (set!.size === 0 && this._map.get(name) === set) this._map.delete(name);
     };
   }
 
