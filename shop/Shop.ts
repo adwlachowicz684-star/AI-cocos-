@@ -59,6 +59,37 @@
  * 【无引擎依赖】
  */
 
+import { needCount, hasOwn } from '../_core/guard';
+import { numOr } from '../_core/math';
+
+/**
+ * 安全读取钱包余额
+ *
+ * 【⚠️ 为什么不能直接 `wallet[currency] ?? 0`】
+ *
+ * `??` 只挡 null / undefined，**挡不住原型链**。实测：
+ * ```js
+ * shop.buy('potion', 1, {}, 'toString')
+ * // → { ok: true }，空钱包买成了，且钱包被写入 toString: NaN
+ * ```
+ * 因为 `wallet['toString']` 取到的是原型上的**函数**，
+ * 不是 undefined，于是 `have = function`；
+ * `function < 10` 是 NaN 比较、恒为 false → **资金检查被整个绕过**。
+ *
+ * 这个漏洞的杀伤力在于：currency 通常来自配置表或网络包（外部输入），
+ * 而写回 `wallet[currency]` 时又会把 `toString` 变成自有属性，
+ * 把污染固化进存档。
+ *
+ * 【为什么非有限值按 0 处理，而不是抛错】
+ * 原语义就是 `?? 0`（"没有这个币种 = 没有钱"）。
+ * 这里只是把"没有"扩展成"没有或不可用"，保持一致；
+ * 数量这类**调用方写错**的参数才走 `needCount` 抛错。
+ */
+function readWallet(wallet: Record<string, number>, currency: string): number {
+  if (!hasOwn(wallet, currency)) return 0;
+  return numOr(wallet[currency], 0);
+}
+
 export type TradeSide = 'buy' | 'sell';
 
 export interface ShopItem {
@@ -287,6 +318,22 @@ export class Shop {
    * 【原子性】要么全买，要么不买。不存在"买了 3 个但只有 2 个的钱"。
    */
   buy(itemId: string, quantity: number, wallet: Record<string, number>, currency = 'gold'): TradeResult {
+    /**
+     * 【⚠️ quantity 必须是非负有限整数】
+     *
+     * 老实现没有任何数量校验，实测：
+     * ```js
+     * shop.buy('potion', -2, { gold: 0 })
+     * // → { ok: true, total: -20 }，钱包 0 → 20，库存 5 → 7
+     * ```
+     * 即**空手套白狼**：买 -2 个，反而倒赚 20 金币并凭空多出 2 件库存。
+     * `stock.count < quantity`（5 < -2）为假，连库存检查都被绕过了。
+     *
+     * Infinity 同样要拦——`total = unit * Infinity` 会让扣款变 Infinity，
+     * 后续所有算术被污染。
+     */
+    const qty = needCount(quantity, 'quantity');
+
     const item = this._items.get(itemId);
     if (!item) return { ok: false, reason: 'unknown_item' };
 
@@ -294,13 +341,13 @@ export class Shop {
     if (!stock) return { ok: false, reason: 'out_of_stock', available: 0 };
 
     // 库存检查（-1 = 无限）
-    if (stock.count >= 0 && stock.count < quantity) {
+    if (stock.count >= 0 && stock.count < qty) {
       return { ok: false, reason: 'out_of_stock', available: stock.count };
     }
 
-    const unit = this.priceOf(itemId, 'buy', quantity);
-    const total = unit * quantity;
-    const have = wallet[currency] ?? 0;
+    const unit = this.priceOf(itemId, 'buy', qty);
+    const total = unit * qty;
+    const have = readWallet(wallet, currency);
 
     if (have < total) {
       return { ok: false, reason: 'insufficient_funds', need: total, have };
@@ -310,9 +357,9 @@ export class Shop {
     wallet[currency] = have - total;
 
     // 扣库存
-    if (stock.count > 0) stock.count -= quantity;
+    if (stock.count > 0) stock.count -= qty;
 
-    this._log.push({ itemId, side: 'buy', qty: quantity, total, currency });
+    this._log.push({ itemId, side: 'buy', qty, total, currency });
     return { ok: true, unitPrice: unit, total };
   }
 
@@ -322,20 +369,22 @@ export class Shop {
    * @param wallet 钱包（会**增加**钱）
    */
   sell(itemId: string, quantity: number, wallet: Record<string, number>, currency = 'gold'): TradeResult {
+    const qty = needCount(quantity, 'quantity');
+
     const item = this._items.get(itemId);
     if (!item) return { ok: false, reason: 'unknown_item' };
     if (item.sellable === false) return { ok: false, reason: 'cannot_sell' };
 
-    const unit = this.priceOf(itemId, 'sell', quantity);
-    const total = unit * quantity;
+    const unit = this.priceOf(itemId, 'sell', qty);
+    const total = unit * qty;
 
-    wallet[currency] = (wallet[currency] ?? 0) + total;
+    wallet[currency] = readWallet(wallet, currency) + total;
 
     // 卖出的东西进库存（可以买回）
     const stock = this._stock.get(itemId);
-    if (stock && stock.count >= 0) stock.count += quantity;
+    if (stock && stock.count >= 0) stock.count += qty;
 
-    this._log.push({ itemId, side: 'sell', qty: quantity, total, currency });
+    this._log.push({ itemId, side: 'sell', qty, total, currency });
     return { ok: true, unitPrice: unit, total };
   }
 
