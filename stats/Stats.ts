@@ -92,7 +92,7 @@ export interface StatsOptions {
 // ==================== 工具 ====================
 
 /** 聚合方式的单位元 */
-import { hasOwn } from '../_core/guard';
+import { hasOwn, needFinite } from '../_core/guard';
 
 const IDENTITY: Readonly<Record<Aggregation, number>> = {
   sum: 0,
@@ -110,10 +110,33 @@ const VALID_AGG: readonly Aggregation[] = ['sum', 'max', 'min', 'last', 'count']
  * 【⚠️ 标签必须排序】
  * `{weapon:'sword', floor:'3'}` 和 `{floor:'3', weapon:'sword'}`
  * 是同一组合。不排序会存成两条，统计结果翻倍。
+ *
+ * 【⚠️ 拼接格式必须转义，否则会碰撞】
+ *
+ * 老实现是裸拼接 `` `${id}|${k}=${v},...` ``，实测碰撞：
+ * ```js
+ * makeKey('hit', { a: '1,b=2' })  // → 'hit|a=1,b=2'
+ * makeKey('hit', { a: '1', b: '2' }) // → 'hit|a=1,b=2'   ← 同一个 key！
+ * ```
+ * 因为标签值里可以合法出现 `,` `=` `|` 这三个分隔符——
+ * 武器名、关卡描述、玩家输入的自定义标签都可能有。
+ *
+ * 后果是**两个不同分组被合并统计**：A 组的数据算进了 B 组，
+ * 且因为总数没变，没有任何"少了一条"的迹象，
+ * 表现为"某个分组的数字莫名偏大"，几乎无法归因。
+ *
+ * 【为什么用 JSON 而不是自己写转义】
+ * 自己写转义要处理"转义符本身也要转义"，容易漏；
+ * `JSON.stringify` 对字符串的分隔符有完整转义，且已排序后顺序稳定。
+ *
+ * 【性能】
+ * 比裸拼接慢，但 record/get 是**事件驱动**（击杀、拾取），
+ * 不是每帧几千次的热路径。正确性优先。
  */
 export function makeKey(id: string, tags: Tags): string {
   const keys = Object.keys(tags).sort();
-  return `${id}|${keys.map((k) => `${k}=${tags[k]}`).join(',')}`;
+  if (keys.length === 0) return `${id}|`;
+  return `${id}|${JSON.stringify(keys.map((k) => [k, String(tags[k])]))}`;
 }
 
 // ==================== 实现 ====================
@@ -142,14 +165,31 @@ export class Stats {
 
   // ==================== 记录 ====================
 
-  /** 记录一次（按聚合方式处理） */
+  /**
+   * 记录一次（按聚合方式处理）
+   *
+   * 【⚠️ value 必须是有限数值】
+   *
+   * 实测：`record('hit', NaN)` 后 `get('hit')` 返回 NaN，
+   * 而 `display('hit')` 把它显示成 **0**。
+   * 坏数据就这样被展示层静默藏掉了——
+   * "统计面板显示 0"看起来完全正常，没人会想到上游算出了 NaN。
+   *
+   * 注意 `display()` 本身的设计是对的：
+   * max 聚合无记录时是 -Infinity（数学上正确的单位元），
+   * 直接渲染会显示 "-∞"，所以展示层转成 0。
+   * **但 NaN 和"合法单位元"是两回事**——前者是数据损坏，后者是空集。
+   *
+   * 所以在入口拦住 NaN，而不是让展示层一刀切。
+   */
   record(id: string, value = 1, tags: Tags = {}): void {
     const def = this._require(id);
     this._validateTags(def, tags);
+    const v = needFinite(value, `Stats.record(${id}).value`);
 
     const key = makeKey(id, tags);
     const cur = this._values.get(key) ?? IDENTITY[def.agg];
-    const next = this._apply(def.agg, cur, value);
+    const next = this._apply(def.agg, cur, v);
 
     this._values.set(key, next);
     this._onChange?.(id, next);
@@ -164,8 +204,9 @@ export class Stats {
   set(id: string, value: number, tags: Tags = {}): void {
     const def = this._require(id);
     this._validateTags(def, tags);
-    this._values.set(makeKey(id, tags), value);
-    this._onChange?.(id, value);
+    const v = needFinite(value, `Stats.set(${id}).value`);
+    this._values.set(makeKey(id, tags), v);
+    this._onChange?.(id, v);
   }
 
   // ==================== 查询 ====================
@@ -423,24 +464,46 @@ export class Stats {
 // ==================== 内部工具 ====================
 
 /** 从 "a=1,b=2" 里取出指定 tag 的值 */
+/**
+ * 从 makeKey 产出的分组串里取出某个标签的值
+ *
+ * 【⚠️ 解析必须与 makeKey 的编码格式严格对应】
+ *
+ * 老实现按 `a=1,b=2` 切分。makeKey 改成 JSON 编码后，
+ * 若不同步改这里，`byTag` / `tagCombos` 会**静默返回空结果**——
+ * 不是报错，而是"汇总出来什么都没有"。
+ *
+ * 这正是"编码与解码分离"的典型风险：
+ * 改编码时编译器不会提醒你还有个解码函数。
+ * 所以这里直接复用 `parseTags`，不再各自手写一遍解析。
+ */
 function matchTag(part: string, tag: string): string | null {
   if (part === '') return null;
-  for (const seg of part.split(',')) {
-    const i = seg.indexOf('=');
-    if (i < 0) continue;
-    if (seg.slice(0, i) === tag) return seg.slice(i + 1);
-  }
-  return null;
+  const v = parseTags(part)[tag];
+  return v === undefined ? null : v;
 }
 
-/** 解析 "a=1,b=2" 成对象 */
+/**
+ * 解析 makeKey 产出的分组串（`[["a","1"],["b","2"]]`）成对象
+ *
+ * 【为什么容错返回 {} 而不是抛错】
+ * 调用方（`byTag` / `tagCombos`）是遍历所有的 key，
+ * 其中可能有历史遗留或外部写入的异常格式。
+ * 汇总场景下跳过一条坏数据比整体失败更合理。
+ */
 function parseTags(part: string): Tags {
   const out: Record<string, string> = {};
   if (part === '') return out;
-  for (const seg of part.split(',')) {
-    const i = seg.indexOf('=');
-    if (i < 0) continue;
-    out[seg.slice(0, i)] = seg.slice(i + 1);
+  try {
+    const arr = JSON.parse(part) as unknown;
+    if (!Array.isArray(arr)) return out;
+    for (const pair of arr) {
+      if (Array.isArray(pair) && pair.length >= 2) {
+        out[String(pair[0])] = String(pair[1]);
+      }
+    }
+  } catch {
+    return out;
   }
   return out;
 }
