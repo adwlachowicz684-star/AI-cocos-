@@ -279,7 +279,29 @@ export class Lobby {
   /** 开局失败的具体原因（UI 提示用） */
   startBlockReason(): string | null {
     const r = this.canStart();
-    if (r.ok) return null;
+    /**
+     * 【为什么用 `'reason' in r` 而不是 `r.ok` 做收窄】
+     *
+     * 两种写法在 `strictNullChecks: true` 下等价，但在 **false**（Cocos 生成
+     * 的 tsconfig 默认是 false）下只有前者能收窄：
+     *
+     * | 写法 | strict:true | strict:false |
+     * |---|---|---|
+     * | `if (r.ok) return null;` | ✅ 收窄 | ❌ **不收窄**，r 仍是全量联合 |
+     * | `if (!('reason' in r)) return null;` | ✅ 收窄 | ✅ 收窄 |
+     *
+     * 原因是布尔字面量判别式的收窄依赖 strictNullChecks；
+     * `in` 运算符收窄是结构判定，不依赖它。
+     *
+     * 本库自带 tsconfig 是 `strict: true`，所以这个问题在自己的构建里看不到，
+     * **只有被拷进 Cocos 默认项目（strict:false）时才暴露**——
+     * 而那正是 rule7「复制过去改 0 行」要覆盖的场景。
+     *
+     * 实测（TypeScript 5.9.3）：strict:false 下原写法报
+     * TS2339 / TS2322 共 3 条，改后全清，且 default 分支的
+     * `const never: never` 穷尽检查仍然生效。
+     */
+    if (!('reason' in r)) return null;
     switch (r.reason) {
       case 'too-few':
         return `还需要 ${this._minPlayers - this._players.length} 人`;
