@@ -1,0 +1,57 @@
+{
+  "name": "cocos-kit",
+  "version": "0.1.0",
+  "description": "Cocos 通用插件库：零业务依赖、可随时导入与卸载的通用功能集合",
+  "main": "README.md",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check:deps": "node scripts/check-deps.js",
+    "probe": "npm run build && node scripts/probe-connectivity.js",
+    "test": "npm run build && node .build/tests/run.js",
+    "verify": "bash verify.sh",
+    "check:inventory": "node scripts/gen-inventory.js --check",
+    "gen:inventory": "node scripts/gen-inventory.js --write",
+    "gen:mindmap": "python3 scripts/gen-mindmap.py",
+    "example": "npm run build && node .build/examples/basic-usage.js",
+    "example:batch10": "npm run build && node .build/examples/batch10-usage.js",
+    "example:batch11": "npm run build && node .build/examples/batch11-usage.js",
+    "example:batch12": "npm run build && node .build/examples/batch12-usage.js",
+    "example:batch13": "npm run build && node .build/examples/batch13-usage.js",
+    "example:batch14": "npm run build && node .build/examples/batch14-usage.js",
+    "example:batch15": "npm run build && node .build/examples/batch15-usage.js",
+    "example:batch17": "npm run build && node .build/examples/batch17-usage.js",
+    "example:batch18": "npm run build && node .build/examples/batch18-usage.js",
+    "example:batch19": "npm run build && node .build/examples/batch19-usage.js",
+    "example:batch20": "npm run build && node .build/examples/batch20-usage.js",
+    "example:batch21": "npm run build && node .build/examples/batch21-usage.js",
+    "example:basic": "npm run build && node .build/examples/basic-usage.js",
+    "example:batch3": "npm run build && node .build/examples/batch3-usage.js",
+    "example:batch4": "npm run build && node .build/examples/batch4-usage.js",
+    "example:batch5": "npm run build && node .build/examples/batch5-usage.js",
+    "example:batch6": "npm run build && node .build/examples/batch6-usage.js",
+    "example:batch7": "npm run build && node .build/examples/batch7-usage.js",
+    "example:batch8": "npm run build && node .build/examples/batch8-usage.js",
+    "example:batch9": "npm run build && node .build/examples/batch9-usage.js",
+    "example:p0": "npm run build && node .build/examples/p0-usage.js",
+    "typecheck": "tsc --noEmit",
+    "demo": "npm run build && node .build/examples/demo-moveloop.js",
+    "example:demo": "npm run build && node .build/examples/demo-moveloop.js",
+    "check:docrefs": "python3 scripts/check-doc-refs.py",
+    "check:measured": "python3 scripts/check-measured-numbers.py"
+  },
+  "keywords": [
+    "cocos",
+    "cocos-creator",
+    "game",
+    "plugin",
+    "toolkit",
+    "roguelike"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "typescript": "^5.9.0"
+  },
+  "engines": {
+    "cocos-creator": ">=3.6"
+  }
+}

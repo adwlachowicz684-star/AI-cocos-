@@ -1,0 +1,1861 @@
+{
+  "name": "cocos-kit",
+  "version": "0.39.0",
+  "description": "Cocos 通用插件库：零业务依赖、可随时导入与卸载的通用功能集合",
+  "engine": "cocos-creator >= 3.6",
+  "language": "typescript",
+  "principle": {
+    "rule1": "零业务依赖：插件里不得出现任何游戏专属概念",
+    "rule2": "依赖注入：需要外部对象时由调用方传入，插件内部不得去「找」",
+    "rule3": "单一职责：一个插件只解决一个问题",
+    "rule4": "配置驱动：所有可调参数进配置对象",
+    "rule5": "可卸载：必须提供 destroy()，卸载后不留残留",
+    "rule6": "禁止横向依赖：插件之间不得互相 import（_core 除外）",
+    "rule7": "每个插件自带 README + 测试 + 示例",
+    "judge": "把这个插件的文件夹复制到另一个 Cocos 项目，需要改几行？答案是 0 才算合格"
+  },
+  "_core_policy": {
+    "description": "_core 是 rule6 的唯一例外，准入条件极严",
+    "requirements": [
+      "无任何状态",
+      "无副作用",
+      "不需要配置",
+      "不 import 引擎或业务模块"
+    ],
+    "note": "一旦某个工具需要状态或配置，它就应该成为独立插件"
+  },
+  "plugins": [
+    {
+      "name": "event-bus",
+      "path": "event-bus/EventBus.ts",
+      "maturity": "stable",
+      "purpose": "类型安全的发布订阅",
+      "depends": [],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "地基",
+      "layer": "L1",
+      "dir": "event-bus"
+    },
+    {
+      "name": "pool",
+      "path": "pool/Pool.ts",
+      "maturity": "stable",
+      "purpose": "泛型对象池（三个注入钩子 + 泄漏追踪）",
+      "depends": [],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "地基",
+      "layer": "L1",
+      "dir": "pool"
+    },
+    {
+      "name": "rng",
+      "path": "rng/RNG.ts, rng/Seed.ts",
+      "maturity": "stable",
+      "purpose": "可复现随机数 + 人类可读种子编码",
+      "depends": [],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "地基",
+      "layer": "L1",
+      "dir": "rng"
+    },
+    {
+      "name": "damage-pipeline",
+      "path": "damage-pipeline/",
+      "maturity": "beta",
+      "purpose": "分阶段伤害计算 + 数值修正框架 + 伤害契约",
+      "depends": [
+        "_core/math"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "数值与战斗",
+      "layer": "L2",
+      "dir": "damage-pipeline"
+    },
+    {
+      "name": "skill-player",
+      "path": "skill-player/",
+      "maturity": "beta",
+      "purpose": "时间轴驱动的技能播放器 + 冷却",
+      "depends": [
+        "_core/math",
+        "_core/types"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "数值与战斗",
+      "layer": "L2",
+      "dir": "skill-player"
+    },
+    {
+      "name": "joystick-mover",
+      "path": "joystick-mover/",
+      "maturity": "beta",
+      "purpose": "轮盘移动（Core 纯逻辑 + Mover 为 Cocos 薄适配层）",
+      "depends": [
+        "_core/math",
+        "_core/types"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "engineCoupled": true,
+      "domain": "移动与碰撞",
+      "layer": "L3",
+      "dir": "joystick-mover"
+    },
+    {
+      "name": "logger",
+      "path": "logger/",
+      "maturity": "beta",
+      "purpose": "分级日志 + 快速失败断言（环形缓冲保留崩溃现场）",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "地基",
+      "layer": "L1",
+      "dir": "logger"
+    },
+    {
+      "name": "scheduler",
+      "path": "scheduler/",
+      "maturity": "beta",
+      "purpose": "统一时间源 —— 真暂停/慢动作/顿帧的唯一实现路径",
+      "depends": [
+        "_core/math"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "地基",
+      "layer": "L1",
+      "dir": "scheduler"
+    },
+    {
+      "name": "config",
+      "path": "config/",
+      "maturity": "beta",
+      "purpose": "配置加载、索引、全量校验、热重载",
+      "depends": [],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "地基",
+      "layer": "L1",
+      "dir": "config"
+    },
+    {
+      "name": "input",
+      "path": "input/",
+      "maturity": "beta",
+      "depends": [
+        "_core/math",
+        "_core/types"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "desc": "统一输入抽象（键鼠/触摸/手柄→动作名）+ 输入缓冲/搓招队列/土狼时间",
+      "cn": "输入",
+      "domain": "地基",
+      "purpose": "统一输入抽象：键鼠 / 触摸 / 手柄 →「动作名 → 状态」",
+      "layer": "L1",
+      "dir": "input"
+    },
+    {
+      "name": "loot",
+      "path": "loot/",
+      "maturity": "beta",
+      "purpose": "PRD / ShuffleBag / WeightedTable / LootTable / Chest（随机与掉落）",
+      "depends": [
+        "_core/types"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "内容与掉落",
+      "layer": "L2",
+      "dir": "loot"
+    },
+    {
+      "name": "fsm",
+      "path": "fsm/",
+      "maturity": "beta",
+      "purpose": "有限状态机（显式转换 + 不可达检测）",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "AI与感知",
+      "layer": "L2",
+      "dir": "fsm"
+    },
+    {
+      "name": "behavior-tree",
+      "path": "behavior-tree/",
+      "maturity": "beta",
+      "purpose": "行为树（组合/装饰/叶子节点 + 黑板）",
+      "depends": [
+        "_core/types"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "AI与感知",
+      "layer": "L2",
+      "dir": "behavior-tree"
+    },
+    {
+      "name": "buff",
+      "path": "buff/",
+      "maturity": "beta",
+      "purpose": "Buff 生命周期（叠层/tick/驱散/存档）",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "数值与战斗",
+      "layer": "L2",
+      "dir": "buff"
+    },
+    {
+      "name": "curve",
+      "path": "curve/",
+      "maturity": "beta",
+      "purpose": "关键帧曲线（线性/平滑/阶梯）",
+      "depends": [],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "通用工具",
+      "layer": "L1",
+      "dir": "curve"
+    },
+    {
+      "name": "result",
+      "path": "result/",
+      "maturity": "beta",
+      "purpose": "显式错误处理（Result 类型）",
+      "depends": [],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "地基",
+      "layer": "L1",
+      "dir": "result"
+    },
+    {
+      "name": "signal",
+      "path": "signal/",
+      "maturity": "beta",
+      "purpose": "轻量信号（类型安全、可持有）",
+      "depends": [],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "地基",
+      "layer": "L1",
+      "dir": "signal"
+    },
+    {
+      "name": "save",
+      "path": "save/",
+      "maturity": "beta",
+      "purpose": "存档（版本迁移 + 原子写 + 校验和）",
+      "depends": [],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "通用工具",
+      "layer": "L1",
+      "dir": "save"
+    },
+    {
+      "name": "number-roller",
+      "path": "number-roller/",
+      "maturity": "beta",
+      "purpose": "数字滚动核心逻辑（渲染层需自己写）",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "地基",
+      "layer": "L1",
+      "dir": "number-roller"
+    },
+    {
+      "name": "pathfinding",
+      "path": "pathfinding/",
+      "maturity": "beta",
+      "purpose": "网格 A* + 路径平滑",
+      "depends": [],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "算法与地图",
+      "layer": "L2",
+      "dir": "pathfinding"
+    },
+    {
+      "name": "spatial",
+      "path": "spatial/",
+      "maturity": "beta",
+      "purpose": "空间哈希（范围查询加速）",
+      "depends": [],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "通用工具",
+      "layer": "L2",
+      "dir": "spatial"
+    },
+    {
+      "name": "noise",
+      "path": "noise/",
+      "maturity": "beta",
+      "purpose": "确定性噪声（Value + FBM + Ridged）",
+      "depends": [],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "通用工具",
+      "layer": "L1",
+      "dir": "noise"
+    },
+    {
+      "name": "condition",
+      "path": "condition/",
+      "maturity": "beta",
+      "purpose": "条件引擎（成就/任务/解锁）",
+      "depends": [],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "通用工具",
+      "layer": "L1",
+      "dir": "condition"
+    },
+    {
+      "name": "tween",
+      "path": "tween/",
+      "maturity": "beta",
+      "purpose": "补间动画（纯逻辑，不持有目标）",
+      "depends": [
+        "_core/math"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "通用工具",
+      "layer": "L1",
+      "dir": "tween"
+    },
+    {
+      "name": "di",
+      "path": "di/",
+      "maturity": "beta",
+      "purpose": "轻量依赖注入容器（循环依赖检测 + fork）",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "地基",
+      "layer": "L1",
+      "dir": "di"
+    },
+    {
+      "name": "scheduling",
+      "path": "scheduling/",
+      "maturity": "beta",
+      "purpose": "分帧调度器（按时间预算切分重活）",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "地基",
+      "layer": "L1",
+      "dir": "scheduling"
+    },
+    {
+      "name": "inventory",
+      "path": "inventory/",
+      "maturity": "beta",
+      "purpose": "背包与物品栏（堆叠/交换/拆分/整理）",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "玩法框架",
+      "layer": "L2",
+      "dir": "inventory"
+    },
+    {
+      "name": "card",
+      "path": "card/",
+      "maturity": "beta",
+      "purpose": "牌库/手牌/弃牌堆（Deck）",
+      "depends": [
+        "_core/types"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "玩法框架",
+      "layer": "L2",
+      "dir": "card"
+    },
+    {
+      "name": "dialogue",
+      "path": "dialogue/",
+      "maturity": "beta",
+      "purpose": "对话节点图（条件分支 + 完整性校验）",
+      "depends": [],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "玩法框架",
+      "layer": "L2",
+      "dir": "dialogue"
+    },
+    {
+      "name": "expression",
+      "path": "expression/",
+      "maturity": "beta",
+      "purpose": "表达式求值器（配置里写公式，非 eval）",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "通用工具",
+      "layer": "L1",
+      "dir": "expression"
+    },
+    {
+      "name": "snapshot",
+      "path": "snapshot/",
+      "maturity": "beta",
+      "purpose": "快照/diff/补丁/撤销栈",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "通用工具",
+      "layer": "L1",
+      "dir": "snapshot"
+    },
+    {
+      "name": "replay",
+      "path": "replay/",
+      "maturity": "beta",
+      "purpose": "输入录制与回放（deltaOnly，体积极小）",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "进度与统计",
+      "layer": "L2",
+      "dir": "replay"
+    },
+    {
+      "name": "i18n",
+      "path": "i18n/",
+      "maturity": "beta",
+      "purpose": "本地化（复数/插值/回退/覆盖率）",
+      "depends": [],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "通用工具",
+      "layer": "L1",
+      "dir": "i18n"
+    },
+    {
+      "name": "turn",
+      "path": "turn/",
+      "maturity": "beta",
+      "purpose": "回合制系统（先攻/行动点/死亡跳过）",
+      "depends": [],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "玩法框架",
+      "layer": "L2",
+      "dir": "turn"
+    },
+    {
+      "name": "grid",
+      "path": "grid/",
+      "maturity": "beta",
+      "purpose": "二维网格 + 建造放置 + 六边形坐标",
+      "depends": [
+        "_core/types"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "算法与地图",
+      "layer": "L1",
+      "dir": "grid"
+    },
+    {
+      "name": "quest",
+      "path": "quest/",
+      "maturity": "beta",
+      "purpose": "任务系统（目标追踪/任务链/防重复领奖）",
+      "depends": [],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "进度与统计",
+      "layer": "L2",
+      "dir": "quest"
+    },
+    {
+      "name": "shop",
+      "path": "shop/",
+      "maturity": "beta",
+      "purpose": "商店与经济（折扣/多货币/库存）",
+      "depends": [],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "内容与掉落",
+      "layer": "L2",
+      "dir": "shop"
+    },
+    {
+      "name": "craft",
+      "path": "craft/",
+      "maturity": "beta",
+      "purpose": "合成系统（嵌套材料树/原子性/品质随机）",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "内容与掉落",
+      "layer": "L2",
+      "dir": "craft"
+    },
+    {
+      "name": "attribute",
+      "path": "attribute/AttributeSet.ts",
+      "maturity": "beta",
+      "purpose": "属性容器（基础值 + add/mul/override 修正器 + 缓存）",
+      "depends": [],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "数值与战斗",
+      "layer": "L2",
+      "dir": "attribute"
+    },
+    {
+      "name": "hitbox",
+      "path": "hitbox/Hitbox.ts",
+      "maturity": "beta",
+      "purpose": "判定形状与重叠检测（circle/rect/sector/capsule + 空间哈希）",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "数值与战斗",
+      "layer": "L2",
+      "dir": "hitbox"
+    },
+    {
+      "name": "projectile",
+      "path": "projectile/Projectile.ts",
+      "maturity": "beta",
+      "purpose": "弹道系统（5 种运动模式，碰撞通过接口注入）",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "数值与战斗",
+      "layer": "L2",
+      "dir": "projectile"
+    },
+    {
+      "name": "indicator",
+      "path": "indicator/SkillIndicator.ts",
+      "maturity": "beta",
+      "purpose": "技能指示器（只算参数不画，与判定共用形状）",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "数值与战斗",
+      "layer": "L2",
+      "dir": "indicator"
+    },
+    {
+      "name": "telegraph",
+      "path": "telegraph/Telegraph.ts",
+      "maturity": "beta",
+      "purpose": "攻击预警（windup/active/recover，判定位置在 active 锁定）",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "数值与战斗",
+      "layer": "L2",
+      "dir": "telegraph"
+    },
+    {
+      "name": "skill-caster",
+      "path": "skill-caster/SkillCaster.ts",
+      "maturity": "beta",
+      "purpose": "技能释放编排器（★用户点名，全部能力注入，零插件依赖）",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "数值与战斗",
+      "layer": "L2",
+      "dir": "skill-caster"
+    },
+    {
+      "name": "dash",
+      "path": "dash/DashController.ts",
+      "maturity": "beta",
+      "purpose": "冲刺（衰减曲线 + 无敌帧 + 取消后摇）",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "移动与碰撞",
+      "layer": "L2",
+      "dir": "dash"
+    },
+    {
+      "name": "_core",
+      "path": "_core/math.ts",
+      "maturity": "stable",
+      "purpose": "第 0 层：纯函数（clamp / lerp / smoothDamp / Easing 30+ / 角度）",
+      "depends": [],
+      "hasTest": true,
+      "hasDemo": true,
+      "layer": "L0",
+      "domain": "基础设施",
+      "dir": "_core"
+    },
+    {
+      "name": "ds",
+      "path": "ds/DataStructures.ts",
+      "maturity": "stable",
+      "purpose": "第 0 层：数据结构（BinaryHeap / LazyHeap / DisjointSet / QuadTree / SpatialHash）",
+      "depends": [],
+      "hasTest": true,
+      "hasDemo": true,
+      "layer": "L0",
+      "domain": "基础设施",
+      "dir": "ds"
+    },
+    {
+      "name": "dungeon",
+      "path": "dungeon/Dungeon.ts",
+      "maturity": "beta",
+      "purpose": "地牢生成（BSP / Room / Cellular / Maze 四种 + 死图自检）",
+      "depends": [
+        "ds"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "layer": "L2",
+      "domain": "算法与地图",
+      "dir": "dungeon"
+    },
+    {
+      "name": "fov",
+      "path": "fov/FOV.ts",
+      "maturity": "beta",
+      "purpose": "视野与战争迷雾（Shadowcasting + Raycasting）",
+      "depends": [],
+      "hasTest": true,
+      "hasDemo": true,
+      "layer": "L1",
+      "domain": "算法与地图",
+      "dir": "fov"
+    },
+    {
+      "name": "pathfind",
+      "path": "pathfind/PathFinder.ts",
+      "maturity": "beta",
+      "purpose": "寻路（A* + PathSmoother + FlowField 流场）",
+      "depends": [
+        "ds"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "layer": "L2",
+      "domain": "算法与地图",
+      "dir": "pathfind"
+    },
+    {
+      "name": "steering",
+      "path": "steering/Steering.ts",
+      "maturity": "beta",
+      "purpose": "转向行为（7 种单体 + Flock 群体 + 队形）",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "layer": "L2",
+      "domain": "算法与地图",
+      "dir": "steering"
+    },
+    {
+      "name": "room-graph",
+      "path": "room-graph/RoomGraph.ts",
+      "maturity": "beta",
+      "purpose": "房间图生成：分层DAG、路径不交叉、类型分配、路径热度分析",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "算法与地图",
+      "layer": "L2",
+      "dir": "room-graph"
+    },
+    {
+      "name": "wave-spawner",
+      "path": "wave-spawner/WaveSpawner.ts",
+      "maturity": "beta",
+      "purpose": "波次刷怪：三重超时兜底，保证永远不会卡住",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "玩法框架",
+      "layer": "L2",
+      "dir": "wave-spawner"
+    },
+    {
+      "name": "meta",
+      "path": "meta/MetaProgression.ts",
+      "maturity": "beta",
+      "purpose": "元进度（局外成长）：解锁树、循环依赖检测、效果聚合、存档容错",
+      "depends": [],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "进度与统计",
+      "layer": "L2",
+      "dir": "meta"
+    },
+    {
+      "name": "affix",
+      "path": "affix/AffixSystem.ts",
+      "maturity": "beta",
+      "purpose": "词条系统：roll、冲突组、槽位限制、聚合、配置校验",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "内容与掉落",
+      "layer": "L2",
+      "dir": "affix"
+    },
+    {
+      "name": "perception",
+      "path": "perception/Perception.ts",
+      "maturity": "beta",
+      "purpose": "感知系统：视觉/听觉/记忆/警觉度/同伴延迟警报",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "AI与感知",
+      "layer": "L2",
+      "dir": "perception"
+    },
+    {
+      "name": "attack-token",
+      "path": "attack-token/AttackToken.ts",
+      "maturity": "beta",
+      "purpose": "攻击令牌：限制同时攻击数，防围殴秒杀 + 超时兜底",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "数值与战斗",
+      "layer": "L2",
+      "dir": "attack-token"
+    },
+    {
+      "name": "bullet-pattern",
+      "path": "bullet-pattern/BulletPattern.ts",
+      "maturity": "beta",
+      "purpose": "弹幕发射器：环形/螺旋/扇形/镜像 + 序列编排",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "数值与战斗",
+      "layer": "L2",
+      "dir": "bullet-pattern"
+    },
+    {
+      "name": "element",
+      "path": "element/ElementSystem.ts",
+      "maturity": "beta",
+      "purpose": "元素反应：附着/衰减/反应/配置校验（效果由data携带）",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "数值与战斗",
+      "layer": "L2",
+      "dir": "element"
+    },
+    {
+      "name": "targeting",
+      "path": "targeting/TargetSelector.ts",
+      "maturity": "beta",
+      "purpose": "目标锁定：多评分器 + 迟滞 + 粘性 + 宽限期",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "数值与战斗",
+      "layer": "L2",
+      "dir": "targeting"
+    },
+    {
+      "name": "combo",
+      "path": "combo/ComboSystem.ts",
+      "maturity": "beta",
+      "purpose": "连招输入：前缀等待/窗口超时结算/优先级/条件",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "数值与战斗",
+      "layer": "L2",
+      "dir": "combo"
+    },
+    {
+      "name": "objective",
+      "path": "objective/ObjectiveSystem.ts",
+      "maturity": "beta",
+      "purpose": "关卡目标：5 种类型 + 前置依赖 + 循环检测",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "玩法框架",
+      "layer": "L2",
+      "dir": "objective"
+    },
+    {
+      "name": "difficulty",
+      "path": "difficulty/DifficultySystem.ts",
+      "maturity": "beta",
+      "purpose": "难度档位 + DDA 动态难度（±15% 平滑调节）",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "进度与统计",
+      "layer": "L2",
+      "dir": "difficulty"
+    },
+    {
+      "name": "gacha",
+      "path": "gacha/GachaPity.ts",
+      "maturity": "beta",
+      "purpose": "抽卡保底：软/硬保底 + 50/50 + 十连保底 + 批量模拟",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "内容与掉落",
+      "layer": "L2",
+      "dir": "gacha"
+    },
+    {
+      "name": "scoring",
+      "path": "scoring/ScoringSystem.ts",
+      "maturity": "beta",
+      "purpose": "战斗评分：方向归一/权重/曲线/评级/短板诊断",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "进度与统计",
+      "layer": "L2",
+      "dir": "scoring"
+    },
+    {
+      "name": "command",
+      "path": "command/CommandStack.ts",
+      "maturity": "beta",
+      "purpose": "命令模式 + 撤销重做（事务/合并/回滚）",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "工程与运维",
+      "layer": "L3",
+      "dir": "command"
+    },
+    {
+      "name": "debug-console",
+      "path": "debug-console/DebugConsole.ts",
+      "maturity": "beta",
+      "purpose": "运行时调试控制台（参数校验/补全/历史/模糊建议）",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "工程与运维",
+      "layer": "L3",
+      "dir": "debug-console"
+    },
+    {
+      "name": "binary",
+      "path": "binary/BinarySerializer.ts",
+      "maturity": "beta",
+      "purpose": "位级二进制序列化（schema 驱动，存档压缩 90%）",
+      "depends": [],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "通用工具",
+      "layer": "L1",
+      "dir": "binary"
+    },
+    {
+      "name": "crash",
+      "path": "crash/CrashReporter.ts",
+      "maturity": "beta",
+      "purpose": "崩溃捕获与上报（面包屑/去重/指纹/采样）",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "工程与运维",
+      "layer": "L3",
+      "dir": "crash"
+    },
+    {
+      "name": "runscope",
+      "path": "runscope/ScopedStore.ts",
+      "maturity": "beta",
+      "purpose": "局内/局外/会话三域数据隔离，越界抛错防串档",
+      "depends": [],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "进度与统计",
+      "layer": "L2",
+      "dir": "runscope"
+    },
+    {
+      "name": "setbonus",
+      "path": "setbonus/SetBonus.ts",
+      "maturity": "beta",
+      "purpose": "装备套装：N 件套、阈值叠加/仅最高档、部位去重",
+      "depends": [],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "内容与掉落",
+      "layer": "L2",
+      "dir": "setbonus"
+    },
+    {
+      "name": "daily",
+      "path": "daily/DailyChallenge.ts",
+      "maturity": "beta",
+      "purpose": "每日挑战：时区、种子雪崩、分享回填、连续打卡",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "进度与统计",
+      "layer": "L2",
+      "dir": "daily"
+    },
+    {
+      "name": "leaderboard",
+      "path": "leaderboard/Leaderboard.ts",
+      "maturity": "beta",
+      "purpose": "排行榜：并列名次、只留最好成绩、分页、快照",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "进度与统计",
+      "layer": "L2",
+      "dir": "leaderboard"
+    },
+    {
+      "name": "skill-variant",
+      "path": "skill-variant/SkillVariant.ts",
+      "maturity": "beta",
+      "purpose": "技能变体：补丁+条件+深拷贝，遗物改造技能（★用户点名「技能模块」的扩展）",
+      "depends": [],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "数值与战斗",
+      "layer": "L2",
+      "dir": "skill-variant"
+    },
+    {
+      "name": "blessing",
+      "path": "blessing/Blessing.ts",
+      "maturity": "beta",
+      "purpose": "祝福堆叠：软上限递减 + 互斥（双向）+ 三选一抽取",
+      "depends": [],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "内容与掉落",
+      "layer": "L2",
+      "dir": "blessing"
+    },
+    {
+      "name": "curse",
+      "path": "curse/Curse.ts",
+      "maturity": "beta",
+      "purpose": "诅咒：增益+代价触发时机+移除条件，canRemove/remove 一致",
+      "depends": [],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "内容与掉落",
+      "layer": "L2",
+      "dir": "curse"
+    },
+    {
+      "name": "interact",
+      "path": "interact/Interact.ts",
+      "maturity": "beta",
+      "purpose": "环境互动：目标选择（朝向分档优先）+ 条件 + 用完禁用",
+      "depends": [],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "玩法框架",
+      "layer": "L2",
+      "dir": "interact"
+    },
+    {
+      "name": "score",
+      "path": "score/ScoreSystem.ts",
+      "maturity": "beta",
+      "purpose": "有状态评分追踪器：实时累积+可配置评级+三种评级模式+StarRating",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "进度与统计",
+      "layer": "L2",
+      "dir": "score"
+    },
+    {
+      "name": "timeutil",
+      "path": "timeutil/TimeUtil.ts",
+      "cn": "时间工具",
+      "desc": "时区/日界/体力周期/服务器时间校准/倒计时",
+      "layer": "L1",
+      "domain": "通用工具",
+      "maturity": "beta",
+      "depends": [],
+      "hasTest": true,
+      "hasDemo": true,
+      "purpose": "时区 / 日界 / 体力周期 / 服务器时间校准 / 倒计时",
+      "dir": "timeutil"
+    },
+    {
+      "name": "observable",
+      "path": "observable/Observable.ts",
+      "cn": "响应式数据",
+      "desc": "ref/computed/batch，自动依赖收集",
+      "layer": "L1",
+      "domain": "通用工具",
+      "maturity": "beta",
+      "depends": [],
+      "hasTest": true,
+      "hasDemo": true,
+      "purpose": "UI 自动刷新的地基",
+      "dir": "observable"
+    },
+    {
+      "name": "cheatcode",
+      "path": "cheatcode/CheatCode.ts",
+      "cn": "作弊码命令",
+      "desc": "参数校验/别名/拼写建议/历史/隐藏命令",
+      "layer": "L1",
+      "domain": "工程与运维",
+      "maturity": "beta",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "purpose": "开发期你一定需要：跳关、加钱、无敌、解锁全部。",
+      "dir": "cheatcode"
+    },
+    {
+      "name": "uinav",
+      "path": "uinav/UINav.ts",
+      "cn": "UI导航栈",
+      "desc": "push/pop/replace/popTo，转场锁与重复策略",
+      "layer": "L1",
+      "domain": "表现与外壳",
+      "maturity": "beta",
+      "depends": [],
+      "hasTest": true,
+      "hasDemo": true,
+      "purpose": "打开背包 → 点物品 → 弹确认框。按返回键应该退一层，",
+      "dir": "uinav"
+    },
+    {
+      "name": "telemetry",
+      "path": "telemetry/Telemetry.ts",
+      "cn": "埋点上报",
+      "desc": "批量/重试/采样确定性/缓冲上限",
+      "layer": "L1",
+      "domain": "工程与运维",
+      "maturity": "beta",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "purpose": "游戏上线后你要知道：玩家卡在第几关？哪个遗物从没人选？",
+      "dir": "telemetry"
+    },
+    {
+      "name": "rarity",
+      "path": "rarity/Rarity.ts",
+      "cn": "稀有度",
+      "desc": "排序/权重/抽取/保底归属/统计",
+      "layer": "L1",
+      "domain": "内容与掉落",
+      "maturity": "beta",
+      "depends": [],
+      "hasTest": true,
+      "hasDemo": true,
+      "purpose": "稀有度不只是个排序——还牵扯掉落权重、UI 颜色、保底归属、排序比较。",
+      "dir": "rarity"
+    },
+    {
+      "name": "stats",
+      "path": "stats/Stats.ts",
+      "cn": "统计追踪",
+      "desc": "5种聚合/分组标签/派生指标/存档",
+      "layer": "L1",
+      "domain": "进度与统计",
+      "maturity": "beta",
+      "depends": [],
+      "hasTest": true,
+      "hasDemo": true,
+      "purpose": "结算界面的数据来源",
+      "dir": "stats"
+    },
+    {
+      "name": "achievement",
+      "path": "achievement/Achievement.ts",
+      "cn": "成就系统",
+      "desc": "前置依赖/循环检测/进度去重/隐藏成就",
+      "layer": "L1",
+      "domain": "进度与统计",
+      "maturity": "beta",
+      "depends": [],
+      "hasTest": true,
+      "hasDemo": true,
+      "purpose": "成就看起来简单：if (kills >= 100) unlock('kill100')。",
+      "dir": "achievement"
+    },
+    {
+      "name": "gesture",
+      "path": "gesture/Gesture.ts",
+      "cn": "手势识别",
+      "desc": "swipe/drag/tap/longPress/circle/pinch",
+      "layer": "L1",
+      "domain": "表现与外壳",
+      "maturity": "beta",
+      "depends": [],
+      "hasTest": true,
+      "hasDemo": true,
+      "purpose": "swipe / drag / tap / longPress / circle / pinch",
+      "dir": "gesture"
+    },
+    {
+      "name": "rebind",
+      "path": "rebind/Rebind.ts",
+      "cn": "按键重映射",
+      "desc": "编码归一化/冲突策略/保留键/反向索引",
+      "layer": "L1",
+      "domain": "表现与外壳",
+      "maturity": "beta",
+      "depends": [],
+      "hasTest": true,
+      "hasDemo": true,
+      "purpose": "设置界面里的\"按键设置\"",
+      "dir": "rebind"
+    },
+    {
+      "name": "gameflow",
+      "path": "gameflow/GameFlow.ts",
+      "cn": "流程状态机",
+      "desc": "状态+转换表显式声明，非法转换直接拒绝；历史/back/timeInState/auto转换",
+      "layer": "L2",
+      "domain": "工程与运维",
+      "maturity": "beta",
+      "depends": [],
+      "hasTest": true,
+      "hasDemo": true,
+      "purpose": "主菜单 → 游戏中 → 暂停 → 结算 → 回主菜单",
+      "dir": "gameflow"
+    },
+    {
+      "name": "currency",
+      "path": "currency/CurrencyWallet.ts",
+      "cn": "多货币钱包",
+      "desc": "原子消费、精度量化、流水带类型、上限约束",
+      "layer": "L1",
+      "domain": "表现与外壳",
+      "maturity": "beta",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": false,
+      "purpose": "金币、钻石、体力、活动代币……手写的 player.gold += 10 会遇到三个必然问题…",
+      "dir": "currency"
+    },
+    {
+      "name": "settings",
+      "path": "settings/Settings.ts",
+      "cn": "游戏设置",
+      "desc": "四类 kind、范围/步进校验、默认值迁移、分组",
+      "layer": "L1",
+      "domain": "表现与外壳",
+      "maturity": "beta",
+      "depends": [],
+      "hasTest": true,
+      "hasDemo": false,
+      "purpose": "游戏设置：范围校验 / 默认值迁移 / 分组 / 变更通知",
+      "dir": "settings"
+    },
+    {
+      "name": "subtitle",
+      "path": "subtitle/Subtitle.ts",
+      "cn": "字幕",
+      "desc": "时间轴纯查询、多轨重叠、SRT 解析与导出",
+      "layer": "L2",
+      "domain": "表现与外壳",
+      "maturity": "beta",
+      "depends": [],
+      "hasTest": true,
+      "hasDemo": false,
+      "purpose": "字幕与 SRT：纯查询播放 + 时间轴解析 + 跳过回填",
+      "dir": "subtitle"
+    },
+    {
+      "name": "tutorial",
+      "path": "tutorial/Tutorial.ts",
+      "cn": "新手引导",
+      "desc": "等待/超时兜底/skipIf/断点续/存档容错",
+      "layer": "L2",
+      "domain": "表现与外壳",
+      "maturity": "beta",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": false,
+      "purpose": "引导是玩家看到的第一段内容，也是最容易做砸的。",
+      "dir": "tutorial"
+    },
+    {
+      "name": "reddot",
+      "path": "reddot/RedDot.ts",
+      "cn": "红点树",
+      "desc": "父子自动聚合、override、祖先通知、前缀避免误匹配",
+      "layer": "L1",
+      "domain": "表现与外壳",
+      "maturity": "beta",
+      "depends": [],
+      "hasTest": true,
+      "hasDemo": false,
+      "purpose": "\"邮件有新的\"、\"任务能领了\"、\"商店上新了\"——",
+      "dir": "reddot"
+    },
+    {
+      "name": "scenerouter",
+      "path": "scenerouter/SceneRouter.ts",
+      "cn": "场景路由",
+      "desc": "out→load→in 阶段机、并发拒绝、返回栈、超时兜底",
+      "layer": "L2",
+      "domain": "表现与外壳",
+      "maturity": "beta",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": false,
+      "purpose": "\"主菜单 → 关卡 → 结算 → 回主菜单\"，中间夹着加载界面和转场动画。",
+      "dir": "scenerouter"
+    },
+    {
+      "name": "accessibility",
+      "path": "accessibility/Accessibility.ts",
+      "cn": "可访问性",
+      "desc": "减少动效影响面、色盲分支、字号/长按夹取",
+      "layer": "L1",
+      "domain": "表现与外壳",
+      "maturity": "beta",
+      "depends": [],
+      "hasTest": true,
+      "hasDemo": false,
+      "purpose": "可访问性常被当成\"发布前再说\"的事，",
+      "dir": "accessibility"
+    },
+    {
+      "name": "feedback",
+      "path": "feedback/HitFeedback.ts",
+      "cn": "打击反馈",
+      "desc": "顿帧用真实时间、连打不叠加、震屏取 max、popup 窗口",
+      "layer": "L2",
+      "domain": "表现与外壳",
+      "maturity": "beta",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": false,
+      "purpose": "\"打中了\"这件事需要被感觉到而不只是看到。",
+      "dir": "feedback"
+    },
+    {
+      "name": "progressbar",
+      "path": "progressbar/ProgressBar.ts",
+      "cn": "进度条",
+      "desc": "分段语义、延迟条方向、阈值滞回、缓动",
+      "layer": "L2",
+      "domain": "表现与外壳",
+      "maturity": "beta",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": false,
+      "purpose": "血条、经验条、加载条。看起来是\"画一个矩形填到 ratio\"，",
+      "dir": "progressbar"
+    },
+    {
+      "name": "elo",
+      "cn": "ELO 与 Glicko-2 评分",
+      "path": "elo/Elo.ts, elo/Glicko2.ts",
+      "layer": "L2",
+      "domain": "评分与匹配",
+      "tests": 0,
+      "added": "2026-09-03",
+      "status": "active",
+      "desc": "1v1/多人结算、K 值三段、分数地板、零和保证；Glicko-2 含 RD 不确定度与保守分",
+      "maturity": "beta",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "purpose": "ELO 与 Glicko-2 评分（K 值三段 / RD 不确定度 / 保守分）",
+      "dir": "elo"
+    },
+    {
+      "name": "matchmaking",
+      "cn": "撮合/分队/房间",
+      "path": "matchmaking/Matchmaker.ts, matchmaking/TeamBalancer.ts, matchmaking/Lobby.ts",
+      "layer": "L2",
+      "domain": "评分与匹配",
+      "tests": 0,
+      "added": "2026-09-03",
+      "status": "active",
+      "desc": "双向范围撮合、窗口随等待放宽、超时兜底、黑店不可拆、角色配额、房主迁移",
+      "maturity": "beta",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "purpose": "撮合与分队：双向范围 + 窗口放宽 + 超时兜底 + 黑店不拆",
+      "dir": "matchmaking"
+    },
+    {
+      "name": "ranking",
+      "cn": "段位与赛季",
+      "path": "ranking/RankTier.ts, ranking/SeasonReward.ts",
+      "layer": "L2",
+      "domain": "评分与匹配",
+      "tests": 0,
+      "added": "2026-09-03",
+      "status": "active",
+      "desc": "段位小段/晋级滞回/掉段保护/软重置 + 赛季发奖（峰值/结算双口径、幂等发放、分布诊断）",
+      "maturity": "beta",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "purpose": "段位与赛季：掉段保护 / 软重置 / 赛季奖励",
+      "dir": "ranking"
+    },
+    {
+      "name": "team-mmr",
+      "path": "mmr/TeamMMR.ts",
+      "maturity": "beta",
+      "purpose": "组队匹配分：carry 效应、组队加成、分差限制、散人补齐",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "layer": "L2",
+      "dir": "mmr",
+      "domain": "评分与匹配",
+      "cn": "组队 MMR",
+      "desc": "carry 加权 + 组队惩罚 + 分差限制",
+      "added": "2026-09-03",
+      "status": "active"
+    },
+    {
+      "name": "report",
+      "path": "social/Report.ts",
+      "maturity": "beta",
+      "purpose": "举报：信誉加权、冷却与每日上限、恶意举报识别",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "layer": "L2",
+      "dir": "social",
+      "domain": "评分与匹配",
+      "cn": "举报中心",
+      "desc": "信誉加权、冷却、恶意举报识别",
+      "added": "2026-09-03",
+      "status": "active"
+    },
+    {
+      "name": "anti-cheat",
+      "path": "anticheat/AntiCheat.ts",
+      "maturity": "beta",
+      "purpose": "反作弊：速度/统计离群/行为指纹三线索，单项证据不足以封号",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "工程与运维",
+      "layer": "L2",
+      "dir": "anticheat",
+      "cn": "反作弊",
+      "desc": "速度/统计离群/行为指纹检测，宁漏勿判",
+      "added": "2026-09-03",
+      "status": "active"
+    },
+    {
+      "name": "abtest",
+      "path": "analytics/ABTest.ts",
+      "maturity": "beta",
+      "purpose": "A/B 实验：稳定分组、实验间独立、显著性检验、样本量预判",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "layer": "L2",
+      "dir": "analytics",
+      "domain": "工程与运维",
+      "cn": "A/B 实验",
+      "desc": "稳定分组、显著性检验、样本量预判",
+      "added": "2026-09-03",
+      "status": "active"
+    },
+    {
+      "name": "audio",
+      "path": "audio/AudioManager.ts, audio/BGMStack.ts",
+      "maturity": "beta",
+      "purpose": "音效播放（并发/去重/优先级/音量混合）+ 分层背景音乐（水平重混）",
+      "depends": [
+        "_core/math"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "表现与外壳",
+      "layer": "L2",
+      "dir": "audio"
+    },
+    {
+      "name": "cutscene",
+      "path": "cutscene/Cutscene.ts",
+      "maturity": "beta",
+      "purpose": "演出编排：时间轴播放、seek 重放、跳过应用终态、门控与超时",
+      "depends": [
+        "_core/math"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "表现与外壳",
+      "layer": "L2",
+      "dir": "cutscene"
+    },
+    {
+      "name": "transition",
+      "path": "transition/Transition.ts",
+      "maturity": "beta",
+      "purpose": "场景转场：out→load→in 三段式、重入保护、加载超时、进度防假死",
+      "depends": [
+        "_core/math"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "表现与外壳",
+      "layer": "L2",
+      "dir": "transition"
+    },
+    {
+      "name": "minimap",
+      "path": "minimap/Minimap.ts",
+      "maturity": "beta",
+      "purpose": "小地图坐标变换与布局：跟随/固定、旋转、边缘钳制、战争迷雾",
+      "depends": [
+        "_core/math"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "表现与外壳",
+      "layer": "L2",
+      "dir": "minimap"
+    },
+    {
+      "name": "builder",
+      "path": "builder/Builder.ts",
+      "maturity": "beta",
+      "purpose": "建造系统：原子性放置、旋转占位、返还策略、原地升级",
+      "depends": [
+        "_core/math"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "玩法框架",
+      "layer": "L2",
+      "dir": "builder"
+    },
+    {
+      "name": "auto-quality",
+      "path": "autoquality/AutoQuality.ts",
+      "maturity": "beta",
+      "purpose": "帧率监测与自动画质降级：中位数抗离群、迟滞防横跳、冷却防连降",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "layer": "L2",
+      "dir": "autoquality",
+      "domain": "表现与外壳"
+    },
+    {
+      "name": "diag-pack",
+      "path": "diagpack/DiagPack.ts",
+      "maturity": "beta",
+      "purpose": "诊断包：安全序列化、序列化后脱敏、分区配额、永不抛错",
+      "depends": [],
+      "hasTest": true,
+      "hasDemo": true,
+      "domain": "工程与运维",
+      "layer": "L2",
+      "dir": "diagpack"
+    },
+    {
+      "name": "camera",
+      "path": "camera/CameraShake.ts, camera/CameraFollow.ts",
+      "cn": "相机",
+      "desc": "震屏（多震源叠加+确定性+可关闭）+ 跟随（死区/前瞻/边界/瞬移检测），帧率无关平滑",
+      "layer": "L2",
+      "domain": "表现与外壳",
+      "maturity": "beta",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "added": "2026-09-03",
+      "status": "active",
+      "purpose": "打击感的三大件：顿帧、震屏、粒子。",
+      "dir": "camera"
+    },
+    {
+      "name": "matchops",
+      "path": "matchops/Reconnect.ts, matchops/Surrender.ts, matchops/Spectate.ts",
+      "cn": "对局运维",
+      "desc": "断线重连（宽限期递减/队友连坐）+ 投降投票（分母=在线人数/需求票数冻结）+ 观战（延迟安全/可见性降级）",
+      "layer": "L2",
+      "domain": "评分与匹配",
+      "maturity": "beta",
+      "depends": [
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "added": "2026-09-03",
+      "status": "active",
+      "purpose": "对局运维：重连 / 投降（冻结票数）/ 观战",
+      "dir": "matchops"
+    },
+    {
+      "name": "collision",
+      "path": "collision/Collision.ts",
+      "cn": "碰撞检测与解析",
+      "desc": "形状相交 + SAT/MTV + 扫掠防穿墙 + moveAndSlide 沿墙滑动 + 静态分离 + 射线",
+      "layer": "L1",
+      "domain": "移动与碰撞",
+      "maturity": "beta",
+      "depends": [
+        "_core/math"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "added": "2026-09-04",
+      "status": "active",
+      "purpose": "碰撞检测：SAT / 扫掠 / moveAndSlide / 射线（防高速穿墙）",
+      "dir": "collision"
+    },
+    {
+      "name": "mover",
+      "path": "mover/CharacterMover.ts",
+      "cn": "角色移动控制器",
+      "desc": "加速度/减速分离 + 转身加速 + 撞墙速度投影 + 击退衰减与体感解除 + 四种手感预设",
+      "layer": "L2",
+      "domain": "移动与碰撞",
+      "maturity": "beta",
+      "depends": [
+        "_core/math"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "added": "2026-09-04",
+      "status": "active",
+      "purpose": "角色移动：加速度 / 击退 / 撞墙投影 / 手感预设",
+      "dir": "mover"
+    },
+    {
+      "name": "adapters",
+      "path": "adapters/Adapters.ts",
+      "cn": "模块间适配器",
+      "desc": "地牢→网格 / 命中→施法 / 掉落→入包，三处重复胶水的正式化",
+      "layer": "L2",
+      "domain": "适配与实体",
+      "maturity": "beta",
+      "depends": [],
+      "hasTest": true,
+      "hasDemo": false,
+      "added": "2026-09-04",
+      "status": "active",
+      "purpose": "模块间适配器：地牢→网格 / 命中→施法 / 掉落→入包（消除重复胶水）",
+      "dir": "adapters"
+    },
+    {
+      "name": "entity",
+      "path": "entity/EntityRegistry.ts",
+      "cn": "统一实体注册表",
+      "desc": "统一实体注册：id 版本号防 ABA / 判定框别名映射 / 死亡结算归宿 / 遍历安全",
+      "layer": "L1",
+      "domain": "适配与实体",
+      "maturity": "beta",
+      "depends": [],
+      "hasTest": true,
+      "hasDemo": false,
+      "added": "2026-09-04",
+      "status": "active",
+      "purpose": "统一实体注册表：id 版本号防 ABA / 判定框别名映射 / 死亡归宿",
+      "dir": "entity"
+    },
+    {
+      "name": "skill-queue",
+      "path": "skill-queue/SkillQueue.ts",
+      "maturity": "beta",
+      "purpose": "技能排队与 CD 补发：提前点击自动延后释放 / 失败分类 / 窗口自检",
+      "depends": [
+        "skill-caster",
+        "_core"
+      ],
+      "hasTest": true,
+      "hasDemo": true,
+      "layer": "L3",
+      "dir": "skill-queue",
+      "domain": "数值与战斗",
+      "cn": "技能排队",
+      "desc": "输入缓冲与施法的桥：区分暂时/永久失败，窗口不足会自检报警",
+      "added": "2026-09-04",
+      "status": "active"
+    }
+  ],
+  "maturityLevels": {
+    "experimental": "API 可能随时变更，不建议生产使用",
+    "beta": "功能完整，API 基本稳定，可能有小调整",
+    "stable": "承诺向后兼容，变更需走废弃流程（标记 → 通知 → 过渡期 → 移除）"
+  },
+  "pluginCount": 119,
+  "layer0": {
+    "note": "第 0 层是 rule6 的例外：零依赖纯基础设施，可被任意插件引用",
+    "members": [
+      "_core（纯函数/类型）",
+      "ds（纯数据结构）"
+    ]
+  },
+  "modules": [
+    {
+      "id": "skill",
+      "name": "技能系统",
+      "plugins": [
+        "skill-caster",
+        "skill-player",
+        "hitbox",
+        "projectile",
+        "indicator",
+        "telegraph",
+        "attribute",
+        "skill-variant",
+        "skill-queue"
+      ],
+      "facade": "skill-caster/SkillCaster.ts",
+      "why": "目标释放 / 弹道释放 / 时间轴释放是同一功能的三种模式，属并列而非前置"
+    },
+    {
+      "id": "roguelike",
+      "name": "肉鸽核心",
+      "plugins": [
+        "room-graph",
+        "wave-spawner",
+        "meta",
+        "affix",
+        "loot",
+        "daily",
+        "leaderboard",
+        "runscope",
+        "blessing",
+        "curse",
+        "interact",
+        "score"
+      ],
+      "facade": "room-graph/RoomGraph.ts",
+      "why": "房间生成 / 波次 / 元进度 / 词条 / 掉落 构成一局的完整循环"
+    },
+    {
+      "id": "combat",
+      "name": "战斗数值",
+      "plugins": [
+        "damage-pipeline",
+        "element",
+        "buff",
+        "scoring",
+        "difficulty",
+        "attack-token",
+        "perception",
+        "targeting",
+        "combo"
+      ],
+      "facade": "damage-pipeline/DamagePipeline.ts",
+      "why": "伤害计算 / 元素 / 增益 / 评分 / 难度 构成一套战斗反馈闭环"
+    },
+    {
+      "id": "ai",
+      "name": "AI 行为",
+      "plugins": [
+        "behavior-tree",
+        "fsm",
+        "steering",
+        "pathfind",
+        "grid",
+        "fov",
+        "dungeon"
+      ],
+      "facade": "behavior-tree/BehaviorTree.ts",
+      "why": "决策 / 移动 / 寻路 / 感知 缺少任一项都不成 AI"
+    },
+    {
+      "id": "content",
+      "name": "内容系统",
+      "plugins": [
+        "inventory",
+        "card",
+        "dialogue",
+        "quest",
+        "shop",
+        "craft",
+        "gacha",
+        "setbonus",
+        "turn"
+      ],
+      "facade": "inventory/Inventory.ts",
+      "why": "仓库 / 卡牌 / 对话 / 任务 / 商店 都是数据驱动的内容层"
+    },
+    {
+      "id": "tooling",
+      "name": "开发工具",
+      "plugins": [
+        "logger",
+        "config",
+        "debug-console",
+        "command",
+        "crash",
+        "binary",
+        "snapshot",
+        "replay",
+        "scheduler"
+      ],
+      "facade": "logger/Logger.ts",
+      "why": "开发期用的东西，不进游戏运行时逻辑"
+    },
+    {
+      "id": "audio",
+      "name": "音频系统",
+      "plugins": [
+        "audio"
+      ],
+      "facade": "audio/AudioManager.ts",
+      "why": "音效播放与分层背景音乐是音频系统的两个并列部分；共用一个目录，可整体导入或卸载"
+    },
+    {
+      "id": "presentation",
+      "name": "表现层",
+      "plugins": [
+        "cutscene",
+        "transition",
+        "minimap"
+      ],
+      "facade": "cutscene/Cutscene.ts",
+      "why": "演出 / 转场 / 小地图同属「玩家能感知但说不清」的表现层，失败模式一致：都不抛异常"
+    },
+    {
+      "id": "ops",
+      "name": "运维层",
+      "plugins": [
+        "auto-quality",
+        "diag-pack"
+      ],
+      "facade": "diagpack/DiagPack.ts",
+      "why": "自动降级与诊断收集都是「出问题时才被想起」的运维能力，平时零成本，缺了则无法定位问题"
+    }
+  ],
+  "moduleCount": 9,
+  "updated": "2026-09-03"
+}

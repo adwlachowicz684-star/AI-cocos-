@@ -1,0 +1,27 @@
+# 依赖与构建产物
+node_modules/
+.build/
+.build.old.*/
+
+# 脚本中间产物（均可由 scripts/ 重生成）
+.audit.json
+plugin_inventory.md
+
+# Python 字节码缓存
+#
+# 【为什么要单独列】
+# scripts/ 下有 8 个 .py 检查脚本，被 import 时会生成 __pycache__/*.pyc。
+# 它是平台相关的（cpython-310），既不通用也不属于源码，
+# 混进发布包属于污染。发现时包里已经有 5377 字节的 .pyc。
+__pycache__/
+*.py[cod]
+
+# 编辑器与系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 日志
+*.log
+npm-debug.log*
