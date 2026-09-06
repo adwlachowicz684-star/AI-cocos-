@@ -24,6 +24,35 @@
 `clamp` / `lerp` / `smoothDamp` / `clamp01` / `remap`
 `Easing`（13 个缓动函数）/ `wrapAngle` / `remap` / `inverseLerp`
 
+### `guard.ts`（入口参数守卫）
+
+全量精审 119 个单元后，53 条问题里 **41 条可归入 4 个模式**，根因一致：**入口没守住非有限值**。
+
+| 模式 | 典型形态 | 后果 |
+|---|---|---|
+| 无界 count | `if (n <= 0) return` / `Math.max(1, n)` | **拦不住 Infinity，也被 NaN 穿透** → 死循环 / OOM |
+| 角度归一化 | `while (x > 2π) x -= 2π` | `Infinity - 2π` 仍是 Infinity → **进程卡死** |
+| Record 查表 | `table[key]` | 取到 `Object.prototype` 上的方法 → 返回非数字 |
+| 路径写入 | `setAtPath(o, '__proto__.x', v)` | **进程级原型污染** |
+
+| 导出 | 说明 |
+|---|---|
+| `needFinite(v, field)` | 有限数值守卫。拦 NaN / ±Infinity / 非 number |
+| `needInt(v, field)` | 在其之上再要求整数 |
+| `needCount(v, field, max?)` | **计数守卫**：有限非负整数 + 上界（默认 1e6）。**循环次数一律用它** |
+| `needPositive(v, field)` | 正数守卫。除数 / 尺寸 / 比例用它（允许小数，不允许 0） |
+| `hasOwn(obj, key)` | 自有属性判定（`in` 和 `[]` 都会命中原型链） |
+| `safeRead(table, key, fb)` | 安全查表，只读自有属性 |
+| `isSafeKey(key)` / `assertSafePath(segs, raw?)` | 路径写入守卫，拦 `__proto__` / `prototype` / `constructor` |
+
+> ⚠️ **这些守卫一律抛错，不做静默兜底。**
+> 它们守的是"调用方传错"，不是"数据该有默认值"。
+> 静默兜底会把错误继续传播，表现为"某个系统静默失效"。
+> 内部计算中间值的兜底请用 `math.ts` 的 `numOr` / `clampNum`。
+>
+> ⚠️ **`constructor` 必须和 `__proto__` 一起挡。**
+> 只挡 `__proto__` 挡不住 `obj.constructor.prototype` 这条替代入口。
+
 ### `types.ts`
 
 | 导出 | 说明 |
