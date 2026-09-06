@@ -49,6 +49,7 @@
  */
 
 import { safeDt } from '../_core/math';
+import { needCount } from '../_core/guard';
 
 export type StackMode =
   /** 刷新：重置持续时间，层数上限由 maxStacks 控制 */
@@ -152,6 +153,16 @@ export class BuffSystem {
    * @returns 实际层数
    */
   apply(id: string, stacks = 1): number {
+    /**
+     * 【⚠️ stacks 必须有上界】
+     *
+     * independent 模式下 `stacks` 直接就是 `for` 的循环次数。
+     * 实测 `apply('x', Infinity)`（stackMode: 'independent'）→ 退出码 124，进程卡死。
+     * NaN 则相反：`i < NaN` 恒假，静默什么都不加，
+     * 表现为"叠了 buff 但状态栏没变化"且无任何报错。
+     */
+    const n = needCount(stacks, 'stacks');
+
     const def = this._defs.get(id);
     if (!def) throw new Error(`[BuffSystem] 未注册的 buff: ${id}`);
 
@@ -159,7 +170,7 @@ export class BuffSystem {
 
     if (mode === 'independent') {
       const list = this._independent.get(id) ?? [];
-      for (let i = 0; i < stacks; i++) {
+      for (let i = 0; i < n; i++) {
         list.push(this._makeInstance(def));
       }
       this._independent.set(id, list);
