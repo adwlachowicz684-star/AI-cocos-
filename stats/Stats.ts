@@ -92,6 +92,8 @@ export interface StatsOptions {
 // ==================== 工具 ====================
 
 /** 聚合方式的单位元 */
+import { hasOwn } from '../_core/guard';
+
 const IDENTITY: Readonly<Record<Aggregation, number>> = {
   sum: 0,
   max: -Infinity,
@@ -169,8 +171,21 @@ export class Stats {
   // ==================== 查询 ====================
 
   get(id: string, tags: Tags = {}): number {
-    // 派生指标优先
-    if (id in this._derived) {
+    /**
+     * 【⚠️ 派生表必须用 hasOwn，不能用 `in`】
+     *
+     * 实测：`get('toString')` 返回字符串 `"[object Object]"`，不是数字。
+     * 因为 `'toString' in this._derived` 命中原型链 → 为 true，
+     * 于是 `this._derived['toString'](...)` 调的是
+     * `Object.prototype.toString`，返回字符串。
+     *
+     * 而本函数声明返回 `number`——**违反了自声明的返回类型却不报错**。
+     * 调用方 `伤害 * stats.get(...)` 立刻得到 NaN，
+     * 表现为伤害静默失效、角色血量不变。
+     *
+     * 指标 id 常来自配置表（成就条件、任务目标），属于外部输入。
+     */
+    if (hasOwn(this._derived, id)) {
       return this._derived[id]((x, t) => this.get(x, t));
     }
     const def = this._defs.get(id);
@@ -213,7 +228,8 @@ export class Stats {
   // ==================== 派生 ====================
 
   derived(id: string): number {
-    const fn = this._derived[id];
+    // 同 get()：派生表只认自有属性，避免取到 Object.prototype 上的方法
+    const fn = hasOwn(this._derived, id) ? this._derived[id] : undefined;
     if (!fn) {
       throw new Error(
         `[Stats] 未定义的派生指标：${id}（已定义：${Object.keys(this._derived).join(', ')}）`
