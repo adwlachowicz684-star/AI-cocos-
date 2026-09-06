@@ -167,27 +167,48 @@ export function safeDt(dt: number): boolean {
  * @param fallback 数组为空时返回的值（**调用方必须显式想清楚空集意味着什么**）
  */
 export function maxOf(xs: readonly number[], fallback = 0): number {
-  let m = -Infinity;
+  /**
+   * 【⚠️ 用 found 标志判断"是否见过元素"，不要用 `m === -Infinity`】
+   *
+   * 老实现用 `m === -Infinity` 当空集哨兵，而 `-Infinity` 同时是
+   * **合法入参**：`maxOf([-Infinity], 7)` 应当返回 `-Infinity`，
+   * 实际却返回了 fallback `7`。minOf 的 `m === Infinity` 同理。
+   *
+   * 后果是"合法的极值被静默替换成默认值"——
+   * 温度下限、损失上界这类用 ±Infinity 表达"无界"的场景会算错，
+   * 而且返回值看起来完全正常，没有任何报错。
+   *
+   * 用独立的 found 标志，空集与"见过 -Infinity"就能区分开。
+   */
+  let m = 0;
+  let found = false;
   for (let i = 0; i < xs.length; i++) {
     const x = xs[i]!;
     // NaN 参与的比较恒为 false，所以 NaN 会被跳过；
     // 但上面"为什么 NaN 保持传染"说了不该静默跳过——
     // 所以这里显式检测，遇到 NaN 就返回 NaN，与 Math.max 一致。
     if (Number.isNaN(x)) return NaN;
-    if (x > m) m = x;
+    if (!found || x > m) {
+      m = x;
+      found = true;
+    }
   }
-  return m === -Infinity ? fallback : m;
+  return found ? m : fallback;
 }
 
 /** 数组最小值（空数组返回 `fallback`，而不是 `Infinity`）。详见 {@link maxOf} */
 export function minOf(xs: readonly number[], fallback = 0): number {
-  let m = Infinity;
+  let m = 0;
+  let found = false;
   for (let i = 0; i < xs.length; i++) {
     const x = xs[i]!;
     if (Number.isNaN(x)) return NaN;
-    if (x < m) m = x;
+    if (!found || x < m) {
+      m = x;
+      found = true;
+    }
   }
-  return m === Infinity ? fallback : m;
+  return found ? m : fallback;
 }
 
 /** 线性插值：t=0 返回 a，t=1 返回 b */
