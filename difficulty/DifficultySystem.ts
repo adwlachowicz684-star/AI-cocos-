@@ -30,6 +30,7 @@
  */
 
 import { clamp, clamp01, lerp, safeDt } from '../_core/math';
+import { hasOwn } from '../_core/guard';
 
 // ============================================================
 // 显式难度
@@ -299,7 +300,21 @@ export class DifficultySystem {
    * 所以这里显式列出"对玩家有利"的键。
    */
   multiplier(key: string): number {
-    const base = this.currentTier.multipliers[key] ?? 1;
+    /**
+     * 【⚠️ 倍率表必须只认自有属性】
+     *
+     * 实测：`multiplier('toString')` 返回 **NaN** 而不是 1。
+     * 因为 `multipliers['toString']` 取到 `Object.prototype.toString`（函数），
+     * `?? 1` 挡不住（函数不是 null/undefined），
+     * 于是 `base * (1 + delta)` = NaN，再 `Math.max(0.05, NaN)` 仍是 NaN。
+     *
+     * 而本函数的返回类型声明是 `number`、契约上是"倍率"——
+     * 调用方拿它去乘伤害/血量，**一个 NaN 就能让角色血量永久变 NaN**，
+     * 且不抛错、不崩溃，只是伤害计算静默失效。
+     *
+     * 倍率键常来自配置表，属于外部输入。
+     */
+    const base = this._multOf(this.currentTier, key);
     if (!this._ddaEnabled || this.currentTier.allowDDA === false) return base;
 
     // DDA 正值 = 变难
@@ -321,7 +336,20 @@ export class DifficultySystem {
 
   /** 原始倍率（不含 DDA，UI 显示"困难：敌人血量 ×1.35"用） */
   baseMultiplier(key: string): number {
-    return this.currentTier.multipliers[key] ?? 1;
+    return this._multOf(this.currentTier, key);
+  }
+
+  /**
+   * 安全读取倍率（未命中返回 1）
+   *
+   * 统一走这里，保证 `multiplier` / `baseMultiplier` 两处口径一致——
+   * 分散加 `hasOwn` 迟早会漏掉一处。
+   */
+  private _multOf(tier: { readonly multipliers: Readonly<Record<string, number>> }, key: string): number {
+    const m = tier.multipliers;
+    if (!hasOwn(m, key)) return 1;
+    const v = m[key];
+    return Number.isFinite(v) ? v : 1;
   }
 }
 
