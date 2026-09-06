@@ -125,8 +125,15 @@ export interface IDisposable {
   destroy(): void;
 }
 
-/** 可选项：把 T 的所有属性变为可选（用于配置对象的部分覆盖） */
-export type Partial<T> = { [P in keyof T]?: T[P] };
+/**
+ * 【这里曾经有一个 `export type Partial<T>`，已删除】
+ *
+ * 它与 TS 内置的 `Partial<T>` 同名，一旦被 import 就**遮蔽全局版本**，
+ * 让读代码的人无法判断某个 `Partial<Foo>` 到底指哪一个。
+ * 全库 0 处引用，属于纯负收益。
+ *
+ * 需要"部分覆盖"语义请直接用内置的 `Partial<T>`。
+ */
 
 /** 数值区间 */
 export interface IRange {
