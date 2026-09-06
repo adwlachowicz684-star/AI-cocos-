@@ -36,6 +36,7 @@
  */
 
 import { Validator, TableSchema, ValidationIssue } from './Validator';
+import { hasOwn } from '../_core/guard';
 
 /**
  * 表数据源
@@ -62,9 +63,21 @@ export class MemoryTableSource implements ITableSource {
   }
 
   load(tableName: string): readonly unknown[] {
-    const rows = this._data[tableName];
-    if (!rows) throw new Error(`[MemoryTableSource] 表不存在: ${tableName}`);
-    return rows;
+    /**
+     * 【⚠️ 必须只认自有属性】
+     *
+     * 实测：`load('toString')` 不抛"表不存在"，
+     * 而是返回 `Object.prototype.toString` 这个**函数**。
+     * 因为 `this._data['toString']` 取到原型方法（truthy），
+     * `if (!rows)` 的真假判断挡不住它。
+     *
+     * 后果：下游把函数当成"行数组"去遍历、校验、建索引，
+     * 得到一堆莫名其妙的校验错误，而真正的病根（表名错了）被掩盖。
+     */
+    if (!hasOwn(this._data, tableName)) {
+      throw new Error(`[MemoryTableSource] 表不存在: ${tableName}`);
+    }
+    return this._data[tableName];
   }
 }
 
@@ -134,7 +147,7 @@ export class ConfigLoader {
     }
 
     // ② 校验
-    const schema = this._schemas[name];
+    const schema = hasOwn(this._schemas, name) ? this._schemas[name] : undefined;
     const issues = schema ? Validator.validateTable(name, rows, schema) : [];
     this._issues.push(...issues);
 
