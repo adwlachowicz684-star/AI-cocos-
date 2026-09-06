@@ -37,6 +37,7 @@
 
 import { IRandomSource } from '../_core/types';
 import { clamp, safeDt } from '../_core/math';
+import { needCount } from '../_core/guard';
 
 // ============================================================
 // 数据结构
@@ -114,7 +115,22 @@ const DEG = Math.PI / 180;
  * 编译成闭包后，每次开火只做纯算术。
  */
 export function compileShape(spec: ShapeSpec): ShapeFn {
-  const count = Math.max(1, spec.count);
+  /**
+   * 【⚠️ count 必须有上界】
+   *
+   * `count` 直接就是下面几个 `for (let i = 0; i < count; i++)` 的次数，
+   * 每个循环都往 `out` 里 push 一个角度。
+   *
+   * 实测 `compileShape({ count: Infinity, ... })`：
+   * 进程以 **Fatal JavaScript invalid size error** 直接崩溃（退出码 133）——
+   * 数组无限 push 直到 V8 内存分配失败，**连异常都抓不到**，
+   * 比死循环更糟，因为 try/catch 完全无效。
+   *
+   * 老实现 `Math.max(1, spec.count)` 只挡了小于 1 的情况，
+   * Infinity 畅通无阻，NaN 也会被 `Math.max(1, NaN)` 变成 NaN 后
+   * 让循环条件 `i < NaN` 恒假 —— 静默生成 0 颗子弹。
+   */
+  const count = Math.max(1, needCount(spec.count, 'spec.count'));
   const mirrored = spec.mirrored ?? false;
 
   return (ctx: ShapeContext): number[] => {
