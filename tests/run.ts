@@ -60,6 +60,7 @@ import { runFixRegressTests } from './run_fixregress';
 import { runDtGuardTests } from './run_dtguard';
 import { runDtGuard2Tests } from './run_dtguard2';
 import { runNumGuardTests } from './run_numguard';
+import { runGuardTests } from './run_guard';
 
 async function main(): Promise<void> {
   setSuite('第一批：核心插件（EventBus / Pool / RNG / Damage / Skill / Joystick）');
@@ -152,6 +153,9 @@ async function main(): Promise<void> {
 
   setSuite('异常数值穿透回归 · 批次 5（Math.max/min 收口：容量字段上界）');
   runNumGuardTests();
+
+  setSuite('共享守卫回归（_core/guard：无界 count / 原型链 / 路径污染 / prewarm 上界）');
+  runGuardTests();
 
   summary();
 }
