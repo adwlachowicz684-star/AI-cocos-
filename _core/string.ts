@@ -78,6 +78,18 @@ export function editDistance(a: string, b: string): number {
  * 长度差大的串：`similarity` 返回 0，但用 `1 - dist/max` 手算会是个小数。
  * 要距离就用 `editDistance`，要相似度就用 `similarity`，别自己换算。
  */
+export function similarity(a: string, b: string): number {
+  if (a === b) return 1;
+  if (a === '' || b === '') return 0;
+
+  const la = a.length;
+  const lb = b.length;
+  // 长度差太大直接判不相似，省一次 O(n*m)
+  if (Math.abs(la - lb) > Math.max(la, lb) * 0.6) return 0;
+
+  return 1 - editDistance(a, b) / Math.max(la, lb);
+}
+
 /**
  * 命令行分词：按空白切分，支持引号包裹与空参数
  *
@@ -156,16 +168,4 @@ export function tokenize(
 
   if (hasContent || cur !== '') out.push(cur);
   return out;
-}
-
-export function similarity(a: string, b: string): number {
-  if (a === b) return 1;
-  if (a === '' || b === '') return 0;
-
-  const la = a.length;
-  const lb = b.length;
-  // 长度差太大直接判不相似，省一次 O(n*m)
-  if (Math.abs(la - lb) > Math.max(la, lb) * 0.6) return 0;
-
-  return 1 - editDistance(a, b) / Math.max(la, lb);
 }
