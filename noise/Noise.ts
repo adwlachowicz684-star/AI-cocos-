@@ -1,3 +1,5 @@
+import { needCount } from '../_core/guard';
+
 /**
  * noise —— 程序化噪声（地形 / 纹理 / 随机分布）
  *
@@ -376,7 +378,16 @@ export function fbm2D(
   y: number,
   opts: FbmOptions = {}
 ): number {
-  const octaves = opts.octaves ?? 4;
+  /**
+   * 【⚠️ octaves 必须有上界】
+   *
+   * 它直接就是下面的 `for (let i = 0; i < octaves; i++)` 次数。
+   * 实测 `fbm(0, 0, { octaves: Infinity })`：静默返回 0——
+   * 不是卡死，而是**结果错误**：频率不断翻倍、振幅衰减到 0，
+   * 地形变成一片平坦。不报错、不崩溃，
+   * 排查时会去查种子、查 scale，没人会想到 octaves。
+   */
+  const octaves = needCount(opts.octaves ?? 4, 'opts.octaves', 64);
   const lacunarity = opts.lacunarity ?? 2;
   const persistence = opts.persistence ?? 0.5;
 
@@ -413,7 +424,16 @@ export function ridged2D(
   y: number,
   opts: FbmOptions = {}
 ): number {
-  const octaves = opts.octaves ?? 4;
+  /**
+   * 【⚠️ octaves 必须有上界】
+   *
+   * 它直接就是下面的 `for (let i = 0; i < octaves; i++)` 次数。
+   * 实测 `fbm(0, 0, { octaves: Infinity })`：静默返回 0——
+   * 不是卡死，而是**结果错误**：频率不断翻倍、振幅衰减到 0，
+   * 地形变成一片平坦。不报错、不崩溃，
+   * 排查时会去查种子、查 scale，没人会想到 octaves。
+   */
+  const octaves = needCount(opts.octaves ?? 4, 'opts.octaves', 64);
   const lacunarity = opts.lacunarity ?? 2;
   const persistence = opts.persistence ?? 0.5;
 
@@ -729,17 +749,32 @@ export class Noise {
     scale = 0.1,
     opts: { octaves?: number; normalize?: boolean } = {}
   ): Float64Array {
-    const octaves = opts.octaves ?? 4;
+    const octaves = needCount(opts.octaves ?? 4, 'opts.octaves', 64);
+    /**
+     * 【⚠️ 宽高必须是有限正整数，且乘积要有上界】
+     *
+     * 实测 `heightMap(Infinity, 4, 0.1)` 抛
+     * `Invalid typed array length: Infinity`——引擎级报错，
+     * 虽然拦住了，但**信息里没有业务语义**，
+     * 排查时不知道是哪个地形生成调用、哪个参数错了。
+     *
+     * 更隐蔽的是"单个值合法、乘积失控"：
+     * `heightMap(1e6, 1e6)` 会尝试分配 8TB 内存。
+     * 所以除了有限性，还要给总像素数兜一个上界（16384² ≈ 2.7 亿，
+     * 已是 2GB Float64，足够任何实际地形）。
+     */
+    const w = needCount(width, 'heightMap.width', 16384);
+    const h = needCount(height, 'heightMap.height', 16384);
     const normalize = opts.normalize ?? true;
 
-    const out = new Float64Array(width * height);
+    const out = new Float64Array(w * h);
     let min = Infinity;
     let max = -Infinity;
 
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
         const v = this.fbm01(x * scale, y * scale, octaves);
-        out[y * width + x] = v;
+        out[y * w + x] = v;
         if (v < min) min = v;
         if (v > max) max = v;
       }
