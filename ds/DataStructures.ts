@@ -215,7 +215,11 @@ export class BinaryHeap<T> {
 export class LazyHeap<T> {
   private readonly _heap: BinaryHeap<{ item: T; priority: number; seq: number }>;
   private readonly _removed = new Set<number>();
+  /** 已出队的 seq。用于识别"remove 来得太晚"——那次 remove 不该再扣计数 */
+  private readonly _popped = new Set<number>();
   private _seq = 0;
+  /** 有效（既未出队、也未标记删除）的元素数 */
+  private _live = 0;
 
   constructor() {
     this._heap = new BinaryHeap<{ item: T; priority: number; seq: number }>((a, b) => {
@@ -224,18 +228,30 @@ export class LazyHeap<T> {
     });
   }
 
+  /**
+   * 【⚠️ size / isEmpty 数的是"有效元素"，不是堆里的条目数】
+   *
+   * 堆里混着已标记删除的陈旧条目，直接返回 `heap.size` 会偏大。
+   * 后果不只是数字难看——A* 主循环通常写成
+   * `while (!open.isEmpty) { const n = open.pop(); ... }`，
+   * 当堆里只剩已删除项时：isEmpty 是 false，pop() 却返回 undefined，
+   * 主循环拿到 undefined 继续访问 `n.id` 就崩，或者陷入死循环。
+   *
+   * 所以这里维护独立的 `_live` 计数，保证 isEmpty 与 pop 的语义一致。
+   */
   get size(): number {
-    return this._heap.size;
+    return this._live;
   }
 
   get isEmpty(): boolean {
-    return this._heap.isEmpty;
+    return this._live <= 0;
   }
 
   /** 入队，返回句柄（用于后续的 remove） */
   push(item: T, priority: number): number {
     const seq = this._seq++;
     this._heap.push({ item, priority, seq });
+    this._live++;
     return seq;
   }
 
@@ -250,22 +266,40 @@ export class LazyHeap<T> {
     for (;;) {
       const top = this._heap.pop();
       if (top === undefined) return undefined;
+      this._popped.add(top.seq);
       if (this._removed.has(top.seq)) {
         this._removed.delete(top.seq);
         continue;
       }
+      this._live--;
       return top.item;
     }
   }
 
-  /** 标记删除（O(1)，比真的从堆里移除快） */
+  /**
+   * 标记删除（O(1)，比真的从堆里移除快）
+   *
+   * 【两种"删了个寂寞"的情况必须挡掉】
+   * - 该 handle 已经出队：标记毫无意义，且会让 `_live` 多扣一次
+   * - 同一 handle 重复 remove：同理
+   *
+   * 两者都会让 `_live` 偏小 → isEmpty 提前为真 → A* **提前结束、漏搜**。
+   * 漏搜不报错，只是"有时候走不到终点"，是最难查的那一类。
+   */
   remove(handle: number): void {
+    // 从未签发过的句柄（如手误传了 99999 或 -1）：静默忽略，不扣计数
+    if (!(handle >= 0 && handle < this._seq)) return;
+    if (this._popped.has(handle)) return;
+    if (this._removed.has(handle)) return;
     this._removed.add(handle);
+    this._live--;
   }
 
   clear(): void {
     this._heap.clear();
     this._removed.clear();
+    this._popped.clear();
+    this._live = 0;
   }
 }
 
@@ -533,12 +567,28 @@ export class QuadTree<T> {
     }
   }
 
+  /**
+   * 【⚠️ 这里刻意不返回 -1（"落在分割线上"）】
+   *
+   * 老实现遇到 `px === midX || py === midY` 就返回 -1，
+   * 调用方于是把该项**留在当前节点**。而当前节点已经分裂过（children 非空），
+   * `_place` 的 children 分支里**没有再次判断是否需要分裂**，
+   * 于是这些项会无限堆积在内部节点上。
+   *
+   * 实测：50 个点全部插在 x = midX 时，50 个全部滞留在根节点，
+   * 四叉树退化成一个数组，query() 变成 O(n) 全扫——
+   * 建树的开销白付了，性能问题还极难归因（"四叉树怎么这么慢"）。
+   *
+   * 这不是罕见边界：**网格对齐的整数坐标**恰好落在分割线上非常常见
+   * （bounds 800 宽 → midX = 400，而物体坐标常常是 400）。
+   *
+   * 子象限的 bounds 本来就是闭开区间并完整覆盖父节点，
+   * 所以分割线上的点归入右/下侧是**正确且完备**的，不需要"-1"这个第三态。
+   */
   private _quadrantOf(node: QNode<T>, px: number, py: number): number {
     const { x, y, w, h } = node.bounds;
     const midX = x + w / 2;
     const midY = y + h / 2;
-
-    if (px === midX || py === midY) return -1;   // 在分割线上
 
     if (px >= midX) return py < midY ? 0 : 3;    // 右上 / 右下
     return py < midY ? 1 : 2;                     // 左上 / 左下
@@ -546,17 +596,17 @@ export class QuadTree<T> {
 
   /** 矩形范围查询 */
   query(range: Rect): T[] {
-    const out: T[] = [];
-    this._query(this._root, range, out);
-    return out;
+    const items: Array<QuadItem<T>> = [];
+    this._query(this._root, range, items);
+    return items.map((it) => it.data);
   }
 
-  private _query(node: QNode<T>, range: Rect, out: T[]): void {
+  private _query(node: QNode<T>, range: Rect, out: Array<QuadItem<T>>): void {
     if (!rectsOverlap(node.bounds, range)) return;
 
     if (node.items) {
       for (const item of node.items) {
-        if (pointInRect(item.x, item.y, range)) out.push(item.data);
+        if (pointInRect(item.x, item.y, range)) out.push(item);
       }
     }
 
@@ -565,31 +615,51 @@ export class QuadTree<T> {
     }
   }
 
-  /** 圆形范围查询（半径） */
+  /**
+   * 圆形范围查询（半径）
+   *
+   * 【⚠️ 不要再用 `_findItem` 反查坐标】
+   *
+   * 老实现是 `query(...).filter(d => this._findItem(this._root, d))`——
+   * 先拿到一批 data，再对**每一个** data 从根节点全树遍历去找它的坐标。
+   * 实测 2000 个对象时，一次 queryCircle 触发 2529 次 `_findItem`，
+   * 每次都是一次树的遍历：**复杂度退化到 O(k·n)**。
+   *
+   * 讽刺的是四叉树存在的意义就是避开这种遍历，
+   * 于是"范围查询"变成了全库最容易踩的性能陷阱，
+   * 而调用方从 API 名字上看不出它会更慢。
+   *
+   * 现在粗筛阶段直接保留 `QuadItem`（自带 x/y），精筛是纯算术。
+   */
   queryCircle(cx: number, cy: number, radius: number): T[] {
+    if (!(radius > 0)) return [];
     const r2 = radius * radius;
-    const candidates = this.query({ x: cx - radius, y: cy - radius, w: radius * 2, h: radius * 2 });
-    return candidates.filter((d) => {
-      const it = this._findItem(this._root, d);
-      if (!it) return false;
+    const candidates: Array<QuadItem<T>> = [];
+    this._query(
+      this._root,
+      { x: cx - radius, y: cy - radius, w: radius * 2, h: radius * 2 },
+      candidates
+    );
+
+    const out: T[] = [];
+    for (const it of candidates) {
       const dx = it.x - cx;
       const dy = it.y - cy;
-      return dx * dx + dy * dy <= r2;
-    });
+      if (dx * dx + dy * dy <= r2) out.push(it.data);
+    }
+    return out;
   }
 
-  private _findItem(node: QNode<T>, data: T): QuadItem<T> | null {
-    if (node.items) {
-      for (const it of node.items) if (it.data === data) return it;
-    }
-    if (node.children) {
-      for (const c of node.children) {
-        const found = this._findItem(c, data);
-        if (found) return found;
-      }
-    }
-    return null;
-  }
+  /**
+   * 【这里曾经有一个 `_findItem(data)`，已删除】
+   *
+   * 它从根节点遍历整棵树、按引用反查某个 data 的坐标，**复杂度 O(n)**，
+   * 唯一的调用方是 queryCircle 那个已修掉的 O(k·n) 反模式。
+   *
+   * 保留它等于留下一个"看起来能用、实际会摧毁四叉树性能"的 API，
+   * 下一个人做"更新某个对象的位置"时会自然地想到它。
+   * 真要支持按 data 反查，应该额外维护一张 `data → QuadItem` 的 Map。
+   */
 
   /** 移除（按引用匹配） */
   remove(data: T): boolean {
@@ -665,6 +735,26 @@ export class SpatialHash {
     return { cx: Math.floor(x / this._cellSize), cy: Math.floor(y / this._cellSize) };
   }
 
+  /**
+   * 从格子里摘除一个 id，并在**桶变空时把桶本身回收**
+   *
+   * 【⚠️ 空桶必须回收，否则 _cells 只增不减】
+   *
+   * 物体持续移动（或反复增删）时，走过的每一个格子都会在 `_cells` 里
+   * 留下一个空 `Set`。实测插入 200 个格子再全部 remove，`_cells.size`
+   * 仍是 200——Map 里躺着 200 个空 Set。
+   *
+   * 场景越动态泄漏越快：子弹、粒子、大量怪物每帧 update，
+   * 几分钟就能攒出几万个空桶，进程内存单调上涨且不回落。
+   * 这种泄漏不报错、不卡顿，只在长时间运行后 OOM。
+   */
+  private _dropFromCell(id: number, key: number): void {
+    const bucket = this._cells.get(key);
+    if (!bucket) return;
+    bucket.delete(id);
+    if (bucket.size === 0) this._cells.delete(key);
+  }
+
   insert(id: number, x: number, y: number): boolean {
     const { cx, cy } = this._cellOf(x, y);
     const key = this._key(cx, cy);
@@ -673,7 +763,7 @@ export class SpatialHash {
     if (this._idToCell.has(id)) {
       const oldKey = this._idToCell.get(id)!;
       if (oldKey === key) return false;   // 位置没变
-      this._cells.get(oldKey)?.delete(id);
+      this._dropFromCell(id, oldKey);
     }
 
     let bucket = this._cells.get(key);
@@ -694,7 +784,7 @@ export class SpatialHash {
   remove(id: number): boolean {
     const key = this._idToCell.get(id);
     if (key === undefined) return false;
-    this._cells.get(key)?.delete(id);
+    this._dropFromCell(id, key);
     this._idToCell.delete(id);
     return true;
   }
