@@ -228,7 +228,9 @@
       "path": "curve/",
       "maturity": "beta",
       "purpose": "关键帧曲线（线性/平滑/阶梯）",
-      "depends": [],
+      "depends": [
+        "_core"
+      ],
       "hasTest": true,
       "hasDemo": true,
       "domain": "通用工具",
@@ -314,7 +316,9 @@
       "path": "noise/",
       "maturity": "beta",
       "purpose": "确定性噪声（Value + FBM + Ridged）",
-      "depends": [],
+      "depends": [
+        "_core"
+      ],
       "hasTest": true,
       "hasDemo": true,
       "domain": "通用工具",
