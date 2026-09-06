@@ -31,6 +31,7 @@
  */
 
 import { clamp, numOr } from '../_core/math';
+import { hasOwn } from '../_core/guard';
 
 // ==================== 类型 ====================
 
@@ -166,7 +167,7 @@ export class BgmStack {
     if (cfg.layers.length === 0) {
       throw new Error('[BgmStack] 至少要有一层');
     }
-    if (!(cfg.initialState in cfg.states)) {
+    if (!hasOwn(cfg.states, cfg.initialState)) {
       throw new Error(`[BgmStack] 初始状态 "${cfg.initialState}" 不在 states 里`);
     }
 
@@ -202,7 +203,20 @@ export class BgmStack {
    * 音量卡在 0 永不上升——这是很常见的调用方式错误。
    */
   setState(next: StateName): boolean {
-    if (!(next in this._states)) {
+    /**
+     * 【⚠️ 状态查询必须用 hasOwn，不能用 `in`】
+     *
+     * 实测：`setState('toString')` 返回 **true**（被接受），
+     * 随后所有层的音量变成 0 —— 静音。
+     * 因为 `'toString' in this._states` 命中原型链为 true，通过了校验；
+     * 接着 `_mixOf('toString')` 取到的也是 `Object.prototype.toString`（函数），
+     * 于是 `mix[layerName] ?? 0` 全为 0。
+     *
+     * 表现是"切换到一个不存在的状态，BGM 静音且不报错"——
+     * 音频问题本来就难定位，配合不报错几乎无从下手。
+     * 状态名常来自游戏逻辑字符串，属于外部输入。
+     */
+    if (!hasOwn(this._states, next)) {
       throw new Error(`[BgmStack] 未知状态 "${next}"`);
     }
     /**
@@ -377,7 +391,7 @@ export class BgmStack {
   }
 
   private _mixOf(state: StateName): StateMix {
-    return this._states[state] ?? {};
+    return hasOwn(this._states, state) ? this._states[state] : {};
   }
 
   /**
