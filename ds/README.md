@@ -115,7 +115,19 @@ h.pop();               // 自动跳过失效项
 批量构造是 **O(n)**（自底向上建堆），不是 O(n log n)。
 
 ### LazyHeap\<T\>
-`push(item, priority) → handle` / `pop()` / `remove(handle)` / `clear()`
+`push(item, priority) → handle` / `pop()` / `remove(handle)` / `clear()` / `size` / `isEmpty`
+
+> ⚠️ **`size` / `isEmpty` 数的是「有效元素」，不是堆里的条目数。**
+>
+> `remove(handle)` 只打标记（O(1)，这是惰性删除的意义），堆里仍留着陈旧条目；
+> 但 `size` 会立即减一，保证 `isEmpty` 与 `pop()` 的语义一致。
+>
+> 这一点很关键：A\* 主循环写成 `while (!open.isEmpty) { const n = open.pop(); ... }` 时，
+> 若 `isEmpty` 数的是陈旧条目，就可能出现"isEmpty 为 false，pop 却返回 undefined"，
+> 然后拿 undefined 去访问字段——崩溃或死循环。
+>
+> 迟到的 `remove`（句柄已出队）和重复的 `remove` 都不会误扣计数，
+> 否则 `isEmpty` 会提前为真，导致 A\* **提前结束、漏搜**。
 
 ### DisjointSet
 `find`（带路径压缩）/ `union`（按秩合并）/ `connected` / `groups()` / `componentSize` / `reset()` / `componentCount`
@@ -128,7 +140,16 @@ h.pop();               // 自动跳过失效项
 ### SpatialHash
 `insert(id, x, y)` / `update(id, x, y)` / `remove(id)` / `queryNeighbors(x, y, r)` / `queryRect(...)` / `queryCell(x, y)` / `clear()`
 
-移动时旧的格子会被自动清理，不会重复计数。
+移动时旧的格子会被自动清理，不会重复计数；**格子空了之后桶也会被回收**。
+
+> ⚠️ **空桶必须回收，否则 `_cells` 只增不减。**
+>
+> 物体持续移动会走过大量格子，若只在桶里删 id、不删空桶，
+> 每个走过的格子都会永久留下一个空 `Set`。
+> 实测插入 200 个格子再全部 remove，不回收时 `_cells.size` 仍是 200。
+>
+> 子弹、粒子、大量怪物每帧 `update` 的场景下，几分钟就能攒出几万个空桶，
+> 内存单调上涨且不回落——不报错、不卡顿，只在长时间运行后 OOM。
 
 > ⚠️ **`queryNeighbors(x, y, r)` 的 `r` 是「格子数」，不是世界距离。**
 >
