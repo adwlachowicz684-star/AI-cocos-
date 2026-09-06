@@ -63,6 +63,7 @@ import { runNumGuardTests } from './run_numguard';
 import { runGuardTests } from './run_guard';
 import { runPhase1Tests } from './run_phase1';
 import { runPhase2Tests } from './run_phase2';
+import { runPhase3Tests } from './run_phase3';
 
 async function main(): Promise<void> {
   setSuite('第一批：核心插件（EventBus / Pool / RNG / Damage / Skill / Joystick）');
@@ -164,6 +165,9 @@ async function main(): Promise<void> {
 
   setSuite('精审修复回归 · 第二批（模式 A：Record 查表原型链 ×7 单元）');
   runPhase2Tests();
+
+  setSuite('精审修复回归 · 第三批（模式 B：无界 count / 模式 C：角度死循环 / 零质量）');
+  runPhase3Tests();
 
   summary();
 }
