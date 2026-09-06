@@ -30,7 +30,7 @@
  * 位置与朝向通过回调/更新注入。
  * 视线检测用 `ILineOfSight` 接口（可接 `fov/` 的 Shadowcasting，也可自己实现）。
  */
-import { numOr, safeDt } from '../_core/math';
+import { normalizeAngleRad, numOr, safeDt } from '../_core/math';
 
 // ============================================================
 // 数据结构
@@ -529,9 +529,21 @@ export class PerceptionSystem {
     if (dist > prox && p.cfg.sightHalfAngle < Math.PI) {
       const ang = Math.atan2(dy, dx);
       let diff = ang - p.facing;
-      // 归一化到 [-π, π]
-      while (diff > Math.PI) diff -= Math.PI * 2;
-      while (diff < -Math.PI) diff += Math.PI * 2;
+      /**
+       * 【⚠️ 用取模归一化，不能用 while 递减】
+       *
+       * 原实现：`while (diff > Math.PI) diff -= Math.PI * 2;`
+       * `Infinity - 2π` 仍等于 `Infinity`，循环条件恒真 → **死循环**。
+       *
+       * 实测：给 perceiver 设 `facing = Infinity` 后调用 `tick()`，
+       * 进程 CPU 100% 永久卡死（`timeout 8` 退出码 124）。
+       * facing 通常来自 `Math.atan2` 或外部传入的朝向角，
+       * 一旦上游产生 NaN/Infinity 就会触发。
+       *
+       * 改用 `normalizeAngleRad`（O(1) 取模，结构上不可能死循环），
+       * 且它把非有限值归一到 0——让判定确定可解释，而非 NaN 静默失效。
+       */
+      diff = normalizeAngleRad(diff);
       const ad = Math.abs(diff);
       if (ad > p.cfg.sightHalfAngle) return 0;
       // 视野边缘的可见度低（余光）
