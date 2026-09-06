@@ -45,6 +45,7 @@
  * 【无引擎依赖】上下文类型由调用方定义。
  */
 import { safeDt } from '../_core/math';
+import { hasOwn } from '../_core/guard';
 
 export interface StateHooks<C> {
   /** 进入时调用一次 */
@@ -71,12 +72,41 @@ export interface StateMachineOptions<C> {
 
 export class StateMachine<C> {
   private readonly _opts: StateMachineOptions<C>;
+  /**
+   * 状态表（**构造期复制进 Map**）
+   *
+   * 【⚠️ 为什么不能直接查 `opts.states[name]`】
+   *
+   * 状态名是字符串，`Record<string, ...>` 的直接下标会命中**原型链**。实测：
+   * ```js
+   * new StateMachine({ states: {}, initial: 'toString' })   // 不报错！
+   * sm.start({})                                            // enter 静默不触发
+   * sm.current                                              // → 'toString'
+   * ```
+   * `opts.states['toString']` 取到的是 `Object.prototype.toString`，
+   * 是个**函数**——于是 `if (!states[initial])` 的真假判断通过了，
+   * 状态机带着一个不存在的状态正常启动，
+   * 之后 `enter` / `exit` / `update` 全部静默不触发。
+   *
+   * 表现为"状态机配好了但什么都没发生"，且不抛任何错——
+   * 排查时没人会想到源头在状态名字符串上。
+   *
+   * 复制进 Map 同时解决两件事：
+   * ① 只认自有属性，原型链天然不可达
+   * ② `Object.keys` 同款语义（`findUnreachable` 依赖它）
+   */
+  private readonly _states: ReadonlyMap<string, StateHooks<C>>;
   private _current: string;
   private _timeInState = 0;
 
   constructor(opts: StateMachineOptions<C>) {
     this._opts = opts;
-    if (!opts.states[opts.initial]) {
+    this._states = new Map(
+      Object.keys(opts.states)
+        .filter((k) => hasOwn(opts.states, k))
+        .map((k) => [k, opts.states[k]])
+    );
+    if (!this._states.has(opts.initial)) {
       throw new Error(`[StateMachine] 初始状态 "${opts.initial}" 不存在`);
     }
     this._current = opts.initial;
@@ -96,7 +126,7 @@ export class StateMachine<C> {
    * 【什么时候调用】拿到 context 之后、第一次 update 之前。
    */
   start(ctx: C): void {
-    this._opts.states[this._current].enter?.(ctx, null);
+    this._states.get(this._current)?.enter?.(ctx, null);
   }
 
   get current(): string {
@@ -110,9 +140,23 @@ export class StateMachine<C> {
 
   /** 能否转换到目标状态 */
   can(to: string): boolean {
-    const allowed = this._opts.transitions?.[this._current];
+    const allowed = this._transOf(this._current);
     if (!allowed) return true;
     return allowed.includes(to);
+  }
+
+  /**
+   * 安全读取转换表
+   *
+   * 【同 `_states` 的理由】`transitions` 也是 `Record<string, ...>`，
+   * `transitions['toString']` 会取到原型函数（truthy），
+   * 于是 `.includes(to)` 在**函数**上调用 → TypeError 或恒 false。
+   * 这里一样只认自有属性。
+   */
+  private _transOf(from: string): readonly string[] | undefined {
+    const t = this._opts.transitions;
+    if (!t || !hasOwn(t, from)) return undefined;
+    return t[from];
   }
 
   /**
@@ -124,7 +168,7 @@ export class StateMachine<C> {
   transitionTo(to: string, ctx: C): boolean {
     if (to === this._current) return false;
 
-    if (!this._opts.states[to]) {
+    if (!this._states.has(to)) {
       if (this._opts.strict !== false) {
         throw new Error(`[StateMachine] 目标状态 "${to}" 不存在`);
       }
@@ -141,10 +185,10 @@ export class StateMachine<C> {
     const from = this._current;
 
     try {
-      this._opts.states[from]?.exit?.(ctx, to);
+      this._states.get(from)?.exit?.(ctx, to);
       this._current = to;
       this._timeInState = 0;
-      this._opts.states[to].enter?.(ctx, from);
+      this._states.get(to)?.enter?.(ctx, from);
       this._opts.onChange?.(from, to, ctx);
     } finally {
       this._transitioning = false;
@@ -167,7 +211,7 @@ export class StateMachine<C> {
      * 而传给业务 update 的 dt 由调用方自己决定怎么校验，这里不越权改。
      */
     this._timeInState += safeDt(dt) ? dt : 0;
-    const next = this._opts.states[this._current]?.update?.(ctx, dt);
+    const next = this._states.get(this._current)?.update?.(ctx, dt);
     if (typeof next === 'string' && next.length > 0 && next !== this._current) {
       this.transitionTo(next, ctx);
     }
@@ -180,13 +224,13 @@ export class StateMachine<C> {
    * 这类 bug 在运行时表现为"某个功能死活不触发"，很难定位。
    */
   findUnreachable(): string[] {
-    const all = Object.keys(this._opts.states);
+    const all = Array.from(this._states.keys());
     const seen = new Set<string>([this._opts.initial]);
     const queue = [this._opts.initial];
 
     while (queue.length > 0) {
       const cur = queue.shift()!;
-      const nexts = this._opts.transitions?.[cur] ?? all;
+      const nexts = this._transOf(cur) ?? all;
       for (const n of nexts) {
         if (!seen.has(n)) {
           seen.add(n);
@@ -200,10 +244,10 @@ export class StateMachine<C> {
 
   reset(ctx: C): void {
     if (this._current !== this._opts.initial) {
-      this._opts.states[this._current]?.exit?.(ctx, this._opts.initial);
+      this._states.get(this._current)?.exit?.(ctx, this._opts.initial);
       this._current = this._opts.initial;
       this._timeInState = 0;
-      this._opts.states[this._current].enter?.(ctx, null);
+      this._states.get(this._current)?.enter?.(ctx, null);
     } else {
       this._timeInState = 0;
     }
