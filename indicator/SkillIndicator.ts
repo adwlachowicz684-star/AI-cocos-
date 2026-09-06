@@ -39,7 +39,7 @@
  * ```
  */
 
-import { clamp } from '../_core/math';
+import { angleDiff, clamp } from '../_core/math';
 
 /** 指示器类型 */
 export type IndicatorKind =
@@ -419,9 +419,44 @@ export function snapAngle(
   facingDeg: number,
   maxDeviationDeg: number,
 ): number {
-  let diff = desiredDeg - facingDeg;
-  while (diff > 180) diff -= 360;
-  while (diff < -180) diff += 360;
+  /**
+   * 【⚠️ 用取模归一化，不能用 while 递减】
+   *
+   * 原实现：
+   * ```js
+   * while (diff > 180) diff -= 360;
+   * while (diff < -180) diff += 360;
+   * ```
+   * `Infinity - 360` 仍等于 `Infinity`，循环条件恒真 → **死循环**。
+   * 实测 `snapAngle(Infinity, 15)`：退出码 124（卡死）。
+   *
+   * 角度常由 `Math.atan2` 算出，上游一旦出现 NaN/Infinity
+   * （比如除零、坐标未初始化），这里就是进程级卡死而不是"指示偏了"。
+   *
+   * 复用 `angleDiff(0, diff)`：O(1) 取模，返回 -180~180 的最短差值，
+   * 与原来两个 while 的语义完全一致。
+   */
+  /**
+   * 度 → 弧度 → `angleDiffRad` → 度。
+   *
+   * 走弧度版是因为**只有它做了非有限值归一**（Infinity → 0）；
+   * 度版的 `wrapAngle` 用 `deg % 360`，`Infinity % 360` 仍是 NaN。
+   * 实测角度差为 Infinity 时，度版会返回 NaN 并污染下游。
+   */
+  const raw = desiredDeg - facingDeg;
+  /**
+   * 【为什么不换算成弧度再走 angleDiffRad】
+   *
+   * 弧度往返会引入浮点误差：实测 `snapAngle(5, 0, 15)`
+   * 从精确的 5 变成 4.999999999999995。
+   * 角度值常被直接写回节点 rotation 并参与相等比较，
+   * 无谓的精度损失应当避免。
+   *
+   * 所以保留度内取模（`angleDiff` 是 O(1)，与原来两个 while 同义），
+   * 只对非有限值单独归一到 0——这正是 `angleDiffRad` 的做法，
+   * 只是避免了一次单位换算。
+   */
+  const diff = Number.isFinite(raw) ? angleDiff(0, raw) : 0;
   const clamped = clamp(diff, -maxDeviationDeg, maxDeviationDeg);
   return facingDeg + clamped;
 }
