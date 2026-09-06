@@ -62,6 +62,7 @@ import { runDtGuard2Tests } from './run_dtguard2';
 import { runNumGuardTests } from './run_numguard';
 import { runGuardTests } from './run_guard';
 import { runPhase1Tests } from './run_phase1';
+import { runPhase2Tests } from './run_phase2';
 
 async function main(): Promise<void> {
   setSuite('第一批：核心插件（EventBus / Pool / RNG / Damage / Skill / Joystick）');
@@ -160,6 +161,9 @@ async function main(): Promise<void> {
 
   setSuite('精审修复回归 · 第一批（原型污染 / 删除顺序 / 经济漏洞 / 无界 count 死循环）');
   runPhase1Tests();
+
+  setSuite('精审修复回归 · 第二批（模式 A：Record 查表原型链 ×7 单元）');
+  runPhase2Tests();
 
   summary();
 }
