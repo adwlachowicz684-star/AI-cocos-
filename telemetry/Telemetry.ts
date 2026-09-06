@@ -1,4 +1,5 @@
 import { clampNum } from '../_core/math';
+import { hasOwn } from '../_core/guard';
 /**
  * telemetry/Telemetry.ts —— 埋点上报
  *
@@ -184,7 +185,24 @@ export class Telemetry {
    * 同一会话内对同一事件的决策永远一致。
    */
   willSample(name: string): boolean {
-    const rate = this._eventSampleRates[name] ?? this._sampleRate;
+    /**
+     * 【⚠️ 采样率表必须只认自有属性】
+     *
+     * `this._eventSampleRates[name]` 直接下标会命中原型链。实测：
+     * ```js
+     * new Telemetry({ eventSampleRates: {} }).willSample('toString')
+     * // rate = Object.prototype.toString（一个函数）
+     * // 于是 hash < function → NaN 比较恒 false → 事件被永久丢弃
+     * ```
+     * 后果是"某个事件名永远不上报"，且因为采样本来就是概率性的，
+     * 现象看起来和正常采样完全一样——几乎不可能被怀疑是 bug。
+     *
+     * 事件名虽然通常来自代码常量，但也可能来自配置表或埋点平台下发，
+     * 属于外部输入，必须守。用 `hasOwn` 挡一层后未命中即回退全局采样率。
+     */
+    const rate = hasOwn(this._eventSampleRates, name)
+      ? this._eventSampleRates[name]
+      : this._sampleRate;
     if (rate >= 1) return true;
     if (rate <= 0) return false;
     return hashString(`${this._sessionId}:${name}`) < rate;
