@@ -176,6 +176,41 @@ export function levenshtein(a: string, b: string): number {
 }
 // ==================== 实现 ====================
 
+/**
+ * 「隐式开启」的实例计数
+ *
+ * 【为什么是计数而不是实例集合】
+ * 持有实例引用会让它们**永远无法被 GC**——这类模块通常是全局单例，
+ * 一旦进了 Set 就常驻内存。计数不持有引用，没有这个问题。
+ *
+ * 【已知局限（保守方向）】
+ * 实例被销毁时计数不会自动减少（没有 destroy 钩子），
+ * 所以计数可能**偏大**。偏差方向是安全的：宁可误报（多提醒一次），
+ * 也不会漏报（本该提醒却静默）。
+ * 需要清零时用 `resetAudit()`（测试与热重载场景）。
+ */
+let _implicitlyEnabled = 0;
+
+/**
+ * 返回「未显式设置 enabled 而默认开启」的实例数量
+ *
+ * 【用途】上线自检 / CI 断言
+ * ```js
+ * // 启动自检
+ * if (auditImplicitlyEnabled() > 0) {
+ *   throw new Error('存在未显式设置 enabled 的 CheatCode 实例');
+ * }
+ * ```
+ */
+export function auditImplicitlyEnabled(): number {
+  return _implicitlyEnabled;
+}
+
+/** 清零审计计数（单测与热重载用） */
+export function resetAudit(): void {
+  _implicitlyEnabled = 0;
+}
+
 export class CheatCode {
   private readonly _byName = new Map<string, CommandDef>();
   private readonly _order: string[] = [];
@@ -223,10 +258,25 @@ export class CheatCode {
      * 这个模块默认开启，且没有任何上线提醒。
      */
     if (opts.enabled === undefined && this._enabled) {
+      /**
+       * 【⚠️ console.warn 抓不到：补一个可断言的计数】
+       *
+       * 光靠 `console.warn` 有两个问题：
+       * 1. 开发者可能根本不看控制台
+       * 2. **CI 无法拦截它**——warn 不是失败
+       *
+       * 所以同时累加到模块级计数，暴露 `auditImplicitlyEnabled()`。
+       * 项目可以在启动自检或 CI 里断言它为 0：
+       * ```js
+       * if (auditImplicitlyEnabled() > 0) throw new Error('有作弊码实例未显式设置 enabled');
+       * ```
+       */
+      _implicitlyEnabled++;
       console.warn(
         '[CheatCode] 未显式传入 enabled，默认开启。' +
         '正式版请传 `enabled: !IS_PRODUCTION`，' +
-        '否则作弊码会带到线上。'
+        '否则作弊码会带到线上。' +
+        `可用 auditImplicitlyEnabled() 在 CI 中断言（当前 ${_implicitlyEnabled} 处）。`
       );
     }
   }
@@ -236,6 +286,10 @@ export class CheatCode {
   }
 
   set enabled(v: boolean) {
+    // 从"隐式开启"转为"显式设置"时，撤销计数——它不再是需要提醒的对象
+    if (!this._enabledExplicit && this._enabled && _implicitlyEnabled > 0) {
+      _implicitlyEnabled--;
+    }
     this._enabled = v;
     this._enabledExplicit = true;
   }
