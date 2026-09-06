@@ -102,11 +102,21 @@ export class RNG {
     return arr;
   }
 
-  /** 取 n 个不重复元素（n 大于长度时返回全部） */
+  /**
+   * 取 n 个不重复元素（n 大于长度时返回全部，n ≤ 0 返回空数组）
+   *
+   * 【⚠️ 必须先夹下界】
+   * `slice(0, -1)` 在 JS 里是"去掉最后一个"，不是"取 0 个"。
+   * 少了 `Math.max(0, ...)`，n 传负数会返回**几乎整个数组**——
+   * 实测 `sample([1,2,3,4,5], -1)` 返回 4 个元素。
+   *
+   * n 常常是算出来的（如 `count - alreadyPicked`），
+   * 减出负数是常事，而返回值看起来完全合理，不会有任何报错。
+   */
   sample<T>(arr: readonly T[], n: number): T[] {
     const copy = arr.slice();
     this.shuffle(copy);
-    return copy.slice(0, Math.min(n, copy.length));
+    return copy.slice(0, Math.max(0, Math.min(n, copy.length)));
   }
 
   /**
