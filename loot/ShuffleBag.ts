@@ -32,6 +32,7 @@
  */
 
 import { IRandomSource } from '../_core/types';
+import { needCount } from '../_core/guard';
 
 export interface ShuffleBagOptions {
   /**
@@ -61,10 +62,24 @@ export class ShuffleBag<T> {
 
   /** 添加元素（count = 权重，占几个格子） */
   add(value: T, count = 1): this {
-    if (count <= 0) throw new Error(`[ShuffleBag] count 必须为正，实际 ${count}`);
+    /**
+     * 【⚠️ count 必须有上界】
+     *
+     * `count` 就是 `_refill` 里 `for (let i = 0; i < e.count; i++)` 的次数。
+     * 实测 `bag.add('a', Infinity)` 后调用 `next()` → 退出码 124，进程卡死。
+     *
+     * 老实现只有 `count <= 0` 的检查：
+     * - Infinity 畅通无阻 → 无限 push
+     * - NaN 也畅通（`NaN <= 0` 为 false）→ 权重变 NaN，之后洗牌索引全乱
+     *
+     * `needCount` 同时拦住这两种，并要求整数（权重本就是"占几个格子"）。
+     */
+    const n = needCount(count, 'count');
+    if (n === 0) throw new Error(`[ShuffleBag] count 必须为正，实际 ${count}`);
+
     const exist = this._entries.find((e) => e.value === value);
-    if (exist) exist.count += count;
-    else this._entries.push({ value, count });
+    if (exist) exist.count += n;
+    else this._entries.push({ value, count: n });
     this._bag.length = 0; // 内容变了，缓存失效
     return this;
   }
