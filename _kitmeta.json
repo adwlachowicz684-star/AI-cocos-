@@ -42,7 +42,9 @@
       "path": "pool/Pool.ts",
       "maturity": "stable",
       "purpose": "泛型对象池（三个注入钩子 + 泄漏追踪）",
-      "depends": [],
+      "depends": [
+        "_core"
+      ],
       "hasTest": true,
       "hasDemo": true,
       "domain": "地基",
