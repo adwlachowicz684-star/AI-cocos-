@@ -1569,8 +1569,46 @@ export async function runBatch13Tests(): Promise<void> {
     });
 
     test('makeKey 排序标签', () => {
-      eq(makeKey('x', { b: '2', a: '1' }), 'x|a=1,b=2');
+      /**
+       * 【为什么断言"排序后 a 在前"而不是硬编码字符串】
+       *
+       * makeKey 的输出是内部 Map 的 key，格式本身不是外部契约——
+       * 老实现用裸拼接会产生碰撞（见下方用例），已改成 JSON 编码。
+       *
+       * 这条用例要保护的是**排序语义**：
+       * `{b:'2', a:'1'}` 与 `{a:'1', b:'2'}` 必须得到同一个 key。
+       * 断言具体字符串会把"格式"误当成契约，
+       * 反而阻碍修复碰撞问题。
+       */
+      const k1 = makeKey('x', { b: '2', a: '1' });
+      const k2 = makeKey('x', { a: '1', b: '2' });
+      eq(k1, k2, '标签顺序不应影响 key');
+      // 排序语义：a 应排在 b 之前
+      assert(k1.indexOf('"a"') < k1.indexOf('"b"'), `a 应在 b 之前，实际 ${k1}`);
       eq(makeKey('x', {}), 'x|');
+    });
+
+    test('⚠️ makeKey 不因标签值里的分隔符而碰撞', () => {
+      /**
+       * 【缺陷】老实现裸拼接 `` `${id}|${k}=${v},...` ``，实测碰撞：
+       * ```js
+       * makeKey('hit', { a: '1,b=2' })     // → 'hit|a=1,b=2'
+       * makeKey('hit', { a: '1', b: '2' }) // → 'hit|a=1,b=2'   ← 同一个 key
+       * ```
+       * 两个不同分组被合并统计，且总数没变、没有任何"少了一条"的迹象。
+       */
+      const k1 = makeKey('hit', { a: '1,b=2' });
+      const k2 = makeKey('hit', { a: '1', b: '2' });
+      assert(k1 !== k2, `不应碰撞：
+  ${k1}
+  ${k2}`);
+
+      // 含 | 与 = 的极端值同样不能碰撞
+      const k3 = makeKey('hit', { a: 'x|y=z' });
+      const k4 = makeKey('hit', { a: 'x', y: 'z' });
+      assert(k3 !== k4, `不应碰撞：
+  ${k3}
+  ${k4}`);
     });
 
     test('⚠️ 未声明的标签被拒绝', () => {
