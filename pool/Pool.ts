@@ -28,6 +28,8 @@
  * ```
  */
 
+import { needCount } from '../_core/guard';
+
 export interface PoolOptions {
   /** 池的最大容量（归还时若空闲已达上限则真正销毁，防止只增不减） */
   readonly maxSize?: number;
@@ -113,9 +115,36 @@ export class Pool<T> {
     this._inIdle = this._guard ? new Set<T>() : null;
   }
 
-  /** 预热：提前创建 N 个，避免运行中创建造成卡顿尖峰 */
+  /**
+   * 预热：提前创建 N 个，避免运行中创建造成卡顿尖峰
+   *
+   * 【⚠️ n 必须有上界】
+   *
+   * 老实现是裸的 `for (let i = 0; i < n; i++)`：
+   * - `n = Infinity` → **无限创建，进程立即 OOM**
+   * - `n = NaN` → `i < NaN` 恒假，静默什么都不做（这个还算温和）
+   *
+   * Infinity 那条是全库"无界 count"模式的一员（见 `_core/guard.ts`），
+   * 该模式在 fov / buff / loot 等单元上实测确认会卡死进程。
+   *
+   * 【⚠️ 上界为什么用 needCount 的默认值，而不是 maxSize】
+   *
+   * 我第一版写的是 `Math.min(needCount(...), this._maxSize)`，
+   * 顺手把 prewarm 夹到了 maxSize 以内——**这是错的**，已回退。
+   *
+   * `maxSize` 的语义是"**归还时**若空闲已达上限则真正销毁"，
+   * 它管的是运行时的回收上限，不是预分配上限。
+   * 既有测试明确断言了这条契约：
+   * `prewarm(20)` 配 `maxSize: 3` 应当得到 `idle === 20`
+   * ——"预热就是要预分配，不该被 maxSize 截断"。
+   *
+   * 两者是独立的设计决策。我要防的是 **Infinity 导致 OOM**，
+   * 不是要重新定义预热与容量的关系。顺手改掉一个既有设计决策，
+   * 正是返工纪律里明令禁止的"顺手重构"。
+   */
   prewarm(n: number): void {
-    for (let i = 0; i < n; i++) {
+    const count = needCount(n, 'prewarm.n');
+    for (let i = 0; i < count; i++) {
       const o = this._createNew();
       this._idle.push(o);
       this._inIdle?.add(o);
