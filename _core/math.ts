@@ -47,9 +47,8 @@ export function clamp01(v: number): number {
  * @param fallback 非有限值时使用的兜底值
  */
 export function clampNum(v: unknown, min: number, max: number, fallback: number): number {
-  const n = Number(v);
-  if (!Number.isFinite(n)) return fallback;
-  return Math.min(max, Math.max(min, n));
+  const n = numOr(v, NaN);
+  return Number.isNaN(n) ? fallback : Math.min(max, Math.max(min, n));
 }
 
 /**
@@ -79,6 +78,21 @@ export function clampNum(v: unknown, min: number, max: number, fallback: number)
  * @param fallback 非有限值（NaN / ±Infinity / undefined / 非数字）时使用的值
  */
 export function numOr(v: unknown, fallback: number): number {
+  /**
+   * 【坑】`Number(null) === 0`、`Number('') === 0`、`Number([]) === 0`。
+   *
+   * 这三个都是 JS 的隐式转换陷阱，而它们恰好是"配置缺失"最常见的三种形态：
+   * - JSON 反序列化出 `{ "limit": null }`
+   * - 配置表里某格留空 → `''`
+   * - 误把数组传进来 → `[]`
+   *
+   * 走 `Number(v)` 的话它们全部变成 **0**，而不是回退到 fallback。
+   * 后果对"容量/上限"类字段尤其致命：`limit = 0` 意味着
+   * 撤销栈 / 对象池 / 缓存**容量归零**，而且不报错、不告警。
+   *
+   * 所以缺值判定必须先于数值转换，且要显式覆盖 null 与空串。
+   */
+  if (v === null || v === undefined || v === '') return fallback;
   const n = typeof v === 'number' ? v : Number(v);
   return Number.isFinite(n) ? n : fallback;
 }
@@ -308,7 +322,13 @@ export function smoothDamp(
   dt: number,
   maxSpeed = Infinity
 ): number {
-  smoothTime = Math.max(0.0001, smoothTime);
+  /**
+   * 【坑】smoothTime 为 NaN / undefined 时，`Math.max(0.0001, NaN)` 得到 **NaN**，
+   * 之后 omega、exp、output 全是 NaN，并且**不会自愈**——
+   * velRef.v 被写坏后，后续每一帧都基于坏值继续算。
+   * 配置里 smoothTime 来自外部（存档 / 策划表）时这条必然触发。
+   */
+  smoothTime = Math.max(0.0001, numOr(smoothTime, 0.0001));
   const omega = 2 / smoothTime;
 
   const x = omega * dt;
@@ -319,15 +339,32 @@ export function smoothDamp(
   const maxChange = maxSpeed * smoothTime;
   change = clamp(change, -maxChange, maxChange);
 
+  /**
+   * 【⚠️ 这一行是 maxSpeed 生效的关键，缺了它就等于没限速】
+   *
+   * 限速之后，"这一帧要奔赴的目标点"必须跟着回退到 `current - change`，
+   * 不能再直接用调用方传进来的 target。
+   *
+   * 缺这一行时（本文件的历史实现）：
+   *   current = 0, target = 100, maxSpeed = 5, dt = 1/60
+   *   → output = target + (change + temp) * exp ≈ 100 - 1×0.85 ≈ **99.01**
+   *   一帧就跳到 99，maxSpeed 完全被绕过，而且比不限速还跳得更快
+   *   （不限速时首帧只走到 1.22）。
+   *
+   * 症状极具迷惑性："明明设了最大速度，镜头瞬移时反而闪现得更远"。
+   */
+  const limitedTarget = current - change;
+
   const temp = (velRef.v + omega * change) * dt;
   velRef.v = (velRef.v - omega * temp) * exp;
 
-  let output = target + (change + temp) * exp;
+  let output = limitedTarget + (change + temp) * exp;
 
   // 防止越过目标后抖动
   if (target - current > 0 === output > target) {
     output = target;
-    velRef.v = (output - target) / dt;
+    // 【坑】dt 为 0 时这里是 0/0 → NaN，会把 velRef 永久写坏，之后再正常也回不来
+    velRef.v = dt > 0 ? (output - target) / dt : 0;
   }
   return output;
 }
@@ -389,7 +426,25 @@ export const Easing = {
 
 export type EasingName = keyof typeof Easing;
 
-/** 按名字取缓动函数，未知名回退到 linear（不抛异常，配置填错时不该崩） */
+/**
+ * 按名字取缓动函数，未知名回退到 linear（不抛异常，配置填错时不该崩）
+ *
+ * 【⚠️ 必须用 hasOwnProperty 挡一层原型链】
+ *
+ * 直接 `(Easing as Record<string, fn>)[name]` 时，配置里填了
+ * `'toString'` / `'constructor'` / `'valueOf'` 这类 Object.prototype 上的名字，
+ * 会取到**原型方法**而不是回退 linear：
+ *
+ * ```
+ * easing('toString')(0.5)     → "[object Undefined]"（字符串！）
+ * easing('constructor')(0.5)  → 一个对象
+ * ```
+ *
+ * 后果比抛异常糟得多：返回值不是数字，下游 `x + 插值结果` 立刻变 NaN，
+ * 表现为"角色瞬移到 (NaN, NaN) 消失"，且没有任何报错。
+ * 配置表 / 存档是外部输入，这类名字完全可能混进来。
+ */
 export function easing(name: EasingName | string): (t: number) => number {
-  return (Easing as Record<string, (t: number) => number>)[name] ?? Easing.linear;
+  const table = Easing as Record<string, (t: number) => number>;
+  return Object.prototype.hasOwnProperty.call(table, name) ? table[name] : Easing.linear;
 }
