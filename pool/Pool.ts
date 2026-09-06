@@ -168,7 +168,18 @@ export class Pool<T> {
     }
 
     if (this._trackLeaks) this._out.delete(obj);
-    this.active--;
+    /**
+     * 【⚠️ active 不能减到负数】
+     *
+     * 最常见的触发路径是 `destroy()` 之后：destroy 把 active 归零，
+     * 但那时借出去的对象还在外部，切场景后它们被归还就会一路减成负数
+     * （实测：get 两次 → destroy → put 两次 → active === -2）。
+     *
+     * active 是**泄漏检测的唯一指标**，一旦为负就会说谎：
+     * 真的泄漏了 5 个，看到的却是 -2，而"负数"比"正数增长"更不像故障，
+     * 排查时根本不会往泄漏上想。
+     */
+    this.active = Math.max(0, this.active - 1);
 
     // 归还前休眠：断开引用、停止计时、隐藏节点
     //
