@@ -510,7 +510,9 @@
       "path": "shop/",
       "maturity": "beta",
       "purpose": "商店与经济（折扣/多货币/库存）",
-      "depends": [],
+      "depends": [
+        "_core"
+      ],
       "hasTest": true,
       "hasDemo": true,
       "domain": "内容与掉落",
@@ -670,7 +672,9 @@
       "path": "fov/FOV.ts",
       "maturity": "beta",
       "purpose": "视野与战争迷雾（Shadowcasting + Raycasting）",
-      "depends": [],
+      "depends": [
+        "_core"
+      ],
       "hasTest": true,
       "hasDemo": true,
       "layer": "L1",
@@ -1010,7 +1014,9 @@
       "path": "skill-variant/SkillVariant.ts",
       "maturity": "beta",
       "purpose": "技能变体：补丁+条件+深拷贝，遗物改造技能（★用户点名「技能模块」的扩展）",
-      "depends": [],
+      "depends": [
+        "_core"
+      ],
       "hasTest": true,
       "hasDemo": true,
       "domain": "数值与战斗",
