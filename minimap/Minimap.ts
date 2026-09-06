@@ -36,7 +36,7 @@
  * 由调用方拿去渲染。这样它可以被完整测试。
  */
 
-import { clamp } from '../_core/math';
+import { normalizeAngleRad, clamp } from '../_core/math';
 
 // ==================== 类型 ====================
 
@@ -172,11 +172,20 @@ export interface MinimapIcon {
 
 /** 把角度规范到 (-π, π] */
 export function normalizeAngle(a: number): number {
-  const TWO_PI = Math.PI * 2;
-  let x = a % TWO_PI;
-  if (x > Math.PI) x -= TWO_PI;
-  if (x <= -Math.PI) x += TWO_PI;
-  return x;
+  /**
+   * 【⚠️ 非有限值必须归一到 0，不能返回 NaN】
+   *
+   * 原实现 `a % TWO_PI`：`Infinity % 2π` → **NaN**。
+   * 实测 `normalizeAngle(Infinity)` → NaN。
+   *
+   * 这个返回值会直接进小地图图标的 `rotation` 字段。
+   * NaN 旋转在渲染层表现为"图标消失"或"朝向乱转"，
+   * 且不报错——玩家只会觉得小地图有问题。
+   *
+   * 复用了 `_core.normalizeAngleRad`（O(1) 取模 + 非有限值归 0），
+   * 这里保留同名导出以免破坏既有调用方。
+   */
+  return normalizeAngleRad(a);
 }
 
 export class Minimap {
