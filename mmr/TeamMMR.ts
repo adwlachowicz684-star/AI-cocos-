@@ -210,6 +210,33 @@ function baseRating(
         num += sorted[i]! * w;
         den += w;
       }
+      /**
+       * 【⚠️ 分母可能为 0，除之前必须检查】
+       *
+       * 权重是 `weightBase^i`，逐项求和。当 base 为负时各项正负交替，
+       * 分母可能正好抵消成 0。实测：
+       * ```js
+       * teamMmr([1500, 1600], { strategy: 'weighted', weightBase: -1 })
+       * // den = 1 + (-1) = 0  →  base = Infinity
+       * ```
+       * 队的 MMR 变成 Infinity，之后所有匹配分、胜负概率、
+       * 段位判定全部失效，且**没有任何报错**——
+       * Infinity 是合法 number，能一路穿到 UI 上显示 "∞"。
+       *
+       * 为什么不让 needFinite 去拦 weightBase：
+       * `weightBase = -1` 本身是"合法输入"（负权重在某些建模里有意义），
+       * 真正的问题是这个特定算法下的分母消零。
+       * 所以在除法处检查，而不是在入口限制取值范围。
+       */
+      if (den === 0) {
+        /**
+         * 退化到等权平均：分母为 0 意味着加权方案在这个 base 下无意义，
+         * 而平均是"没有权重信息时"最中性的选择。
+         * 这里不抛错是因为它发生在匹配链路里，
+         * 抛错会让整场匹配失败——降级比中断更符合业务预期。
+         */
+        return avg(sorted);
+      }
       return num / den;
     }
   }
