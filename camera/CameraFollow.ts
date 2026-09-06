@@ -314,17 +314,22 @@ export class CameraFollow {
     }
 
     /**
-     * ⑥ 单帧位移上限
+     * ⑥ 单帧位移上限（双保险）
      *
-     * 【⚠️ smoothDamp 的 maxSpeed 限制的不是速度】
+     * 【smoothDamp 的 maxSpeed 现在已经能正确限速了】
      *
-     * 它（沿用 Unity 的实现）把「当前值与目标值的差」夹到
-     * `maxSpeed * smoothTime`，限制的是**滞后距离**而不是每帧位移。
+     * 2026-09-06 修正：`_core/math.ts` 的 smoothDamp 补上了
+     * `limitedTarget = current - change` 这一行，maxSpeed 现在限制的就是
+     * 每帧位移（此前它只夹了偏差，却仍以原始 target 为基准插值，
+     * 导致"目标瞬移 10000px 时相机一帧跳到 9999"）。
      *
-     * 后果很反直觉：目标瞬移 10000 像素时，相机一帧就跳到离目标
-     * 只剩 1 像素的位置——maxSpeed 反而让相机"跳得更快"。
+     * 【为什么这里仍然保留二次夹取】
+     * smoothDamp 的 maxSpeed 是**近似**上限——稳态时瞬时速度可达
+     * 约 `2 × maxSpeed`（omega = 2/smoothTime 放大了 change 项）。
+     * 相机对"每帧位移"的要求是硬性的，所以这里再夹一次真实位移，
+     * 保证上限是 `maxSpeed * dt` 而不是它的两倍。
      *
-     * 相机要的是"每帧最多移动多少"，所以这里再夹一次真实的单帧位移。
+     * 也就是说：smoothDamp 负责"不闪现"，这里负责"不超速"。
      */
     if (this._maxSpeed < Infinity) {
       const lim = this._maxSpeed * dt;
