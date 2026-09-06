@@ -61,6 +61,7 @@ import { runDtGuardTests } from './run_dtguard';
 import { runDtGuard2Tests } from './run_dtguard2';
 import { runNumGuardTests } from './run_numguard';
 import { runGuardTests } from './run_guard';
+import { runPhase1Tests } from './run_phase1';
 
 async function main(): Promise<void> {
   setSuite('第一批：核心插件（EventBus / Pool / RNG / Damage / Skill / Joystick）');
@@ -156,6 +157,9 @@ async function main(): Promise<void> {
 
   setSuite('共享守卫回归（_core/guard：无界 count / 原型链 / 路径污染 / prewarm 上界）');
   runGuardTests();
+
+  setSuite('精审修复回归 · 第一批（原型污染 / 删除顺序 / 经济漏洞 / 无界 count 死循环）');
+  runPhase1Tests();
 
   summary();
 }
