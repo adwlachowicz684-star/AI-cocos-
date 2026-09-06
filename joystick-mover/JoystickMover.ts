@@ -144,10 +144,34 @@ export class JoystickMover extends Component {
   private _lastY = 0;
   private _wasActive = false;
 
+  /**
+   * 取触摸 id，无效时返回 null
+   *
+   * 【为什么需要这一层，而不是直接 `e.getID()`】
+   *
+   * 本库自带的 `typings/cc.d.ts` 是最小类型桩，声明 `getID(): number`；
+   * 而**真实 Cocos 引擎**的声明是 `getID(): number | null`。
+   *
+   * 于是一个诡异的局面：库在自己的桩下 `strict:true` 编译全绿，
+   * 拷进真实项目（用引擎声明）却报
+   * `Argument of type 'number | null' is not assignable to parameter of type 'number'`。
+   *
+   * 【为什么判空是安全的，不会掩盖问题】
+   * 桩声明为 `number` 时，`id == null` 恒为 false —— TypeScript 不会对此报错，
+   * 所以这段代码在两套声明下都能编译、都不改变运行时行为。
+   * 真实引擎下 id 为 null 只可能发生在"拿不到触摸点"的异常情况，
+   * 此时忽略这次事件是正确反应（继续用 null 当 id 会污染 Core 的按键映射）。
+   */
+  private _touchId(e: EventTouch): number | null {
+    const id = e.getID();
+    return id == null ? null : id;
+  }
+
   private _onTouchStart(e: EventTouch): void {
     if (!this._core) return;
     const p = this._toLocal(e, this._tmpPos);
-    const id = e.getID();
+    const id = this._touchId(e);
+    if (id === null) return;
 
     /**
      * 【坑】多点触摸：第二个手指落下时 Core 会拒绝，
@@ -173,7 +197,9 @@ export class JoystickMover extends Component {
   private _onTouchMove(e: EventTouch): void {
     if (!this._core) return;
     const p = this._toLocal(e, this._tmpPos);
-    this._core.onMove(e.getID(), p.x, p.y);
+    const id = this._touchId(e);
+    if (id === null) return;
+    this._core.onMove(id, p.x, p.y);
     this._updateVisual();
   }
 
@@ -199,7 +225,9 @@ export class JoystickMover extends Component {
      *
      * 【防住了按下，没防住抬起】是这类 bug 的典型成因。
      */
-    if (!this._core.onUp(e.getID())) return;
+    const id = this._touchId(e);
+    if (id === null) return;
+    if (!this._core.onUp(id)) return;
 
     if (this.isDynamic && this.bgNode) this.bgNode.active = false;
     if (this.knobNode) {
