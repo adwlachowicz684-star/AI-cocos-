@@ -266,16 +266,49 @@ export function runWeak2Tests(): void {
       eq(h.pop(), 'second', '顺序稳定');
     });
 
-    test('⚠️ size 不因 remove 而减少（惰性删除的代价）', () => {
+    test('⚠️ size 数的是"有效元素"，标记删除后立即减一', () => {
       const h = new LazyHeap<number>();
       eq(h.size, 0, '初始为 0');
       const a = h.push(1, 1);
       h.push(2, 2);
       eq(h.size, 2, 'push 两次后为 2');
       h.remove(a);
-      // 标记删除只打标记，出队时才真正丢弃。这是有意的——否则 remove 是 O(n)。
-      eq(h.size, 2, 'remove 只打标记，size 不减');
+      /**
+       * 【本用例断言改过，原断言是 size 保持 2】
+       * 原实现让 size 数的是"堆里的条目数"（含已标记删除的陈旧项），
+       * 于是 size/isEmpty 与 pop() 的语义不一致：
+       * 堆里只剩已删除项时 isEmpty 返回 false，pop() 却返回 undefined。
+       *
+       * A* 主循环写成 `while (!open.isEmpty) { const n = open.pop(); ... }` 时，
+       * 就会拿到 undefined 继续访问字段——崩溃或死循环。
+       * 惰性删除的代价应该是"堆里留着垃圾条目"，而不是"对外撒谎"。
+       *
+       * 现在 remove 仍只打标记（O(1)，不退化成 O(n)），
+       * 但 size/isEmpty 走独立的 `_live` 计数，保证与 pop 一致。
+       */
+      eq(h.size, 1, 'size 反映有效元素，标记删除后应为 1');
       eq(h.pop(), 2, '被标记的在出队时跳过');
+      eq(h.size, 0, '全部取完后为 0');
+    });
+
+    test('⚠️ 全部标记删除后 isEmpty 为 true（A* 主循环依赖它）', () => {
+      const h = new LazyHeap<number>();
+      const a = h.push(1, 1);
+      const b = h.push(2, 2);
+      h.remove(a);
+      h.remove(b);
+      eq(h.isEmpty, true, '所有项都已标记删除 → isEmpty 必须为 true');
+      eq(h.pop(), undefined, '且 pop 返回 undefined，两者语义一致');
+    });
+
+    test('⚠️ remove 已出队的句柄不会误扣计数', () => {
+      const h = new LazyHeap<number>();
+      const a = h.push(1, 1);
+      h.push(2, 2);
+      eq(h.pop(), 1, '先把 1 取出来');
+      h.remove(a); // 来得太晚：1 已经出队了
+      eq(h.size, 1, '迟到的 remove 不该把 2 也扣掉');
+      eq(h.pop(), 2, '2 仍能正常出队');
     });
 
     test('全部标记删除后 pop 返回 undefined', () => {
