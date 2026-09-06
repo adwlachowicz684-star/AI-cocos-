@@ -141,7 +141,9 @@
       "path": "config/",
       "maturity": "beta",
       "purpose": "配置加载、索引、全量校验、热重载",
-      "depends": [],
+      "depends": [
+        "_core"
+      ],
       "hasTest": true,
       "hasDemo": true,
       "domain": "地基",
@@ -962,7 +964,9 @@
       "path": "runscope/ScopedStore.ts",
       "maturity": "beta",
       "purpose": "局内/局外/会话三域数据隔离，越界抛错防串档",
-      "depends": [],
+      "depends": [
+        "_core"
+      ],
       "hasTest": true,
       "hasDemo": true,
       "domain": "进度与统计",
@@ -1169,7 +1173,9 @@
       "layer": "L1",
       "domain": "进度与统计",
       "maturity": "beta",
-      "depends": [],
+      "depends": [
+        "_core"
+      ],
       "hasTest": true,
       "hasDemo": true,
       "purpose": "结算界面的数据来源",
