@@ -28,6 +28,7 @@
  */
 
 import { IRandomSource } from '../_core/types';
+import { needCount } from '../_core/guard';
 import { clamp01 } from '../_core/math';
 
 // ============================================================
@@ -225,9 +226,20 @@ export class GachaPity {
 
   /** 抽 N 次 */
   pullN(n: number): PullResult[] {
-    if (n <= 0) return [];
+    /**
+     * 【⚠️ n 必须有上界】
+     *
+     * 老实现 `if (n <= 0) return []` 只挡了非正数：
+     * - `n = Infinity` → 循环永不结束，实测退出码 124（卡死）
+     * - `n = NaN` → `NaN <= 0` 为 false，进入循环后 `i < NaN` 恒假，
+     *   静默返回空数组，看起来像"抽卡没结果"
+     *
+     * 抽卡次数通常来自玩家操作或活动配置，属于外部输入。
+     */
+    const count = needCount(n, 'pullN.n');
+    if (count === 0) return [];
     const out: PullResult[] = [];
-    for (let i = 0; i < n; i++) out.push(this._doPull());
+    for (let i = 0; i < count; i++) out.push(this._doPull());
     return out;
   }
 
