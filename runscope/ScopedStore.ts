@@ -36,6 +36,8 @@
  * 【无引擎依赖】
  */
 
+import { hasOwn } from '../_core/guard';
+
 // ==================== 类型 ====================
 
 /** 数据域 */
@@ -156,7 +158,19 @@ export class ScopedStore {
   // ==================== 读写 ====================
 
   has(key: string): boolean {
-    return key in this._schema || this._dynamicKeys.has(key);
+    /**
+     * 【⚠️ schema 查询必须用 hasOwn，不能用 `in`】
+     *
+     * 实测：`has('toString')` 返回 **true**，尽管 schema 是空对象。
+     * 因为 `'toString' in this._schema` 命中原型链。
+     *
+     * 后果：`has()` 是"这个键应不应该持久化"的判据，
+     * 返回 true 会让一个根本不存在的键进入存档/同步流程，
+     * 后续 `get`/`set` 拿到 undefined 却以为有值。
+     *
+     * key 来自业务代码与配置表，属于外部输入。
+     */
+    return hasOwn(this._schema, key) || this._dynamicKeys.has(key);
   }
 
   scopeOf(key: string): Scope | null {
