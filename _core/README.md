@@ -32,7 +32,6 @@
 | `IRandomSource` | 随机源接口（`next(): number`）。**所有随机逻辑依赖它而不是 `RNG` 具体类** |
 | `IRange` | 区间 `{ min, max }` |
 | `IDisposable` | 可释放接口（**`destroy()`**，不是 `dispose()`） |
-| `Partial<T>` | 把 T 的所有属性变为可选（配置对象的部分覆盖） |
 | `MathRandomSource` | 基于 `Math.random()` 的随机源实现（不需要复现时用） |
 | `vec2(x, y)` / `setVec2(out, x, y)` | 构造 / **就地**设置（高频路径避免分配） |
 | `len2(v)` / `normalize2(v)` | 长度平方 / 归一化（返回**新对象**） |
@@ -71,12 +70,10 @@
 > 而且 TypeScript 的结构化类型会**静默接受**不匹配的签名，
 > 直到调用 `destroy()` 时才报"不是函数"。
 
-> ⚠️ **`Partial<T>` 是本地定义的，会遮蔽全局的 `Partial`。**
-> 在 `_core/types.ts` 内部以及 `import { Partial }` 的文件里，
-> `Partial` 指向本模块的这个。
-> 别在 import 了它的文件里假设 `Partial` 是 TS 内置的——
-> 两者行为一致（都是全可选），所以不会出错，
-> 但混用会让读代码的人困惑。
+> ⚠️ **本模块不再导出 `Partial<T>`（已删除）。**
+> 它曾与 TS 内置的 `Partial<T>` 同名，一旦被 import 就遮蔽全局版本，
+> 让读代码的人无法判断某个 `Partial<Foo>` 指哪一个。
+> 全库 0 处引用，纯负收益。需要"部分覆盖"语义请直接用内置的 `Partial<T>`。
 
 > ⚠️ **曾经这里写过 `ITickable`，但源码里从来没有这个类型。**
 > 照着它写 `implements ITickable` 会编译失败。
@@ -150,29 +147,33 @@ maxOf([1, NaN, 3])    // NaN    ← NaN 传染，与 Math.max 一致
 - **大 dt 不完全收敛**：`smoothDamp(0, 10, {v:0}, 0.1, 5)` → `9.9958`（差 0.042%）。
   根因是泰勒展开近似 `exp` 在 x 极大时非精确为 0。正常帧率下无影响。
 
-- ⚠️ **`maxSpeed` 这个名字极具误导性——它不限制每帧速度。**
-  完整签名是 `smoothDamp(current, target, velRef, smoothTime, dt, maxSpeed = Infinity)`，
-  它的实际作用是把**距离偏差** `|current - target|` 限制在
-  `maxSpeed * smoothTime` 以内：
+- ✅ **`maxSpeed` 限制的就是每帧速度**（2026-09-06 修正）
 
-  | 情况 | 实测 |
-  |---|---|
-  | 距离 < `maxSpeed*smoothTime` | **完全不生效**，与不传时结果逐位相同 |
-  | 距离 > `maxSpeed*smoothTime` | 首帧直接**跳**到边界，不是渐进 |
+  完整签名是 `smoothDamp(current, target, velRef, smoothTime, dt, maxSpeed = Infinity)`。
+  偏差超过 `maxSpeed * smoothTime` 时，本帧的目标点会先回退到 `current - change`，
+  因此**单帧位移始终落在 `maxSpeed * dt` 量级以内**：
 
   ```
-  smoothDamp(0, 1000, v, 1, 1/60, 5)    → 995.00   ← 跳到 995
-  smoothDamp(0, 1000, v, 1, 1/60, 50)   → 950.03   ← 跳到 950
-  smoothDamp(0, 1000, v, 1, 1/60, 2000) →   0.52   ← 距离 1000 < 2000，不触发，正常渐进
+  smoothDamp(0, 1000, v, 1, 1/60, 5)    →   0.0026   （maxSpeed*dt = 0.083）
+  smoothDamp(0, 1000, v, 1, 1/60, 50)   →   0.0262   （maxSpeed*dt = 0.833）
+  smoothDamp(0, 1000, v, 1, 1/60, 2000) →   0.5243   （未触发限速，正常渐进）
   ```
 
-  所以若你期待"每帧最多移动 X"，**这个参数做不到**，需自己额外 clamp。
-  它真正的用途是防止物体离目标极远时指数项产生爆炸性初速度。
+  追赶能力不受影响：`maxSpeed=50` 追 1000px 用 21.1 秒（理论最快 20 秒，
+  差值来自起步加速与尾部收敛）。
 
-  > 这份说明修正自一份引擎实测报告。原报告写"首帧逼近约 51"，
-  > 但它把 `50` 传在了第 5 位（那是 `dt`），`maxSpeed` 实际取了默认值
-  > `Infinity`——**参数位置错了，结论自然也错了**。
-  > 定性判断（"首帧会大幅跳变"）成立，数值不成立。
+  > ⚠️ **这段说明曾被写反，别再改回去。**
+  > 旧版本写的是"`maxSpeed` 极具误导性，它不限制每帧速度，
+  > 首帧直接跳到 995"，并标注"均为 Unity 标准行为，非 bug"。
+  >
+  > 实测数据没错，**归因错了**：995 不是 Unity 的行为，
+  > 而是本实现漏掉了 Unity 里 `target = current - change` 这一行导致的。
+  > 缺这一行时，限速只是把"要奔赴的目标"拉近了，
+  > 却仍然以**原始 target** 为基准做插值，于是首帧跳到离目标 5 的位置——
+  > 表现为"设了最大速度，瞬移时反而闪现得更远"。
+  >
+  > 这类"实测数据为真、归因为假"的记录比没有记录更危险：
+  > 它会让下一个看到的人打消修复的念头。
 
 | `smoothDamp(cur, target, vel, t, dt)` | 阻尼（维护速度引用，Unity 语义） |
 | **`safeDt(dt)`** | **dt 守卫**：只有"有限且为正"返回 true |
