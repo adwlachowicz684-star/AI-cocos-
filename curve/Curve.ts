@@ -30,6 +30,8 @@
  * 【无引擎依赖】
  */
 
+import { needCount } from '../_core/guard';
+
 export type InterpMode = 'linear' | 'step' | 'smooth';
 
 export interface Keyframe {
@@ -159,12 +161,24 @@ export class Curve {
 
   /** 曲线下的积分（近似）——用于"总位移"之类的计算 */
   integrate(samples = 64, mode: InterpMode = 'linear'): number {
+    /**
+     * 【⚠️ samples 必须有上界，且不能为 0】
+     *
+     * 实测 `integrate(Infinity)` → 退出码 124（卡死）。
+     * `samples = 0` 也不该允许：`step = (e-s)/0 = Infinity`，
+     * 结果是 0 或 NaN，而调用方期待的是积分值。
+     *
+     * 采样数常来自"按曲线长度自适应"的计算，可能因除零产生 Infinity。
+     */
+    const n = needCount(samples, 'samples');
+    if (n === 0) throw new RangeError('[Curve] samples 必须为正，实际 0');
+
     if (this._keys.length < 2) return 0;
     const s = this.startTime;
     const e = this.endTime;
-    const step = (e - s) / samples;
+    const step = (e - s) / n;
     let sum = 0;
-    for (let i = 0; i < samples; i++) {
+    for (let i = 0; i < n; i++) {
       const t = s + step * (i + 0.5);
       sum += this.evaluate(t, mode) * step;
     }
