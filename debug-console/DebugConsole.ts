@@ -154,6 +154,39 @@ interface Entry {
   readonly def: CommandDef;
 }
 
+/**
+ * 「隐式开启」的实例计数
+ *
+ * 【为什么是计数而不是实例集合】
+ * 持有实例引用会让它们**永远无法被 GC**——控制台通常是全局单例，
+ * 一旦进了 Set 就常驻内存。计数不持有引用，没有这个问题。
+ *
+ * 【已知局限（保守方向）】
+ * 实例销毁时计数不会自动减少（本类没有 destroy 钩子），
+ * 所以计数可能**偏大**。偏差方向是安全的：宁可误报，也不漏报。
+ * 需要清零时用 `resetAudit()`（测试与热重载场景）。
+ */
+let _implicitlyEnabled = 0;
+
+/**
+ * 返回「未显式设置 enabled 而默认开启」的实例数量
+ *
+ * 【用途】上线自检 / CI 断言
+ * ```js
+ * if (auditImplicitlyEnabled() > 0) {
+ *   throw new Error('存在未显式设置 enabled 的 DebugConsole 实例');
+ * }
+ * ```
+ */
+export function auditImplicitlyEnabled(): number {
+  return _implicitlyEnabled;
+}
+
+/** 清零审计计数（单测与热重载用） */
+export function resetAudit(): void {
+  _implicitlyEnabled = 0;
+}
+
 export class DebugConsole {
   private readonly _commands = new Map<string, Entry>();
   private readonly _history: string[] = [];
@@ -190,10 +223,27 @@ export class DebugConsole {
      * 只要创建了实例，命令就一定能执行。
      */
     if (opts.enabled === undefined && this._enabled) {
+      /**
+       * 【⚠️ console.warn 抓不到：补一个可断言的计数】
+       *
+       * 光靠 `console.warn` 有两个问题：
+       * 1. 开发者可能根本不看控制台
+       * 2. **CI 无法拦截它**——warn 不是失败
+       *
+       * 所以同时累加到模块级计数，暴露 `auditImplicitlyEnabled()`，
+       * 项目可在启动自检或 CI 里断言它为 0。
+       *
+       * 【风险要说清】这里不只是"能敲命令"——
+       * 业务通过 `register()` 注册的**任何命令**都会被执行，
+       * 包括给金币、跳关、读存档这类内部接口。
+       * 控制台本身不区分"调试"与"作弊"，全看注册了什么。
+       */
+      _implicitlyEnabled++;
       console.warn(
         '[DebugConsole] 未显式传入 enabled，默认开启。' +
         '正式版请传 `enabled: !IS_PRODUCTION`，' +
-        '否则调试命令会带到线上。'
+        '否则你 register() 的所有命令（含给金币、跳关等内部接口）都会带到线上。' +
+        `可用 auditImplicitlyEnabled() 在 CI 中断言（当前 ${_implicitlyEnabled} 处）。`
       );
     }
   }
@@ -211,6 +261,10 @@ export class DebugConsole {
    * 调试台需要能热开关（比如线上按特定手势临时打开）。
    */
   set enabled(v: boolean) {
+    // 从"隐式开启"转为"显式设置"时撤销计数——它不再是需要提醒的对象
+    if (!this._enabledExplicit && this._enabled && _implicitlyEnabled > 0) {
+      _implicitlyEnabled--;
+    }
     this._enabled = v;
     this._enabledExplicit = true;
   }
