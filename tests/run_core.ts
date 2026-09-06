@@ -530,7 +530,20 @@ export function runCoreTests(): void {
       pool.put(a);
       console.warn = orig;
 
-      eq(pool.active, -1, '关闭防护后回到旧行为（不推荐，仅在实测为瓶颈时）');
+      /**
+       * 【本用例断言改过】
+       * 原断言是 `active === -1`，等于把"active 变成负数"当成了期望行为写进契约。
+       * 但 active 变负是**故障的表征**而不是特性：它是泄漏检测的唯一指标，
+       * 一旦为负就开始说谎（真泄漏 5 个时显示 -2），而且"负数"看起来比
+       * "正数增长"更不像故障，排查时根本不会往泄漏上想。
+       *
+       * 所以 active 现在夹在 0 上，这里改为断言"未拦截"的真正危害：
+       * 同一个对象两次进入空闲池，之后 get() 两次会拿到同一个对象。
+       */
+      eq(pool.idle, 2, '关闭防护后不再拦截：同一对象两次进池（不推荐，仅在实测为瓶颈时）');
+      const first = pool.get();
+      const second = pool.get();
+      assert(first === second, '关闭防护后可能 get 到同一个对象——正是默认开启防护的原因');
     });
 
     test('超出 maxSize 时 onPut 仍被调用（被丢弃的对象也要休眠）', () => {
