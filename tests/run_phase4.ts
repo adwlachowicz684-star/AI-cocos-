@@ -21,6 +21,17 @@ import { describe, test, assert, eq, throws } from './_framework';
 import { Stats, makeKey } from '../stats/Stats';
 import { applyPatch } from '../skill-variant/SkillVariant';
 import { teamMmr } from '../mmr/TeamMMR';
+import {
+  DebugConsole,
+  auditImplicitlyEnabled as auditConsole,
+  resetAudit as resetConsoleAudit,
+} from '../debug-console/DebugConsole';
+import {
+  CheatCode,
+  auditImplicitlyEnabled as auditCheat,
+  resetAudit as resetCheatAudit,
+} from '../cheatcode/CheatCode';
+import { BehaviorTree, Action, BTStatus } from '../behavior-tree/BehaviorTree';
 
 export function runPhase4Tests(): void {
   // ============================================================
@@ -225,6 +236,112 @@ export function runPhase4Tests(): void {
         { strategy: 'weighted', weightBase: -1 }
       );
       assert(Number.isFinite(r.base), `必须是有限数，实际 ${r.base}`);
+    });
+  });
+
+  // ============================================================
+  // B4-11 / B5-01 · 调试台与作弊码的默认开启
+  // ============================================================
+
+  describe('debug-console · 默认开启的可审计性', () => {
+    test('⚠️ 未显式传 enabled 时审计计数 +1', () => {
+      /**
+       * 【为什么需要计数而不只是 console.warn】
+       * 1. 开发者可能根本不看控制台
+       * 2. **CI 无法拦截 warn**——warn 不是失败
+       *
+       * 计数让项目能在启动自检里断言：
+       * `if (auditImplicitlyEnabled() > 0) throw ...`
+       *
+       * 【为什么不把默认值直接改成 false】
+       * 那是破坏性变更——现有用户的调试命令会静默失效且无提示。
+       * 所以保留默认开启，只强化提醒。
+       */
+      resetConsoleAudit();
+      eq(auditConsole(), 0, '前置：计数应清零');
+      new DebugConsole({});
+      eq(auditConsole(), 1);
+    });
+
+    test('显式传 enabled 时不计数（不打扰想清楚的人）', () => {
+      resetConsoleAudit();
+      new DebugConsole({ enabled: true });
+      new DebugConsole({ enabled: false });
+      eq(auditConsole(), 0, '两种显式传法都不该计数');
+    });
+
+    test('运行时改为显式设置后撤销计数', () => {
+      resetConsoleAudit();
+      const d = new DebugConsole({});
+      eq(auditConsole(), 1);
+      d.enabled = false;
+      eq(auditConsole(), 0, '显式设置后不该再算作"忘了传"');
+    });
+
+    test('enabledWasExplicit 能区分"传过"与"没传"', () => {
+      eq(new DebugConsole({}).enabledWasExplicit, false);
+      eq(new DebugConsole({ enabled: true }).enabledWasExplicit, true);
+    });
+  });
+
+  describe('behavior-tree · 黑板作用域（写示例时踩到）', () => {
+    test('黑板是树自带的，外部对象传不进去', () => {
+      /**
+       * 【为什么记这条】
+       * 补 examples/batch22-usage.ts 时，我第一版自己建了个
+       * `const bb = {}` 想当黑板传进去，断言 `bb.lastSeenX` 一直失败。
+       *
+       * 查源码才发现 `tick(ctx, dt)` **没有 blackboard 参数**——
+       * 树用的是自己的 `public readonly blackboard`，外部无法替换。
+       *
+       * 这不是缺陷（黑板作用域就该是"这棵树"，
+       * 多棵树共享一个才会在 reset 时互相影响），
+       * 但 API 上看不出来，连照着 README 写都会踩。
+       *
+       * 这条用例把"外部对象不会生效"固化下来，
+       * 免得有人以为能传、然后困惑于数据没写入。
+       */
+      const tree = new BehaviorTree<{ v: number }>(
+        new Action<{ v: number }>('写黑板', (_c, board) => {
+          board.written = 1;
+          return BTStatus.Success;
+        })
+      );
+      const outside: Record<string, unknown> = {};
+      tree.tick({ v: 1 }, 0.016);
+
+      eq(tree.blackboard.written, 1, '应写入树自带的黑板');
+      eq(outside.written, undefined, '外部对象不该被写入');
+    });
+  });
+
+  describe('cheatcode · 默认开启的可审计性', () => {
+    test('⚠️ 未显式传 enabled 时审计计数 +1', () => {
+      resetCheatAudit();
+      new CheatCode({});
+      eq(auditCheat(), 1);
+    });
+
+    test('显式传 enabled 时不计数', () => {
+      resetCheatAudit();
+      new CheatCode({ enabled: true });
+      new CheatCode({ enabled: false });
+      eq(auditCheat(), 0);
+    });
+
+    test('运行时改为显式设置后撤销计数', () => {
+      resetCheatAudit();
+      const c = new CheatCode({});
+      eq(auditCheat(), 1);
+      c.enabled = false;
+      eq(auditCheat(), 0);
+    });
+
+    test('resetAudit 可清零（热重载与单测用）', () => {
+      new CheatCode({});
+      assert(auditCheat() > 0);
+      resetCheatAudit();
+      eq(auditCheat(), 0);
     });
   });
 }
