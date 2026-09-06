@@ -42,6 +42,12 @@ function sameModule(a, b) {
 const SKIP = new Set([
   '.build', 'node_modules', 'lib', 'typings', 'scripts',
   'tests', 'examples', '.git',
+  // 【为什么 audit/ 也要跳过】
+  // audit/ 放的是精审任务书与审核报告（文档），不是插件。
+  // 但它是一级目录，会被扫成"119 个插件之外的第 120 个"，
+  // 触发"目录存在但未在 _kitmeta.json 登记"→ 脚本退出码 1。
+  // 表现是"依赖检查失败"，而实际只是多了个放文档的文件夹。
+  'audit',
 ]);
 
 /**
