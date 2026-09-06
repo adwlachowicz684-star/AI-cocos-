@@ -1,4 +1,5 @@
 import { clampNum } from '../_core/math';
+import { assertSafePath } from '../_core/guard';
 /**
  * Snapshot —— 状态快照 + 差异比对 + 回滚
  *
@@ -229,7 +230,22 @@ export function createPatch<T>(before: T, after: T, maxDepth = 10): Patch {
 export function applyPatch<T>(base: T, patch: Patch): T {
   const out = deepClone(base) as unknown as Record<string, unknown>;
 
-  const removes = [...patch.remove].sort((a, b) => depthOf(b) - depthOf(a));
+  /**
+   * 【⚠️ 同层删除必须按"下标从大到小"，只按深度排序是不够的】
+   *
+   * 老实现只按 `depthOf` 降序排。数组下标 `arr[1]` 和 `arr[2]` 深度相同，
+   * `Array.sort` 又是稳定的，于是保持原顺序 → 先删下标 1，
+   * 后面的元素左移，再删下标 2 时删掉的已经是**原来的下标 3**。
+   *
+   * 实测：
+   * ```js
+   * applyPatch({ arr: ['a','b','c'] }, { set: {}, remove: ['arr[1]','arr[2]'] });
+   * // 老实现 → ['a','c']（期望 ['a']）
+   * ```
+   * 顺序敏感、无报错、结果看起来"像删了一部分"——
+   * 撤销栈、状态同步这类场景会静默丢数据。
+   */
+  const removes = [...patch.remove].sort(compareRemoveOrder);
   for (const path of removes) setAtPath(out, path, undefined, true);
 
   const sets = Object.keys(patch.set).sort((a, b) => depthOf(a) - depthOf(b));
@@ -242,6 +258,39 @@ function depthOf(path: string): number {
   return (path.match(/[.[\]]/g) ?? []).length;
 }
 
+/**
+ * 删除路径的排序：深的先删，同层按下标从大到小删
+ *
+ * 【为什么同层要逆序】
+ * 数组 `splice(i, 1)` 会让 i 之后的元素左移。
+ * 先删大下标，已删除的位置就不会再影响未删的下标。
+ *
+ * @returns 负数表示 a 排在 b 前面
+ */
+function compareRemoveOrder(a: string, b: string): number {
+  const d = depthOf(b) - depthOf(a);
+  if (d !== 0) return d;
+
+  const pa = parsePath(a);
+  const pb = parsePath(b);
+  const n = Math.max(pa.length, pb.length);
+  for (let i = 0; i < n; i++) {
+    const x = pa[i];
+    const y = pb[i];
+    if (x === undefined) return 1;
+    if (y === undefined) return -1;
+
+    if (typeof x === 'number' && typeof y === 'number') {
+      if (x !== y) return y - x; // 大下标先删
+    } else if (x !== y) {
+      const sx = String(x);
+      const sy = String(y);
+      if (sx !== sy) return sx < sy ? 1 : -1; // 降序，保证稳定可预期
+    }
+  }
+  return 0;
+}
+
 function setAtPath(
   root: Record<string, unknown>,
   path: string,
@@ -250,6 +299,19 @@ function setAtPath(
 ): void {
   const parts = parsePath(path);
   if (parts.length === 0) return;
+
+  /**
+   * 【⚠️ 必须在写入前拦下原型污染路径】
+   *
+   * 实测：
+   * ```js
+   * applyPatch({}, { set: { '__proto__.snapshotPolluted': true }, remove: [] });
+   * ({}).snapshotPolluted // → true
+   * ```
+   * 这是**进程级污染**：之后任何 `if (obj.snapshotPolluted)` 都为真，
+   * 不可逆、无报错。patch 常来自网络包或存档，属于外部输入。
+   */
+  assertSafePath(parts.map(String), path);
 
   let cur: Record<string, unknown> | unknown[] = root;
 
