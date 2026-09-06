@@ -104,6 +104,32 @@ const OCTANT_MATRIX: ReadonlyArray<readonly [number, number, number, number]> = 
   [1, 0, 0, 1],    // 7
 ];
 
+import { needFinite } from '../_core/guard';
+
+/**
+ * 归一化视野半径
+ *
+ * 【⚠️ radius = Infinity 会让进程卡死】
+ *
+ * `Raycasting.compute` 用 `for (let dy = -radius; dy <= radius; dy++)`
+ * 构建圆周采样点。radius 为 Infinity 时 `dy` 永远到不了 `radius`，
+ * 双重循环永不结束——实测 `timeout 5` 退出码 124。
+ * `Shadowcasting` 的递归同样依赖 `row > radius` 终止。
+ *
+ * 【为什么超界时是"夹取"而不是"抛错"】
+ * 半径大于地图尺寸时，视野本来就覆盖全图，
+ * **夹到地图尺度后的可见结果与不夹完全一致**——
+ * 所以这不是静默降级，而是去掉无意义的计算。
+ * 真正要拦的是非有限值（Infinity / NaN），那个必须抛错。
+ */
+function normalizeRadius(radius: number, w: number, h: number): number {
+  const r = needFinite(radius, 'radius');
+  if (r < 0) {
+    throw new RangeError(`[fov] radius 不能为负，实际 ${r}`);
+  }
+  return Math.min(r, Math.max(w, h) * 2);
+}
+
 /** 可见性结果（用位掩码数组，节省内存） */
 export class VisibilityMap {
   private readonly _data: Uint8Array;
@@ -218,6 +244,8 @@ export class Shadowcasting {
    * @returns 本次可见的格子数
    */
   compute(ox: number, oy: number, radius: number): number {
+    const r = normalizeRadius(radius, this._w, this._h);
+
     this.visible.clear();
     this._ox = ox;
     this._oy = oy;
@@ -229,7 +257,7 @@ export class Shadowcasting {
     this.explored.mark(ox, oy);
 
     for (let oct = 0; oct < 8; oct++) {
-      this._castLight(oct, radius, 1, 1.0, 0.0);
+      this._castLight(oct, r, 1, 1.0, 0.0);
     }
 
     // 同步到"已探索"
@@ -456,6 +484,8 @@ export class Raycasting {
   }
 
   compute(ox: number, oy: number, radius: number): number {
+    const r = normalizeRadius(radius, this._w, this._h);
+
     this.visible.clear();
 
     if (ox < 0 || oy < 0 || ox >= this._w || oy >= this._h) return 0;
@@ -464,10 +494,10 @@ export class Raycasting {
 
     // 向圆周上每个格子发一条射线
     const perimeter: Array<{ x: number; y: number }> = [];
-    for (let dy = -radius; dy <= radius; dy++) {
-      for (let dx = -radius; dx <= radius; dx++) {
-        if (Math.abs(dx) !== radius && Math.abs(dy) !== radius) continue;
-        if (dx * dx + dy * dy > radius * radius) continue;
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        if (Math.abs(dx) !== r && Math.abs(dy) !== r) continue;
+        if (dx * dx + dy * dy > r * r) continue;
         perimeter.push({ x: ox + dx, y: oy + dy });
       }
     }
