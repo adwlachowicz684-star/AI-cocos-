@@ -213,6 +213,34 @@ export class AutoQuality {
    * 那样采样出来的永远是 60fps，自动降级永远不会触发。
    */
   update(dtMs: number, now: number): void {
+    /**
+     * 【⚠️ dtMs 必须收口，否则"帧耗时 0"会被读成"0 fps"→ 直接降到最低档】
+     *
+     * 链路：
+     * ```
+     * dtMs = 0  →  _samples 里全是 0
+     *           →  medianFps: `med > 0 ? 1000 / med : 0` → 返回 **0**
+     *           →  `if (fps < this._downFps)` 成立 → 连续 N 次后降到最低档
+     * ```
+     * **方向完全反了**：dtMs 越小意味着越快，结果被判成最慢。
+     *
+     * 实测（修复前）：喂 30 次 `update(0, i*10)` → `medianFps === 0`、档位降到 1（最低）。
+     * 而 `update(16.7, ...)` 正常得到 59.9。
+     *
+     * dtMs 为 0 的现实来源：高精度计时器在部分平台/首帧返回 0，
+     * 或调用方把"秒"当"毫秒"传（`0.016` 会被读成 62500fps，同样失真）。
+     *
+     * 【为什么是"丢弃样本"而不是"夹到下界"】
+     * 帧耗时 ≤ 0 在本模块里没有可解释的含义（不像 dt 缩放可以为 0），
+     * 夹成任意正数都是在编造数据。丢弃一帧对中位数几乎无影响，
+     * 却避免了"一个 0 把整窗拉到最低档"。
+     *
+     * 【为什么 NaN 也必须挡】
+     * `med > 0` 对 NaN 为 false → 同样返回 0 → 同样降到最低档，
+     * 且 NaN 会在排序数组里污染中位数（`[NaN, 16, 16].sort()` 顺序不可预期）。
+     */
+    const validDtMs = Number.isFinite(dtMs) && dtMs > 0;
+
     const dt = now - this._now;
     this._now = now;
     this._timeInLevel += Math.max(0, Math.min(dt, 1000));
@@ -229,7 +257,8 @@ export class AutoQuality {
 
     if (this._locked) return;
 
-    // 写入环形缓冲
+    // 写入环形缓冲（非法样本直接跳过，不占位）
+    if (!validDtMs) return;
     this._samples[this._sampleIdx] = dtMs;
     this._sampleIdx = (this._sampleIdx + 1) % this._window;
     if (this._sampleCount < this._window) this._sampleCount++;
