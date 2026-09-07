@@ -197,6 +197,33 @@ python3 scripts/check-dup-exports.py → [OK] 无待处理的冲突 ✓
 
 ---
 
+## 7.1 推送后复核（在远程最新 main 上重跑）
+
+推送完成后，重新下载远程 main 的完整副本，把本批改动**原样放进去**重跑一遍
+（避免"本地是绿的、推上去就红"——这个仓库 16 个窗口在并行推，本地基线随时会过期）：
+
+| 项目 | 结果 |
+|---|---|
+| `bash build.sh` | TSC OK（产物校验通过：222 个 .js） |
+| `node .build/tests/run.js` | **通过 3696 项，失败 0 项**（基线 3695，其他窗口同期新增 1 项） |
+| 本窗口 `runPhase10W6BTests()` | **通过 84 项，失败 0 项** |
+| `check-deps.js` | 我的 4 个单元**已全部登记**；剩余 8 条未登记（i18n / blessing / curse / rarity / achievement / rebind / gameflow / accessibility）**均为其他窗口的单元**，与本批无关 |
+| `check-links.js` | **[OK] 42 条链接，断链 0 处** |
+| `scan-dt-guard.py` | 命中 0 处 ✓ |
+| `scan-num-guard.py` | 命中 0 处 ✓ |
+| `check-random-source.py` | [OK] ✓ |
+| `check-dup-exports.py` | [OK] ✓ |
+
+**关于第 6 节提到的断链**：验收时看到的那 1 处断链（`audit/handoff_W3-B.md:268`）
+在推送时已由 **W3-B 窗口自己修好**，所以最终复核是 0 断链。本窗口从未改动该文件。
+
+**推送方式说明**：本环境里 Git 的 smart-HTTP 端点（`git-upload-pack` / 推送通道）不可达，
+只能通过 GitHub API 提交。已用 Git Data API 基于推送瞬间的 main（`d62db0f9`）
+创建 tree + commit 并更新 ref（**non-force**，未强推），提交为 `a75973a9`。
+只提交了本批 8 个文件，未整体覆盖仓库，其他窗口的并行推送不受影响。
+
+---
+
 ## 8. 给后续窗口的一句话提醒
 
 `dungeon` 现在有两处缓存（地板索引、BFS 距离场）。
