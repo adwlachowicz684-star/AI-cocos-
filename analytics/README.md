@@ -107,12 +107,30 @@ isSignificant(control, treatment, 0.05, 1000);
 | `conversionRate(s)` | 转化率 |
 | `mean(s)` / `variance(s)` | 均值 / **样本方差（除以 n−1）** |
 | `normalCdf(z)` | 正态 CDF |
-| `twoProportionZTest(c, t)` | 双比例 Z 检验 |
+| `twoProportionZTest(c, t)` | 双比例 Z 检验（**`p` 非有限时回落 1**） |
 | `isSignificant(...)` | 是否显著 |
+| `assign(id, cfg)` | 分桶（**公开函数**，`treatmentPercent` 非法时回落 50） |
 | `requiredSampleSize(baseline, lift)` | 需要的样本量 |
 
 > ⚠️ **`Stats` 是只读的——`record*` 返回新对象，不改原来的。**
 > 写成 `recordBinary(stats, true)` 而不接返回值，数据就丢了。
+
+> ⚠️ **`variance` 用平移后的两遍算法，不是 `Σx² − n·m²`。**
+> 后者会在"大基数小波动"下被灾难性消去抹平，实测：
+>
+> ```
+> [1e8+1 … 1e8+5]        精确 2.5   一次遍历算出 2
+> [1e9+7, 1e9+9, 1e9+11] 精确 4     一次遍历算出 0
+> ```
+>
+> 更糟的是 `Math.max(0, v)` 把消去产生的负数压成 0，
+> 于是"精度崩了"被伪装成"方差就是 0"——
+> 置信区间为 0、t 检验失效，ARPU 这类实验的结论完全不可信。
+> 现在 `Stats` 里多了一个 `shift` 字段记录减去的基准（方差对平移不变）。
+
+> ⚠️ **`recordValue` 丢弃非有限值**（`n` 不增加）。
+> 一个 NaN 会把 `sum` / `sumSq` 全污染成 NaN，之后均值与显著性一起失效。
+> 不记成 0 是因为 0 是个"看起来合法"的样本，会把均值系统性拉低。
 
 > ⚠️ **`conversionRate` 和 `mean` 在 `n === 0` 时返回 `0`，不抛错。**
 > 空统计对象直接读会拿到 0 而不是 `NaN`——
@@ -134,7 +152,8 @@ isSignificant(control, treatment, 0.05, 1000);
 | `trackBinary(userId, converted)` | 记二值结果 |
 | `trackValue(userId, value)` | 记数值结果 |
 | `result()` | 出结论（`ExperimentResult`） |
-| `reset()` | 清空参与记录 |
+| `reset()` | 清空参与记录（**重新开始一轮实验**） |
+| `destroy()` | 卸载：清掉全部样本（含原始 user id 字符串） |
 | `name` / `size` | 实验名 / **去重后**的参与人数 |
 
 > ⚠️ **同一用户只计一次，这是刻意的去重语义：**
