@@ -5,6 +5,19 @@
 > 测试：`tests/run_phase10_w1b.ts`，导出 `runPhase10W1BTests()`（**55 项，未并入 `tests/run.ts`，由总审合并**）
 > 基线：构建通过、**3695 项测试全绿**、6 项校验脚本全过（未改动 `run.ts`、未碰 `_core/`）
 
+⚠️ **`tests/run.ts` 未改动**——按分工由总审统一注册 `runPhase10W1BTests()`。
+在总审合并之前，本文件需独立运行：
+
+```bash
+bash build.sh
+node -e "const f=require('./.build/tests/_framework');f.setSuite('W1-B');
+require('./.build/tests/run_phase10_w1b').runPhase10W1BTests();f.summary();"
+```
+
+预期输出：`通过 55 项，失败 0 项`。
+本报告里所有"修复前"输出都是**本窗口自己跑出来的**，不是抄原报告的证据。
+复现脚本放在 `/data/workspace` 与 `/tmp` 下（未入库，避免 `verify/` 触发 `check-deps.js`）。
+
 ## 结论
 
 | 状态 | 条数 |
