@@ -102,12 +102,37 @@ const house: Blueprint = {
 
 | 方法 | 说明 |
 |---|---|
-| `preview(id, anchor, rot)` | 纯查询，返回错误原因 + 占位 + 冲突对象 |
-| `place(id, anchor, rot)` | 放置（原子） |
+| `preview(id, anchor, rot)` | 纯查询，返回错误原因 + 占位 + 冲突对象 + `missing` |
+| `place(id, anchor, rot)` | 放置（原子）。失败时透传 `missing` |
 | `remove(id)` | 拆除并返还 |
 | `upgrade(id)` | 原地替换 |
 | `complete(id)` | 标记建造完成 |
 | `buildingAt(cell)` | 查询某格 |
+
+### `missing` 是"还差多少"，不是布尔
+
+`error === 'insufficient-resources'` 时，`missing` 给出每种资源的具体缺口：
+
+```typescript
+const r = b.place('house', { x: 5, y: 5 });
+if (!r.ok && r.error === 'insufficient-resources') {
+  for (const [res, need] of Object.entries(r.missing ?? {})) {
+    tip(`还差 ${need} 个 ${res}`);
+  }
+}
+```
+
+> ⚠️ 这个字段曾被声明但**从未被填充**（`preview` 里它是局部变量，没进返回对象）。
+> 结果是 `r.missing` 运行时永远 `undefined`，而**类型检查是过的**——
+> 调用方照着定义写 `if (r.missing?.wood)`，永远走不到，功能静默失效。
+> 契约说谎比没有这个字段更糟：没有它，调用方会去找别的办法。
+
+### 旋转角度非法时会抛错
+
+`rotateCell` / `blueprintCells` 只接受 `0 / 90 / 180 / 270`，传别的值**抛错**。
+`Direction` 是字面量联合，TS 挡得住写死的 `45`，
+但挡不住从 JSON 配置表反序列化出来的 `number`——
+那种情况下"不转也不报错"会让占位与预览对不上，且日志一行没有。
 
 ### 查询
 

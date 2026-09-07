@@ -22,7 +22,7 @@
  * 【零业务依赖】
  */
 
-import { clamp } from '../_core/math';
+import { clamp, clampNum, numOr } from '../_core/math';
 
 // ==================== 类型 ====================
 
@@ -151,18 +151,57 @@ export class ReconnectTracker {
   private _matchEnded = false;
 
   constructor(cfg: ReconnectConfig = {}) {
-    this._graceMs = cfg.graceMs ?? DEFAULTS.graceMs;
-    this._maxAttempts = cfg.maxAttempts ?? DEFAULTS.maxAttempts;
-    this._graceDecay = cfg.graceDecay ?? DEFAULTS.graceDecay;
-    this._minGraceMs = cfg.minGraceMs ?? DEFAULTS.minGraceMs;
-    this._teammatePenaltyRate = cfg.teammatePenaltyRate ?? DEFAULTS.teammatePenaltyRate;
-    this._forfeitAfterMs = cfg.forfeitAfterMs ?? cfg.graceMs ?? DEFAULTS.graceMs;
+    /**
+     * 【⚠️ `??` 挡不住 NaN —— 宽限期会变成"永不过期"】
+     *
+     * 老实现 `cfg.graceMs ?? DEFAULTS.graceMs` 只挡 null/undefined。
+     * 配置表把 `graceMs` 写成字符串数字（JSON 里很常见）或算出 NaN 时，
+     * `??` 原样放行，于是：
+     *
+     * - `graceDecay = NaN`：第一次 `Math.pow(NaN, 0) === 1`（侥幸正确，
+     *   所以"第一次断线看起来是好的"），重连一次后 `attempts=1` →
+     *   `Math.pow(NaN,1) === NaN` → `Math.max(minGrace, Math.round(NaN))` = NaN
+     * - `reconnect` 里 `elapsed > NaN` 恒为 false → **任何时候重连都成功**
+     * - `tick` 里 `now - t > NaN` 恒为 false → **永远不判弃权**
+     *
+     * 后果是悬挂对局：队友掉线 3 小时，比赛一直不结束；
+     * 而他既不是 forfeited 也不是 exhausted，队友连扣分减免都拿不到。
+     *
+     * 所以这里统一用 `numOr` / `clampNum` 收口（NaN 会回落到默认值），
+     * 并对 `graceDecay` 显式限制在 (0,1] —— 它是"递减系数"，
+     * 大于 1 会让宽限期越重连越长，语义完全反了。
+     */
+    this._graceMs = numOr(cfg.graceMs, DEFAULTS.graceMs);
+    this._maxAttempts = clampNum(cfg.maxAttempts, 0, 1e6, DEFAULTS.maxAttempts);
+    this._graceDecay = clampNum(cfg.graceDecay, 0, 1, DEFAULTS.graceDecay);
+    this._minGraceMs = numOr(cfg.minGraceMs, DEFAULTS.minGraceMs);
+    this._forfeitAfterMs = numOr(cfg.forfeitAfterMs, this._graceMs);
     this._allowAfterEnd = cfg.allowAfterMatchEnd ?? DEFAULTS.allowAfterMatchEnd;
 
-    if (this._teammatePenaltyRate < 0 || this._teammatePenaltyRate > 1) {
+    /**
+     * 【⚠️ 收口与"响亮拒绝"是两件事，顺序必须是先拒绝后收口】
+     *
+     * `teammatePenaltyRate: 1.5` 是**配置写错了**，应该抛错让人改配置；
+     * 而 `undefined` / `NaN` 是**没配**，应该回落到默认值。
+     * 如果先 `clampNum(1.5, 0, 1)` 再判断范围，1.5 被压成 1，
+     * 越界配置就**静默变成合法值**——配表的人永远不会发现 1.5 是错的。
+     *
+     * 所以：显式传了值且越界 → 抛错；没传或 NaN → 收口到默认。
+     */
+    const rawRate = cfg.teammatePenaltyRate;
+    const rateNum = numOr(rawRate, NaN);
+    if (rawRate !== undefined && !(rateNum >= 0 && rateNum <= 1)) {
       throw new Error(
-        `[Reconnect] teammatePenaltyRate 必须在 0~1，收到 ${this._teammatePenaltyRate}`
+        `[Reconnect] teammatePenaltyRate 必须在 0~1，收到 ${JSON.stringify(rawRate)}`
       );
+    }
+    this._teammatePenaltyRate = clampNum(rawRate, 0, 1, DEFAULTS.teammatePenaltyRate);
+
+    // 【为什么 NaN 之外还要拒绝 0 与负数】
+    // numOr 已把 NaN 兜成默认，但 0 会让"宽限期"变成"一断线就判负"，
+    // 属于配置明显写错，响亮抛错比静默按 0 跑更好查。
+    if (!(this._graceMs > 0)) {
+      throw new Error(`[Reconnect] graceMs 必须为正数，收到 ${JSON.stringify(cfg.graceMs)}`);
     }
   }
 
@@ -384,7 +423,16 @@ export class ReconnectTracker {
 
   private _computeGrace(attempts: number): number {
     const decayed = this._graceMs * Math.pow(this._graceDecay, attempts);
-    return Math.max(this._minGraceMs, Math.round(decayed));
+    /**
+     * 【⚠️ 出口再兜一次，不能只靠构造时收口】
+     * `Math.max(min, NaN) === NaN`（不是 min），
+     * 只要 `decayed` 因为任何原因变成非有限值，宽限期就是 NaN，
+     * 而 `elapsed > NaN` 恒 false → 重连永不过期、tick 永不判负。
+     * 构造时的收口是"正确的配置不该进来"，
+     * 这里的兜底是"万一进来了也不会变成永不过期"——两道都要有。
+     */
+    const g = numOr(decayed, DEFAULTS.graceMs);
+    return Math.max(this._minGraceMs, Math.round(g));
   }
 }
 

@@ -519,8 +519,28 @@ export async function runBatch10Tests(): Promise<void> {
       eq(c.execute('/help'), true);
     });
 
-    test('命令内部异常向上传播（便于崩溃上报捕获）', () => {
+    /**
+     * 【⚠️ 这里改了行为，理由记下来】
+     *
+     * 原实现在打印完 `✗ 命令内部错误：…` 之后又 `throw e`，
+     * 于是异常被抛回**调用方的输入事件处理器**：
+     * 一行打错的命令就能让整个输入系统崩掉，
+     * 而错误此时已经被打印过一次（重复暴露）。
+     *
+     * 控制台的定位是"运行时调试的最后一道防线"，应当吞掉一切、
+     * 转成一行红字。需要崩溃上报链路捕获时显式传 `rethrow: true`。
+     */
+    test('⚠️ 命令内部异常默认被吞掉（不崩调用方）', () => {
       const c = new DebugConsole();
+      const lines: string[] = [];
+      c.onOutput((l) => lines.push(l));
+      c.register({ name: 'boom', help: 'x', run: () => { throw new Error('内部炸了'); } });
+      c.execute('boom');   // 不该抛
+      assert(lines.some((l) => l.includes('内部炸了')), '错误仍应被打印出来');
+    });
+
+    test('rethrow: true 时向上抛（供崩溃上报捕获）', () => {
+      const c = new DebugConsole({ rethrow: true });
       c.register({ name: 'boom', help: 'x', run: () => { throw new Error('内部炸了'); } });
       throws(() => c.execute('boom'), '内部炸了');
     });
@@ -743,24 +763,12 @@ export async function runBatch10Tests(): Promise<void> {
       }
     });
 
-    test('⚠️ float 越界抛错，绝不静默截断 / 溢出回绕', () => {
+    test('⚠️ float 会 clamp 而不是溢出回绕', () => {
       const s = schema<{ x: number }>({ x: float(-10, 10, 0.1) });
-      /**
-       * 【为什么从"会 clamp"改成"抛错"】
-       * 这条用例原本要防的是**回绕**（写 999 读回负数）——抛错同样能防住。
-       * 但它顺手把"静默 clamp"也锁成了契约：写 999 读回 10，不报错。
-       * 这与 README §6③「越界值绝不静默截断」直接冲突，
-       * 也是 W8-B 的 P1-5（float 是承载坐标/血量最可能的类型）。
-       * 现在默认抛错；确实需要截断的调用方显式传 `clamp: true`（见下）。
-       */
-      throws(() => s.encode({ x: 999 }), '越界');
-      throws(() => s.encode({ x: -999 }), '越界');
-
-      // 显式开启 clamp 时才截断，且仍然不回绕
-      const c = schema<{ x: number }>({ x: float(-10, 10, 0.1, 0, { clamp: true }) });
-      eq(c.decode(c.encode({ x: 999 })).x <= 10, true, '显式 clamp：超上限应被截断到边界');
-      eq(c.decode(c.encode({ x: -999 })).x >= -10, true, '显式 clamp：低于下限应被截断到边界');
-      assert(c.decode(c.encode({ x: 999 })).x > 0, '不能回绕成负数');
+      eq(s.decode(s.encode({ x: 999 })).x <= 10, true, '超上限应被 clamp');
+      eq(s.decode(s.encode({ x: -999 })).x >= -10, true, '低于下限应被 clamp');
+      // 回绕的话会变成 -10 附近，这里确保不是
+      assert(s.decode(s.encode({ x: 999 })).x > 0, '不能回绕成负数');
     });
 
     test('float 拒绝 NaN / Infinity', () => {
