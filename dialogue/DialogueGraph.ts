@@ -285,6 +285,37 @@ export class DialogueRunner<S extends object = DialogueState> {
   }
 
   /**
+   * 当前是否"有得选"
+   *
+   * 【为什么要单独暴露这个查询】
+   *
+   * 条件对话（"需要钥匙""好感度 ≥ 80"）里必然会出现
+   * **所有选项的条件都不满足**的时刻。此时三件事同时成立：
+   *
+   * - `advance()` 返回 false（有 choices 的节点不让推进）
+   * - `choose(0)` / `choose(1)` 全部返回 false（条件不满足）
+   * - `isDone` 却是 **false**（对话没结束）
+   *
+   * 也就是**既不能选、也不能进、也不能退出**的死锁：
+   * UI 上是两个灰掉的按钮加一个点了没反应的"继续"，玩家只能杀进程。
+   * `showDisabled` 字段说明作者考虑过"单个选项被禁用"，
+   * 但没考虑"全部被禁用"。
+   *
+   * 调用方只有能**检测到**这个状态（弹一句"你还没有钥匙"并给一个退出入口），
+   * 死锁才可能被解开。所以这个查询是必须的，不是锦上添花。
+   *
+   * @returns false = 当前是"有选项但无一可选"的死局
+   *          （无选项节点返回 true，因为它可以被 `advance()` 推进）
+   */
+  hasEnabledChoice(): boolean {
+    if (this._done || this._currentId === null) return false;
+    const node = this._graph.getNode(this._currentId);
+    if (!node) return false;
+    if (!node.choices || node.choices.length === 0) return true;
+    return node.choices.some((c) => (c.condition ? c.condition(this._state) : true));
+  }
+
+  /**
    * 选择一个选项
    *
    * @param index 选项下标
@@ -337,7 +368,25 @@ export class DialogueRunner<S extends object = DialogueState> {
     while (!this._done && this._currentId !== null && steps < maxSteps) {
       const node = this._graph.getNode(this._currentId);
       if (!node) break;
-      if (node.choices && node.choices.length > 0) return true; // 到了有选项的节点
+      if (node.choices && node.choices.length > 0) {
+        /**
+         * 【⚠️ 有选项 ≠ 玩家有得选】
+         *
+         * 到了"有选项的节点"就停下等待输入，这个前提在
+         * **所有选项的 condition 都不满足**时不成立：
+         * 调用方在这里拿到 true，然后 `choose()` 每一次都失败，
+         * `advance()` 也失败——自动播放流程就此卡死。
+         *
+         * 所以"一个可选的都没有"要按**终态**处理：
+         * 直接结束对话（并触发 onExit），让调用方的
+         * `isDone` 分支能正常收尾，而不是停在一个无解的界面上。
+         */
+        if (!this.hasEnabledChoice()) {
+          this.end();
+          return false;
+        }
+        return true; // 到了有选项的节点
+      }
       if (!this.advance()) break;
       steps++;
     }

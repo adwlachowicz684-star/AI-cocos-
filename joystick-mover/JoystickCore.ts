@@ -72,6 +72,32 @@ export interface JoystickOptions {
   readonly normalizeOutput?: boolean;
 }
 
+/**
+ * 摇杆输出
+ *
+ * 【⚠️⚠️ 这个对象是**每帧复用**的，不是值对象】
+ *
+ * `JoystickCore.evaluate()` 为了热路径零分配，
+ * 每次写的都是同一个内部对象（`_out`），返回的就是它：
+ *
+ * ```js
+ * const a = core.evaluate();   // magnitude 0.5
+ * core.onMove(id, x2, y2);
+ * const b = core.evaluate();   // magnitude 1
+ * a === b        // true   ← 同一个对象
+ * a.magnitude    // 1      ← a 被改写成了 b 的值
+ * ```
+ *
+ * 所以**不要把返回值存起来**。典型踩法：
+ *
+ * ```js
+ * this.lastDir = core.evaluate().dir;   // ✗ 存的是引用
+ * // 下一帧这个引用就被覆盖了：方向平滑失效、"方向是否变化"恒等
+ * ```
+ *
+ * 需要保存请用 `core.snapshot()`（返回新对象），
+ * 或自己逐字段拷贝：`{ x: out.dir.x, y: out.dir.y }`。
+ */
 export interface JoystickOutput {
   /** 方向向量，长度 0..1（死区内为 0,0） */
   readonly dir: IVec2;
@@ -204,8 +230,11 @@ export class JoystickCore {
   /**
    * 计算输出
    *
-   * 【返回的是复用对象】高频调用不产生 GC。
-   * 如果你要保存结果，请自行拷贝。
+   * 【⚠️ 返回的是**复用对象**，不是新对象】
+   * 高频调用零分配（热路径优化，意图是对的），
+   * 但这也意味着**调用方持有的引用会被下一帧改写**。
+   * 要保存结果请用 `snapshot()`，要写进自己的结构请用 `evaluateInto()`。
+   * 详见 `JoystickOutput` 接口上的说明。
    */
   evaluate(): JoystickOutput {
     const o = this._out;
@@ -246,6 +275,48 @@ export class JoystickCore {
     o.angle = (Math.atan2(dy, dx) * 180) / Math.PI;
     o.active = true;
     return o;
+  }
+
+  /**
+   * 取一份**独立拷贝**（等价于 `evaluate()` 结果的深拷贝）
+   *
+   * 【为什么需要它】
+   * `evaluate()` 返回的是每帧复用的内部对象（见 `JoystickOutput` 的说明）。
+   * 高频调用时零分配是对的，但调用方只要想把结果留一帧以上
+   * （方向平滑、比较"方向是否变了"、缓存上一次输入），
+   * 拿引用就必然被下一帧改写。
+   *
+   * 这个方法就是给这类场景用的逃生口：可以放心存、放心塞进数组。
+   * `JoystickMover._updateVisual` 用 `_lastX/_lastY` 逐字段缓存才避开了这个坑——
+   * 那说明陷阱真实存在，不能指望每个调用方都恰好写对。
+   */
+  snapshot(): JoystickOutput {
+    const o = this.evaluate();
+    return {
+      dir: { x: o.dir.x, y: o.dir.y },
+      magnitude: o.magnitude,
+      angle: o.angle,
+      active: o.active,
+    };
+  }
+
+  /**
+   * 把当前输出写进调用方给的对象（热路径上连这一份拷贝都省掉）
+   *
+   * @param out 目标对象，字段会被就地覆盖
+   */
+  evaluateInto(out: {
+    dir: { x: number; y: number };
+    magnitude: number;
+    angle: number;
+    active: boolean;
+  }): void {
+    const o = this.evaluate();
+    out.dir.x = o.dir.x;
+    out.dir.y = o.dir.y;
+    out.magnitude = o.magnitude;
+    out.angle = o.angle;
+    out.active = o.active;
   }
 
   private _snap(x: number, y: number, n: number): IVec2 {
