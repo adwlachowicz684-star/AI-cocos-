@@ -180,7 +180,7 @@ write(1)                  → ok，读回 1
 3. `set` 与层数无关这点要在 `curse/README.md` 里写明——我在 `blessing/README.md` 补了"三种 op 与层数的关系"表，
    否则下一个人看到 `effects()` 的写法还是会以为 `set` 该乘层数。
 
-### 3.2 三条"N/A"（无 destroy）与两条"不成立"的口径
+### 3.3 三条"N/A"（无 destroy）与两条"不成立"的口径
 
 - **A6 / B9 / B13**：三个单元都是纯逻辑，没有 `install`、监听器或定时器，
   铁律 5（"有 install 必须有 uninstall"）前提不成立。加了空 `destroy()` 反而是噪声。
@@ -214,3 +214,24 @@ $ python3 scripts/check-measured-numbers.py  1 处（原始库同样 1 处，aud
 
 $ for f in .build/examples/*.js         全部示例 exit=0 ✓
 ```
+
+### 4.1 推送后复核（在他窗口代码合入后的真实 main 上重跑）
+
+我推送完 `main` 之后又有 W1-B / W2-B / W3-B / W4-B / W5-B / W7-B 陆续合入
+（我推送时为 `fdd2c8c`，复核时 HEAD 已到 `5485e7f`，期间 **30 个提交**）。
+因此我在**含他人最新代码**的远端快照上重跑了一遍，确认本窗口改动仍然成立：
+
+| 项 | 结果 |
+|---|---|
+| 我的 11 个交付文件是否被他人覆盖 | **无**（逐 SHA 比对），`_kitmeta.json` 的唯一差异是 W7-B 新增的 `achievement → _core`，我的 `blessing → _core` 仍在 |
+| 本地 `node .build/tests/run.js` | 通过 **3696** 项，失败 0 项（含他人新增文件后重建） |
+| 本地 `runPhase10W8BTests()` | 通过 **50** 项，失败 0 项 |
+| 六个校验脚本 | 见上（`check-links` / `check-measured-numbers` 的失败项与原始库一致，非本窗口引入） |
+
+> ⚠️ **一条给总审的归因提醒（非本窗口问题）**：
+> 复核时发现 `node scripts/check-deps.js` 现在会报
+> `✗ 登记了但没 import（幽灵依赖）1 条：achievement 登记了 _core`。
+> 它来自 W7-B 的提交 `edc04835`（"重新登记 achievement → _core"）——
+> 我早前自检时该项是"全部通过 ✓"，是这条提交之后才变红的。
+> **不是本窗口引入，也不由我修**（`achievement` 是 W7-B 的单元），
+> 记在这里是免得总审看到红字时误判为我的问题。
