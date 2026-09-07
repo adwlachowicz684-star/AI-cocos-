@@ -44,7 +44,7 @@
  */
 
 /** 一次输入记录 */
-import { safeDt } from '../_core/math';
+import { clampNum, numOr, safeDt } from '../_core/math';
 export interface BufferedInput {
   /** 动作名 */
   action: string;
@@ -106,8 +106,26 @@ export class InputBuffer {
   private _queue: BufferedInput[] = [];
 
   constructor(opts: InputBufferOptions = {}) {
-    this._window = opts.window ?? 0.15;
-    this._maxQueue = opts.maxQueue ?? 6;
+    /**
+     * 【⚠️ 为什么两个字段都要收口（P2）】
+     *
+     * `maxQueue` 用 `?? 6`：NaN 穿过去之后，
+     * 裁剪判定 `this._queue.length > NaN` **恒为 false**
+     * → 队列永不裁剪。实测（修复前）：连按 50 次后队列长度 50，
+     * 而上限本该是 6。搓招序列越长、比对越慢，且内存只增不减。
+     *
+     * `window` 用 `?? 0.15`：NaN 穿过去之后，
+     * `now - t <= NaN` 恒为 false、`now - t > NaN` 也恒为 false，
+     * 于是 `peek` 永远 false、`consume` 永远走"未过期"分支——
+     * **输入时灵时不灵，且和帧率、时机都无关**。
+     *
+     * 上界 64 的依据：搓招序列超过 64 步没有实际意义
+     * （人类在 1 秒内按不出 64 个有意图的输入），
+     * 而它属于"容量类"字段，按 _core 的约定用 clampNum 定上界
+     * ——`Infinity` 会让裁剪判定永远为假，是这类字段最典型的死法。
+     */
+    this._window = numOr(opts.window, 0.15);
+    this._maxQueue = clampNum(opts.maxQueue, 1, 64, 6);
     this._useInternalClock = opts.now === undefined;
     this._now = opts.now ?? (() => this._clock);
   }
@@ -118,7 +136,14 @@ export class InputBuffer {
   }
 
   set window(v: number) {
-    this._window = Math.max(0, v);
+    /**
+     * 【为什么先 numOr 再 Math.max（P2）】
+     * `Math.max(0, NaN) === NaN`——`Math.max` **不做有限性检查**，
+     * 单独用它挡不住 NaN（见全库共享模式 B）。
+     * 先用 `numOr` 把 NaN / Infinity 兜成 0，再夹掉负数，
+     * 与构造函数的 `numOr(opts.window, …)` 保持同一口径。
+     */
+    this._window = Math.max(0, numOr(v, 0));
   }
 
   /**
