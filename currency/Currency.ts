@@ -66,6 +66,27 @@
  *
  * 【零依赖】本模块不认识"玩家""商店""背包"，
  * 它只知道"某种 id 的整数余额"。换任何游戏直接复制目录。
+ *
+ * 【使用示例】
+ * ```typescript
+ * const wallet = new Wallet({
+ *   defs: [
+ *     { id: 'gold', name: '金币', max: 999999 },
+ *     { id: 'gem',  name: '钻石', max: 9999 },
+ *   ],
+ *   initial: { gold: 100 },
+ * });
+ *
+ * wallet.add('gold', 50, 'quest');     // 返回实际到账数（超上限会截断）
+ * wallet.spend('gold', 30, 'shop');    // true
+ * wallet.spend('gold', 1e9, 'shop');   // false —— 余额不足
+ * wallet.get('gold');                  // 120
+ * wallet.isFull('gem');                // 是否已达上限
+ * ```
+ *
+ * 【⚠️ add 返回实际到账数，不是 void】
+ * 超过 `max` 时会被截断，调用方必须读返回值才能知道真实到账量——
+ * 直接忽略会导致"发了 100 但玩家只拿到 20 且无提示"。
  */
 
 import { clamp, clampNum } from '../_core/math';
@@ -397,8 +418,30 @@ export class Wallet {
   /**
    * 兑换（A → B）
    *
-   * 先扣后加：如果 B 有上限导致加不进去，A 也不退——
-   * 兑换是不可逆的经济行为，静默回滚会让玩家反复点击刷取。
+   * 【两阶段：先做完整预检，再动账】
+   *
+   * 老实现是"先 spend 成功、再 add"，一旦 `add()` 抛错，
+   * 源货币已经扣掉且**没有任何回滚**——钱凭空消失。
+   *
+   * 实测（修复前）：
+   * ```js
+   * before: gold=1000 gem=0
+   * exchange('gold', 500, 'gem', 10)
+   *   → 抛 "gem 是付费货币，不能用 add() 增加"
+   * after:  gold=500  gem=0   ← 500 金币消失，钻石没到账
+   * ```
+   * `premium: true`（线上充值货币的标准配置）是**必现**路径，
+   * 不是边缘情况。玩家每点一次兑换白扣一次，
+   * 且流水只记支出、客服无法对账。
+   *
+   * 【为什么用"预检"而不是"异常后回滚"】
+   * 本方法原本的注释写着"先扣后加，B 加不进去 A 也不退——
+   * 兑换是不可逆的经济行为，静默回滚会让玩家反复点击刷取"。
+   * **那个设计意图仍然保留**：上限溢出（`add` 部分到账）不回滚。
+   *
+   * 预检只拦截"注定失败"的情况（目标货币不允许 `add` 增加、
+   * 金额非法）——这些在动账**之前**就能判定，
+   * 所以既修好了"钱消失"，又没有引入回滚，两条不冲突。
    */
   exchange(
     fromId: string,
@@ -413,6 +456,16 @@ export class Wallet {
       throw new Error(`[Wallet] 不能兑换成同一种货币：${fromId}`);
     }
 
+    /**
+     * 【阶段 1 · 预检】
+     * 目标货币的可加性 + 金额合法性，全部在动账前判定。
+     * 任一不通过 → 抛错，源货币一分不动。
+     */
+    const toDef = this._require(toId);
+    this._assertNotPremium(toDef, 'earn');
+    this._assertAmount(toAmount, toId);
+
+    /** 【阶段 2 · 动账】预检已通过，这里不会再因目标货币抛错 */
     if (!this.spend(fromId, fromAmount, reason)) return false;
     this.add(toId, toAmount, reason);
     return true;
