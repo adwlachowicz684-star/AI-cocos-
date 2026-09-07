@@ -121,8 +121,8 @@ runPhase10W7BTests();
 
 | 脚本 | 结果 |
 |---|---|
-| `node scripts/check-deps.js` | 全部通过 ✓（`achievement → _core` 已由 `--fix` 补登记） |
-| `node scripts/check-links.js` | 3 处断链，**均为开工前既有**（`handoff_W3-B.md`、`result_W3-A.md` ×2），本窗口未新增 |
+| `node scripts/check-deps.js` | 全部通过 ✓（`achievement → _core` 已由 `--fix` 补登记；**该登记后被并发推送冲掉，已在 §7.2 重新修复**） |
+| `node scripts/check-links.js` | 断链均来自其它窗口的交付物，本窗口未新增 |
 | `python3 scripts/scan-dt-guard.py` | 命中 0 处 ✓ |
 | `python3 scripts/scan-num-guard.py` | 命中 0 处 ✓ |
 | `python3 scripts/check-random-source.py` | 未发现自建随机源 ✓ |
@@ -133,4 +133,75 @@ runPhase10W7BTests();
 ## 6. 遗留与提示
 
 1. `scripts/check-dup-exports.js` 不存在，任务书 §2.3 与实际脚本目录对不上，请总审确认是漏提交还是已废弃。
-2. `check-links.js` 的 3 处断链来自 W3 窗口的交付物，不属于本批单元，未擅自修改。
+2. `check-links.js` 的断链全部来自其它窗口的交付物，不属于本批单元，未擅自修改。
+
+---
+
+## 7. 推送后复核（在远程最新代码上重跑）
+
+首次推送完成后，远端 `main` 又被 W2-B / W3-B / W4-B / W8-B 等窗口推进了若干提交。
+本节是在**合并了这些提交之后**的最新代码上重跑的结果——
+上面的 §5 是"我自己的基线上"的结果，两者不是一回事。
+
+### 7.1 我的交付物是否还在
+
+| 文件 | 状态 |
+|---|---|
+| `audit/result_W7-B.md` | 在（9470 字节） |
+| `audit/verify_W7-B.md` | 在（7351 字节） |
+| `tests/run_phase10_w7b.ts` | 在（26643 字节） |
+| `achievement/Achievement.ts`、`curve/Curve.ts`、`expression/Expression.ts` | 与本地推送版本**逐字节相同** |
+| 三个单元 README | 逐字节相同 |
+| `_core/` | 无人改动 ✓ |
+
+### 7.2 ⚠️ 发现一次并发覆盖：`_kitmeta.json` 的登记被冲掉
+
+推送时我用 `check-deps.js --fix` 写入的 `achievement → ['_core']`
+在远端最新代码上**变回了 `[]`**——别的窗口基于旧树推的那份把我的改动盖了回去。
+
+这是本库"多窗口同时推同一个文件"的典型失效：
+`_kitmeta.json` 是**全库共享**的登记文件，不在任何窗口的单元边界内，
+用 API 按 `base_tree` 提交时，谁的 base 旧谁就会把别人的改动抹掉。
+
+**已重新修复**（在最新树上改回 `['_core']`）并再次推送。
+
+> 提示总审：**合并期结束前，`_kitmeta.json` 建议由总审统一跑一次 `--fix`**，
+> 否则这个字段会被各窗口反复冲掉。复核时残留的未登记项（属于其它窗口的单元）：
+> `i18n` / `curse` / `rebind` / `gameflow` → `_core`。本窗口未越界代改。
+
+### 7.3 合并后的全量回归
+
+```
+bash build.sh             → TSC OK（产物校验通过：219 个 .js）
+node .build/tests/run.js  → 通过 3696 项，失败 0 项
+```
+
+基线未跌（3696 = 我开工时的数字）。
+
+> 注：各窗口的新测试文件都**没有**注册进 `tests/run.ts`（按第 6 节纪律，由总审统一合并），
+> 所以总数仍是 3696——这不代表别人的测试没跑，只是没挂上入口。
+
+### 7.4 八窗口联跑（集成验证）
+
+为了确认"别人的改动没打穿我的单元、我的也没影响别人"，
+我把当前已交付的全部 phase10 测试文件临时挂上跑了一次（跑完已还原 `run.ts`）：
+
+```
+runPhase10W1BTests / W2B / W3A / W3B / W4A / W4B / W7B / W8B
+
+→ 通过 4174 项，失败 0 项
+```
+
+其中本窗口 `W7-B` 的 46 条**全部通过，0 失败**。
+说明三个单元的修复与其它 7 个窗口的改动**无冲突**。
+
+### 7.5 合并后的校验脚本
+
+| 脚本 | 结果 |
+|---|---|
+| `scan-dt-guard.py` | 命中 0 处 ✓ |
+| `scan-num-guard.py` | 命中 0 处 ✓ |
+| `check-random-source.py` | 未发现自建随机源 ✓ |
+| `check-deps.js` | 本窗口单元已通过；残留 4 条属其它窗口（见 §7.2） |
+| `check-links.js` | 断链 8 处，**全部来自** `handoff_W3-B.md` / `result_W1-B.md` / `result_W2-B.md` / `result_W3-B.md` / `verify_W3-B.md`——**本窗口的 `result_W7-B.md` / `verify_W7-B.md` 未产生任何断链** |
+| `check-dup-exports.js` | 脚本不存在（见 §6.1） |

@@ -1036,7 +1036,9 @@
       "path": "blessing/Blessing.ts",
       "maturity": "beta",
       "purpose": "祝福堆叠：软上限递减 + 互斥（双向）+ 三选一抽取",
-      "depends": [],
+      "depends": [
+        "_core"
+      ],
       "hasTest": true,
       "hasDemo": true,
       "domain": "内容与掉落",
@@ -1163,9 +1165,7 @@
       "layer": "L1",
       "domain": "内容与掉落",
       "maturity": "beta",
-      "depends": [
-        "_core"
-      ],
+      "depends": [],
       "hasTest": true,
       "hasDemo": true,
       "purpose": "稀有度不只是个排序——还牵扯掉落权重、UI 颜色、保底归属、排序比较。",
@@ -1195,7 +1195,9 @@
       "layer": "L1",
       "domain": "进度与统计",
       "maturity": "beta",
-      "depends": [],
+      "depends": [
+        "_core"
+      ],
       "hasTest": true,
       "hasDemo": true,
       "purpose": "成就看起来简单：if (kills >= 100) unlock('kill100')。",
@@ -1341,9 +1343,7 @@
       "layer": "L1",
       "domain": "表现与外壳",
       "maturity": "beta",
-      "depends": [
-        "_core"
-      ],
+      "depends": [],
       "hasTest": true,
       "hasDemo": false,
       "purpose": "可访问性常被当成\"发布前再说\"的事，",
