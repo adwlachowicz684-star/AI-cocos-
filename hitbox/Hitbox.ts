@@ -557,6 +557,29 @@ export class HitboxWorld {
    */
   add(box: Hitbox): () => void {
     if (box.enabled === undefined) box.enabled = true;
+
+    /**
+     * 【⚠️ rotation 缺失必须补全为 0，否则整个判定框静默失效】
+     *
+     * `rotation` 在接口里是必填的，TS 调用方不会漏。
+     * 但从 JSON / JS 侧构造时容易缺这个字段，后果很隐蔽：
+     *
+     * `hitboxCenter` → `applyShapeOffset` → `rotateOffset(0, 0, undefined, out)`
+     * 里 `deg === 0` 对 undefined 为 false，于是走弧度分支
+     * `Math.cos((undefined * PI) / 180)` = **NaN**
+     * → 判定框的世界中心变成 (NaN, NaN)
+     * → `shapesOverlap` 里所有距离比较恒为 false
+     * → **这个判定框永远命中不了任何东西，也不报错**
+     *
+     * 实测（补全前）：`add({id, shape, x:0, y:0, layer:1})`（缺 rotation）
+     * 后 `hitboxCenter(b)` 返回 `{x: NaN, y: NaN}`。
+     *
+     * 【为什么补全为 0 而不是抛错】
+     * "没有朝向"的自然含义就是 0 度，与 `enabled` 的默认处理一致。
+     * 抛错会让合法的简写写法（`{id, shape, x, y, layer}`）无法使用。
+     */
+    if (!Number.isFinite(box.rotation)) box.rotation = 0;
+
     this._boxes.set(box.id, box);
     this._insert(box);
     return () => this.remove(box.id);
@@ -581,11 +604,51 @@ export class HitboxWorld {
   update(id: string, x: number, y: number, rotation?: number): void {
     const b = this._boxes.get(id);
     if (!b) return;
-    const sameCell =
-      Math.floor(b.x / this._cellSize) === Math.floor(x / this._cellSize) &&
-      Math.floor(b.y / this._cellSize) === Math.floor(y / this._cellSize);
-    if (!sameCell) {
-      for (const k of this._cellsFor(b.x, b.y, boundingRadius(b.shape))) {
+
+    /**
+     * 【⚠️ 必须比较"覆盖的格子集合"，不能只比中心点所在格】
+     *
+     * 老实现只比中心点：
+     * ```ts
+     * const sameCell =
+     *   Math.floor(b.x / cellSize) === Math.floor(x / cellSize) &&
+     *   Math.floor(b.y / cellSize) === Math.floor(y / cellSize);
+     * ```
+     * 对**跨格的大判定框**（Boss 的大范围 AOE、细长的剑气）这是错的：
+     * 中心点还在原来那一格，但形状的边缘已经伸进新格子了，
+     * 索引却没更新 → 新格子里的目标**永远查不到它**。
+     *
+     * 实测（修复前）：cellSize=4、半径 3 的圆在 (0,0)，
+     * `update(id, 3.9, 0)`（中心格没变）后 `query(圆 r=0.5, 5, 0)` → **0 命中**；
+     * 而同样的位置用 remove+add 重建索引 → 1 命中。
+     * 距离 1.1 < 半径和 3.5，本该命中。
+     *
+     * 表现为"大招打不到边缘的怪"——间歇性、与体型相关，
+     * 是那种最难归因的战斗 bug。
+     *
+     * 【性能考虑】
+     * 这里要算两次 `_cellsFor`（各一次数组分配）。
+     * 但它只是整数运算，远低于走一遍 remove+insert 的 Map 操作，
+     * "比 remove+add 便宜"这条设计意图仍然成立。
+     *
+     * 【为什么能逐一比对】`_cellsFor` 用固定的嵌套 for 循环顺序输出，
+     * 同样的 (x, y, r) 一定得到同样的顺序，所以可以直接按下标比较。
+     */
+    const r = boundingRadius(b.shape);
+    const oldCells = this._cellsFor(b.x, b.y, r);
+    const newCells = this._cellsFor(x, y, r);
+    let same = oldCells.length === newCells.length;
+    if (same) {
+      for (let i = 0; i < oldCells.length; i++) {
+        if (oldCells[i] !== newCells[i]) {
+          same = false;
+          break;
+        }
+      }
+    }
+
+    if (!same) {
+      for (const k of oldCells) {
         const set = this._cells.get(k);
         if (set) {
           set.delete(id);
