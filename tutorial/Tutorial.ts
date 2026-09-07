@@ -35,6 +35,29 @@
  * 它不知道 UI 长什么样，只对外报告"当前是哪一步、要高亮什么"。
  *
  * 【零业务依赖】
+ *
+ * 【使用示例】
+ * ```typescript
+ * const ctx = { killed: 0 };
+ * const tut = new Tutorial({
+ *   steps: [
+ *     { id: 'move',  kind: 'tap',        text: '点这里移动' },
+ *     { id: 'kill',  kind: 'wait',       text: '击杀 3 个敌人',
+ *       until: (c) => c.killed >= 3 },
+ *   ],
+ *   context: ctx,
+ *   onFinish: () => console.log('新手引导完成'),
+ * });
+ *
+ * tut.start();
+ * tut.update(dt);      // 每帧推进（wait 类步骤在这里检查 until）
+ * tut.tap();           // 玩家点击（推进 tap 类步骤）
+ * tut.skip();          // 玩家跳过整个引导
+ * ```
+ *
+ * 【until 为什么是函数而不是事件名】
+ * "血量归零"、"拥有 3 个遗物"这类条件用事件名表达不了，
+ * 函数才能读任意上下文状态。
  */
 import { safeDt } from '../_core/math';
 
