@@ -67,6 +67,9 @@ import { runPhase3Tests } from './run_phase3';
 import { runPhase4Tests } from './run_phase4';
 import { runPhase5Tests } from './run_phase5';
 import { runPhase6Tests } from './run_phase6';
+import { runPhase7Tests } from './run_phase7';
+import { runPhase8Tests } from './run_phase8';
+import { runPhase9Tests } from './run_phase9';
 
 async function main(): Promise<void> {
   setSuite('第一批：核心插件（EventBus / Pool / RNG / Damage / Skill / Joystick）');
@@ -180,6 +183,15 @@ async function main(): Promise<void> {
 
   setSuite('精审修复回归 · 第六批（全局议题裁决：相切 / 区间 / 坐标系口径）');
   runPhase6Tests();
+
+  setSuite('精审修复回归 · 第七批（第二次精审 · 财产/安全类 P0）');
+  runPhase7Tests();
+
+  setSuite('精审修复回归 · 第八批（第二次精审 · 崩溃/卡死 + 永久失效类 P0）');
+  runPhase8Tests();
+
+  setSuite('精审修复回归 · 第九批（第二次精审 · 数据损坏 / 经济 / 统计正确性）');
+  runPhase9Tests();
 
   summary();
 }
