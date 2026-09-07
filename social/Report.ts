@@ -173,6 +173,31 @@ export class ReportCenter {
       matchId?: string;
     } = {}
   ): { result: SubmitResult; ticket?: ReportTicket } {
+    /**
+     * 【⚠️ now 必须是有限数，否则会造出"永远清不掉"的记录】
+     *
+     * `now` 是必填位置参数，TS 调用方不会漏传，
+     * 但 JS 调用方、或 `someApi(...args)` 展开调用时可能传成 undefined/NaN。
+     *
+     * 后果不是报错，而是**永久性泄漏**：
+     * - `_lastReport.set(key, NaN)` → 之后 `now - at >= cooldownMs` 是 `NaN >= x`，
+     *   恒为 false → 这条记录**永远不会被 prune 清掉**
+     * - 实测：漏传 now 提交 1 次后，无论 prune 多大时间戳，表里始终残留 1 条
+     *
+     * 这与本单元原 bug（`cooldownMs === 0` 导致 `_lastReport` 只增不减）
+     * 是同一个失效模式的不同入口：坏时间戳 → 清理逻辑失效 → 无界增长。
+     *
+     * 【为什么抛错而不是兜底成 Date.now()】
+     * 兜底成"当前时间"会掩盖调用方的 bug，
+     * 且让冷却判定的基准时间变得不可预测。
+     * 时间戳是这类系统的地基，坏了就应该响亮失败。
+     */
+    if (!Number.isFinite(now)) {
+      throw new Error(
+        `[Report] submit 的 now 必须是有限时间戳，收到 ${now}`
+      );
+    }
+
     if (reporterId === targetId) {
       return { result: 'self-report' };
     }
@@ -203,7 +228,14 @@ export class ReportCenter {
     };
 
     this._tickets.push(ticket);
-    this._lastReport.set(key, now);
+
+    /**
+     * 【⚠️ 没有冷却就不记录上次举报时间】
+     * 记录它的唯一用途是"冷却期内禁止重复举报"（见上文的 `last !== undefined` 判断）。
+     * `cooldownMs <= 0` 时这个判断永不成立，记录的只是纯垃圾，
+     * 却会让 `_lastReport` 无限增长（笛卡尔积量级）。
+     */
+    if (this._cooldownMs > 0) this._lastReport.set(key, now);
 
     if (rec && rec.day === day) rec.n++;
     else this._dailyCount.set(reporterId, { day, n: 1 });
@@ -358,17 +390,46 @@ export class ReportCenter {
    * @returns 清理掉多少条
    */
   prune(now: number): number {
-    if (this._cooldownMs <= 0) return 0;
+    /**
+     * 【⚠️ 早退不能跳过 `_dailyCount` 的清理】
+     *
+     * 老实现把 `if (this._cooldownMs <= 0) return 0;` 放在函数**最开头**，
+     * 于是下面的 `_lastReport` 清理和 `_dailyCount` 清理**一起被跳过**。
+     *
+     * 而 `cooldownMs: 0` 是完全合法的配置（"不限制冷却"）——
+     * 一旦这么配，冷却记录表就再也不会被清理，
+     * 而 `submit` 每次都会 `this._lastReport.set(key, now)`。
+     *
+     * 实测（修复前）：`new ReportCenter({cooldownMs: 0, dailyLimit: 5})`，
+     * 50 个不同举报人各提交 1 次 → `_lastReport` 大小 = **50**（全部留存）。
+     *
+     * `_lastReport` 的规模是"举报人 × 被举报人"的笛卡尔积量级，
+     * 大 DAU 下几周就能涨到百万级条目，
+     * 且 `prune` 返回 0 看起来"很正常"，没有任何日志或指标提示。
+     *
+     * 【两条都做】
+     * 1. 早退改为"只跳过冷却表，仍清每日计数"
+     * 2. 更根本的：没有冷却就**不必记录**上次举报时间（见 submit 侧）
+     */
+    if (this._cooldownMs <= 0) {
+      // 只清每日计数，冷却表在无冷却配置下本就不该有内容
+      this._pruneDaily(now);
+      return 0;
+    }
     const before = this._lastReport.size;
     for (const [k, at] of this._lastReport) {
       if (now - at >= this._cooldownMs) this._lastReport.delete(k);
     }
-    // 顺带清掉非今天的每日计数（跨天后旧数据没用了）
+    this._pruneDaily(now);
+    return before - this._lastReport.size;
+  }
+
+  /** 清掉非今天的每日计数（跨天后旧数据没用了） */
+  private _pruneDaily(now: number): void {
     const today = Math.floor(now / 86_400_000);
     for (const [k, v] of this._dailyCount) {
       if (v.day !== today) this._dailyCount.delete(k);
     }
-    return before - this._lastReport.size;
   }
 
   /** 清空全部状态（换服 / 重置测试用） */
