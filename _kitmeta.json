@@ -478,7 +478,9 @@
       "path": "turn/",
       "maturity": "beta",
       "purpose": "回合制系统（先攻/行动点/死亡跳过）",
-      "depends": [],
+      "depends": [
+        "_core"
+      ],
       "hasTest": true,
       "hasDemo": true,
       "domain": "玩法框架",
