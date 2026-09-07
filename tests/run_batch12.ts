@@ -212,11 +212,22 @@ export async function runBatch12Tests(): Promise<void> {
       eq(r.applied.length, 1, 'fireball 带 fire 标签');
     });
 
-    test('⚠️ 条件变体：没有求值器时视为已满足', () => {
+    test('⚠️ 条件变体：没有求值器时抛错（fail-closed，不再是 fail-open）', () => {
       /**
-       * 为什么不是"视为不满足"：
-       * 不满足的话，忘了注入求值器 → 所有条件变体静默失效，
-       * 排查起来像见鬼。视为满足至少效果可见。
+       * 【行为已变更（第二批精审 P0-19）】
+       *
+       * 旧实现 `if (!this._evaluator) return true` —— 门禁失效：
+       * 声明了 conditions 的变体**无条件生效**，
+       * 玩家没有遗物也能吃遗物加成、高难变体被应用到普通局。
+       *
+       * 旧注释的论证是"视为不满足会导致静默失效，更难查"——
+       * 但它只比较了两种**静默**方案，漏掉了第三种：**抛错**。
+       * 抛错既不静默生效也不静默失效，恰好消掉那个顾虑。
+       *
+       * 所以这里改为 fail-closed：声明了 conditions 却没注入 evaluator
+       * 属于接入错误，抛错让它立刻暴露，而不是悄悄放行。
+       *
+       * 未声明 conditions 的变体不受影响（见下一条用例）。
        */
       const cond: VariantDef = {
         id: 'cond', name: '残血强化',
@@ -225,8 +236,22 @@ export async function runBatch12Tests(): Promise<void> {
       };
       const s = new SkillVariantSystem<ReturnType<typeof fireball>>();
       s.register(cond);
-      const r = s.apply(fireball(), ['cond'], { data: {} });
-      eq(r.applied.length, 1, '无求值器时应视为满足条件');
+      throws(() => s.apply(fireball(), ['cond'], { data: {} }), 'evaluator');
+    });
+
+    test('条件变体：未声明 conditions 时无需求值器（不误伤）', () => {
+      /**
+       * fail-closed 只针对"声明了 conditions"的变体。
+       * 无条件变体本就不需要求值器，必须能正常生效。
+       */
+      const plain: VariantDef = {
+        id: 'plain', name: '无条件强化',
+        patches: [{ op: 'mul', path: 'damage', value: 2 }],
+      };
+      const s = new SkillVariantSystem<ReturnType<typeof fireball>>();
+      s.register(plain);
+      const r = s.apply(fireball(), ['plain'], { data: {} });
+      eq(r.applied.length, 1, '无条件变体应正常生效');
     });
 
     test('条件变体：注入求值器后按条件生效', () => {
