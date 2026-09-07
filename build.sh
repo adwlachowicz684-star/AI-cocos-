@@ -102,8 +102,44 @@ for attempt in 1 2 3; do
   fi
 
   js_count=$(find "$TMP" -name '*.js' 2>/dev/null | wc -l)
+
   # 允许少量偏差（纯类型文件不产出 .js）
-  if [ -f "$TMP/tests/run.js" ] && [ "$js_count" -ge $((src_count - 20)) ]; then
+  total_ok=1
+  [ -f "$TMP/tests/run.js" ] || total_ok=0
+  [ "$js_count" -ge $((src_count - 20)) ] || total_ok=0
+
+  # ============================================================
+  # 【⚠️ 为什么还要逐文件比对 tests/，光看总数不够】
+  # ============================================================
+  # 曾经出现过：总数校验通过（209 个 .js），但 `.build/tests/`
+  # 只剩 18 个文件（应有 41 个）——`_framework.js`、`run_phase7.js`、
+  # `run_phase2/5.js` 等全部丢失。
+  #
+  # 后果不是"编译失败"，而是**运行 `node .build/tests/run.js` 直接
+  # MODULE_NOT_FOUND**。更糟的是如果丢的只是某个 run_phaseN.js，
+  # 而 run.ts 里的 import 又被 bundler 容错掉，
+  # 那批测试就会**静默不执行**——回归数字看着正常，实际少跑了一整批。
+  #
+  # 总数校验抓不到这个：tests 少 23 个，别的目录多几个就补平了。
+  # 所以必须逐个文件确认"每个 tests/*.ts 都有对应的 .js"。
+  missing=""
+  for ts in tests/*.ts; do
+    [ -e "$ts" ] || continue
+    base=$(basename "$ts" .ts)
+    # 纯类型文件（只有 interface/type）不产出 .js，跳过
+    if ! grep -qE '^(export )?(declare )?(function|class|const|let|var|enum|namespace)' "$ts" \
+       && ! grep -qE '^(export )?(declare )?(function|class|const|let|var|enum|namespace)' "$ts"; then
+      continue
+    fi
+    [ -f "$TMP/tests/$base.js" ] || missing="$missing $base"
+  done
+
+  if [ -n "$missing" ]; then
+    echo "  （第 $attempt 次编译产物缺 tests 文件：$missing，重试）"
+    total_ok=0
+  fi
+
+  if [ "$total_ok" -eq 1 ]; then
     ok=1
     break
   fi
@@ -121,5 +157,40 @@ fi
 [ -d .build ] && mv .build "$OLD" 2>/dev/null
 mv "$TMP" .build || { echo "✗ 无法替换 .build"; exit 1; }
 ( rm -rf "$OLD" 2>/dev/null ) &
+
+# ============================================================
+# 【⚠️ 为什么 mv 之后还要检查"是不是被套了一层"】
+# ============================================================
+# 观察到：`rm -rf .build` / `mv .build "$OLD"` 返回 0，
+# 但紧接着 `[ -d .build ]` 仍为真（目录项缓存有延迟）。
+# 于是 `mv "$TMP" .build` 不是"改名成 .build"，
+# 而是**把临时目录搬进了已存在的 .build 里**：
+#
+#     .build/.build.new.<PID-时间戳>/tests/run.js
+#
+# 结果 `node .build/tests/run.js` 直接 MODULE_NOT_FOUND，
+# 症状很像"编译产物又消失了"——其实它好端端在，只是多套了一层目录。
+#
+# 【为什么不做"mv 之前先确认 .build 不存在"】
+# 试过，在这个文件系统上 `rm -rf` 返回后 `[ -d .build ]` 仍可能为真，
+# 于是脚本会误判成"清不掉"而退出。**事前校验在这个文件系统上不可靠**，
+# 只能事后检查真实布局并自愈。
+if [ ! -f .build/tests/run.js ]; then
+  nested=$(ls -d .build/.build.new.* 2>/dev/null | head -1)
+  if [ -n "$nested" ] && [ -f "$nested/tests/run.js" ]; then
+    echo "  （检测到产物被套了一层目录，正在摊平）"
+    # 把嵌套内容提到 .build 下：先整体挪到同级临时名，再替换
+    mv "$nested" "$TMP.flat" 2>/dev/null
+    rm -rf .build 2>/dev/null
+    mv "$TMP.flat" .build 2>/dev/null
+  fi
+fi
+
+if [ ! -f .build/tests/run.js ]; then
+  echo "✗ 产物位置异常：.build/tests/run.js 不存在"
+  echo "  .build 下的内容："
+  ls .build 2>/dev/null | head -5
+  exit 1
+fi
 
 echo "TSC OK（产物校验通过：$js_count 个 .js）"
