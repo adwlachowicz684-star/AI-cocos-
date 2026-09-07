@@ -478,7 +478,9 @@
       "path": "turn/",
       "maturity": "beta",
       "purpose": "回合制系统（先攻/行动点/死亡跳过）",
-      "depends": [],
+      "depends": [
+        "_core"
+      ],
       "hasTest": true,
       "hasDemo": true,
       "domain": "玩法框架",
@@ -665,8 +667,7 @@
       "maturity": "beta",
       "purpose": "地牢生成（BSP / Room / Cellular / Maze 四种 + 死图自检）",
       "depends": [
-        "ds",
-        "_core"
+        "ds"
       ],
       "hasTest": true,
       "hasDemo": true,
@@ -694,8 +695,7 @@
       "maturity": "beta",
       "purpose": "寻路（A* + PathSmoother + FlowField 流场）",
       "depends": [
-        "ds",
-        "_core"
+        "ds"
       ],
       "hasTest": true,
       "hasDemo": true,
@@ -1684,9 +1684,7 @@
       "layer": "L2",
       "domain": "适配与实体",
       "maturity": "beta",
-      "depends": [
-        "_core"
-      ],
+      "depends": [],
       "hasTest": true,
       "hasDemo": false,
       "added": "2026-09-04",
