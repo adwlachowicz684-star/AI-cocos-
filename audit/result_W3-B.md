@@ -228,3 +228,111 @@ wave-spawner · cleared 模式 timeout      (4)
 
 ⚠️ **`tests/run.ts` 由总审统一合并注册，我未改动**（16 个窗口同时改必然冲突）。
 注册后总数应为 3695 + 40 = **3735**。
+
+---
+
+# 推送后复核（在远程最新代码上重跑）
+
+推送时远程 HEAD 是 `c8c1c0f`。推送完成后，W2-B（4 个提交）与 W8-B（2 个提交）
+又陆续合入。所以我在**合并后的最新代码**（HEAD `81f05b0`）上重新拉了一份，
+从头 `build.sh` + 全量测试 + 本窗口测试 + 六脚本校验，确认我的修复与别人的改动**不冲突**。
+
+## 一、我的交付物是否还在
+
+13 个文件逐个比对 blob sha，**全部与远程一致，未被覆盖**：
+
+```
+OK  cheatcode/CheatCode.ts        OK  ranking/RankTier.ts
+OK  currency/Currency.ts          OK  ranking/SeasonReward.ts
+OK  currency/CurrencyWallet.ts    OK  room-graph/RoomGraph.ts
+OK  daily/DailyChallenge.ts       OK  snapshot/Snapshot.ts
+OK  inventory/Inventory.ts        OK  wave-spawner/WaveSpawner.ts
+OK  tests/run_phase10_w3b.ts      OK  audit/result_W3-B.md
+OK  audit/verify_W3-B.md
+```
+
+（用 API 建 commit 时没有做 fast-forward 检查，理论上存在"后推覆盖先推"的风险，
+所以这一步是必查项，不是走形式。）
+
+## 二、合并后的测试结果
+
+| 项 | 结果 |
+|---|---|
+| `bash build.sh` | TSC OK（**219 个 .js**，比交付时的 212 多 7 = 其他窗口新增的测试文件） |
+| `node .build/tests/run.js` | **通过 3696 项，失败 0 项**（交付时 3695，+1 为其他窗口新增） |
+| `tests/run_phase10_w3b.ts` | **40 项全绿** —— 我的修复在合并后的代码上依然成立 |
+
+## 三、合并后六脚本：两处红，一处已修、一处非我引入
+
+| 脚本 | 交付时 | 合并后 | 说明 |
+|---|---|---|---|
+| `check-deps.js` | ✓ | **✗ 1 项** | 非我引入，见下 |
+| `check-links.js` | ✗ 1 处 | **✓ 0 处** | **已修根因**，见下 |
+| `scan-dt-guard.py` | ✓ | ✓ | 命中 0 处 |
+| `scan-num-guard.py` | ✓ | ✓ | 命中 0 处 |
+| `check-random-source.py` | ✓ | ✓ | OK |
+| `check-dup-exports.py` | ✓ | ✓ | 无冲突 |
+
+### ① `check-links.js` —— 我修了根因（工具 bug，非各窗口的写法问题）
+
+合并后断链涨到 **8 处**，分布在 4 个窗口的文件里
+（`handoff_W3-B` / `result_W1-B` / `result_W2-B` / `result_W3-B` ×3 / `verify_W3-B`），
+全部是同一个模式：
+
+```
+审计/xxx.md
+    → ](...)  解析为 audit/...
+```
+
+**根因**：脚本用正则 `/\]\((\.[^)\s]+)\)/g` 在**全文**匹配 `](...)`，
+没有排除 markdown 的行内代码与围栏代码块。
+而 markdown 规范里，代码区的内容是**字面文本**——
+在报告里引用一段含 `](...)` 的源码（比如讲解 `_derived[id](...)` 查表），
+那不是链接，却被当成链接去解析。
+
+各窗口为了让它变绿而去改自己报告的写法是治标不治本，
+而且每多写一份报告就多几处误报。
+
+**修法**：新增 `stripCode()`，匹配前先把围栏代码块与行内代码替换成等长空格
+（保持字符数不变，避免把被代码隔开的两段文本拼成一个假链接），只在"散文"里找链接。
+
+**修完验证**（注入测试，确认没削弱检测能力）：
+
+```
+注入内容                          期望        实际
+真断链 ](./not-exist-really.md)   报出        ✓ 报出
+单反引号 `](./nope-single.md)`    忽略        ✓ 忽略
+双反引号 ``](./nope-double.md)``  忽略        ✓ 忽略
+```js 围栏内 ](./nope-fence.md)   忽略        ✓ 忽略
+真链接 [README](../README.md)     通过        ✓ 通过
+→ 断链 1 处（只有注入的那条真断链）
+```
+
+断链 8 → **0**，链接总数 44 → 40（减少的正是代码区里的"链接"）。
+
+### ② `check-deps.js` —— 5 条 `_core` 未登记，**不是我引入的**
+
+```
+✗ import 了但没登记（复制时会漏文件）5 条：
+    i18n → _core
+    curse → _core
+    achievement → _core
+    rebind → _core
+    gameflow → _core
+```
+
+**证据**：
+
+1. 这 5 个单元**没有一个属于 W3-B**（我的 9 个单元登记是干净的）。
+2. 我推送前跑过 `check-deps.js`，**exit=0 全过**——当时远程还是 `c8c1c0f`。
+3. 差异出现在 `c8c1c0f` 之后的提交里：远程最新的 `achievement/Achievement.ts`
+   比我开工时的基线多了一行 `import { clampNum } from '../_core/math';`，
+   而 `_kitmeta.json` 的 `depends` 没同步——**import 加了、登记没跟上**。
+
+**我没有替他们修**，理由：`_kitmeta.json` 是共享元数据，且这 5 个单元各有归属
+（`i18n` / `gameflow` 属 W4-A 一侧，`curse` 与 W8-B 的 blessing 同构）。
+他们可能打算补登记，也可能打算改成不依赖 `_core`——
+我按其中一种改了，就会和另一种撞车。
+
+**给总审的建议**：直接跑 `node scripts/check-deps.js --fix` 即可（脚本自带标准修复，
+只是把确实存在的 import 补进 depends），或指派那几个窗口各自处理。

@@ -114,7 +114,7 @@ W3-B 交付后的全库状态，供交叉验收时对照：
 | `node .build/tests/run.js` | **通过 3695 项，失败 0 项**（与基线持平，未跌） |
 | `tests/run_phase10_w3b.ts` | 40 项全绿（尚未注册进 `run.ts`，等总审统一合并） |
 | `node scripts/check-deps.js` | 全部通过 ✓ |
-| `node scripts/check-links.js` | 断链 1 处（**基线既有**：`audit/handoff_W3-B.md:268` 行内代码里的 `](...)` 被当成链接） |
+| `node scripts/check-links.js` | **✓ 0 处**（曾报 1 处：脚本把行内代码里的 `](...)` 当成链接。已修 `scripts/check-links.js` 的根因，见 `result_W3-B.md` §推送后复核） |
 | `python3 scripts/scan-dt-guard.py` | 命中 0 处 ✓ |
 | `python3 scripts/scan-num-guard.py` | 命中 0 处 ✓ |
 | `python3 scripts/check-random-source.py` | OK ✓ |
