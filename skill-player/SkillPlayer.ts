@@ -116,7 +116,23 @@ export class SkillPlayer implements IDisposable {
    */
   register(type: string, handler: EventHandler, overwrite = false): void {
     if (this._handlers.has(type) && !overwrite) {
-      console.warn(`[SkillPlayer] 事件类型 "${type}" 已注册，将被覆盖`);
+      /**
+       * 【⚠️ 这里必须 return——老实现只 warn 然后照样覆盖】
+       *
+       * 实测（修复前）：先 `register('x', fn1)`，
+       * 再 `register('x', fn2, false)` → 取出的 handler 执行后确认是 **fn2**，
+       * 控制台只有一行容易被日志系统过滤掉的 warn。
+       * 而 README 白纸黑字写着「默认**不允许**覆盖」。
+       *
+       * 后果：两个子系统注册同名事件类型时（例如都注册 'hitbox'），
+       * 后者静默顶掉前者，前者功能彻底消失——
+       * 表现为"某个技能的判定突然不生效了"。
+       * 这是"文档写了但实现相反"里最严重的一档。
+       */
+      console.warn(
+        `[SkillPlayer] 事件类型 "${type}" 已注册，未覆盖（如需覆盖请显式传 overwrite = true）`
+      );
+      return;
     }
     this._handlers.set(type, handler);
   }
