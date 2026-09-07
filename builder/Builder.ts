@@ -520,13 +520,98 @@ export class Builder {
       return { ok: false, error: 'unknown-blueprint', detail: `升级目标 "${targetId}" 不存在` };
     }
 
-    // 先验证目标能建（排除自身占的格子）
-    const selfCells = new Set(b.cells.map(key));
     const newCells = blueprintCells(target, b.anchor, b.rotation);
+
+    /**
+     * 【⚠️ 升级必须走与"放置"相同的全量校验】
+     *
+     * 老实现只查了"与其他建筑的占位冲突"和资源够不够，
+     * **没有**查越界、地形、数量上限、前置。
+     *
+     * 实测（修复前）：
+     * ```
+     * 蓝图 hut → house（house 有 maxCount: 1）；地形只有 (0,0) 可建造
+     *
+     * 地形：place('hut',(0,0)) ok → upgrade() ok=true
+     *       ← house 占 (0,0)+(1,0)，而 (1,0) 地形不允许
+     *       直接 place('house',(5,5)) → error=terrain-blocked（同一块地被拒）
+     *
+     * 数量：放 2 个 hut → upgrade 第 1 个 → house=1
+     *                    upgrade 第 2 个 → house=2   ← maxCount=1 被突破
+     *       直接 place('house') → error=max-count-reached
+     * ```
+     *
+     * 后果：同一栋建筑，走"放置"被规则挡住，走"升级"畅通无阻。
+     * 玩家可以用 `hut → house` 的升级链无限刷出 `maxCount:1` 的限量建筑，
+     * 或把建筑盖在水面/悬崖上。
+     * 服务器与客户端用同一套 Builder 时两边结果一致（都错），
+     * 所以**没有任何报错**，只有运营数据异常（"为什么有人有 5 个主城"）。
+     *
+     * 【为什么不能简单复用 preview】
+     * `preview` 会把"自身已占的格子"报成冲突（旧建筑还占着那些格子）。
+     * 所以下面逐项复刻 preview 的校验，但把自身格子从占位冲突里剔除
+     * —— 这正是原代码已有的 `occ !== id` 逻辑，只是要补上其余四项。
+     */
+    const selfCells = new Set(b.cells.map(key));
+
+    // ① 越界
+    if (this._bounds) {
+      for (const c of newCells) {
+        if (c.x < 0 || c.y < 0 || c.x >= this._bounds.w || c.y >= this._bounds.h) {
+          return {
+            ok: false, error: 'out-of-bounds',
+            detail: `升级后超出地图范围（${this._bounds.w}×${this._bounds.h}）`,
+          };
+        }
+      }
+    }
+
+    // ② 占位冲突（排除自身）
     for (const c of newCells) {
       const occ = this._occupancy.get(key(c));
       if (occ !== undefined && occ !== id && !selfCells.has(key(c))) {
         return { ok: false, error: 'occupied', detail: '升级后的占位与其他建筑冲突' };
+      }
+    }
+
+    // ③ 地形
+    if (this._terrain) {
+      for (const c of newCells) {
+        if (!this._terrain.isBuildable(c)) {
+          return {
+            ok: false, error: 'terrain-blocked',
+            detail: `升级后的格子 (${c.x}, ${c.y}) 地形不允许建造`,
+          };
+        }
+      }
+    }
+
+    // ④ 数量上限
+    //
+    // 【为什么要减去"自身将要腾出来的那一个"】
+    // 升级是把旧蓝图换成新蓝图，旧蓝图的数量会 -1。
+    // 若目标蓝图与源蓝图是**同一个**（配置里 `upgradeTo` 指回自己），
+    // 不减就会把自己算进已有数量，导致永远升不了级。
+    const isSameBp = targetId === b.blueprintId;
+    const alreadyHave = this.countOf(targetId) - (isSameBp ? 1 : 0);
+    const max = target.maxCount;
+    if (max !== undefined && alreadyHave >= max) {
+      return {
+        ok: false, error: 'max-count-reached',
+        detail: `${target.name ?? targetId} 最多 ${max} 个（当前 ${alreadyHave}）`,
+      };
+    }
+
+    // ⑤ 前置
+    if (target.requires && target.requires.length > 0) {
+      const missing = target.requires.filter(
+        (r) => this.countOf(r) === 0 && r !== b.blueprintId
+      );
+      if (missing.length > 0) {
+        return {
+          ok: false, error: 'missing-requirement',
+          detail: `需要先建造：${missing.map((m) => this._blueprints.get(m)?.name ?? m).join('、')}`,
+        };
       }
     }
 
