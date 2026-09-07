@@ -322,14 +322,33 @@ export class SkillVariantSystem<T extends Record<string, unknown>> {
   private _conditionsMet(v: VariantDef, ctx: VariantContext): boolean {
     if (!v.conditions || v.conditions.length === 0) return true;
     /**
-     * 【没有求值器时的行为】
-     * 视为条件**已满足**。
+     * 【没有求值器时的行为】抛错（fail-closed），**不再视为已满足**
      *
-     * 为什么不是视为不满足：不满足的话，忘了注入求值器
-     * 所有条件变体都会静默失效，排查起来像见鬼。
-     * 视为满足至少效果可见（虽然可能不该生效）。
+     * 【⚠️ 旧注释说"视为已满足，因为静默失效更难查"——这个论证是错的】
+     *
+     * 它只比较了两种**静默**方案（fail-open 生效 / fail-closed 失效），
+     * 却漏掉了第三种：**响亮抛错**。抛错既不静默生效也不静默失效，
+     * 恰好消掉了原注释的顾虑。
+     *
+     * 而 fail-open 的代价远不止"效果可见"：
+     * 条件在变体系统里扮演的是**门禁**角色——
+     * "持有某遗物才生效""难度 ≥ 3 才生效"。
+     * 门禁失效意味着玩家没有遗物也能吃遗物加成、
+     * 高难变体被应用到普通局。
+     *
+     * 实测（修复前）：注册带 `conditions:[{id:'need-relic'}]` 的变体、
+     * 不注入 `evaluator`，`apply(...)` 返回 `applied:["v"]`、
+     * 结果 `dmg: 101`——**变体被无条件应用了**。
+     *
+     * 因为代码"看起来检查了条件"，review 时几乎不可能发现，
+     * 属于门槛类静默错误，危害高于普通数值错误。
      */
-    if (!this._evaluator) return true;
+    if (!this._evaluator) {
+      throw new Error(
+        `[SkillVariant] 变体 "${v.id}" 声明了 conditions，但构造时未注入 evaluator。` +
+        `变体条件无法求值——为避免门禁失效（fail-open），这里直接抛错。`
+      );
+    }
     return v.conditions.every((c) => this._evaluator!(c, ctx));
   }
 
