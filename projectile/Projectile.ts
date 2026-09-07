@@ -51,7 +51,7 @@
  * ```
  */
 
-import { clamp, safeDt } from '../_core/math';
+import { clamp, numOr, safeDt } from '../_core/math';
 
 /** 碰撞命中信息 */
 export interface CollisionHit {
@@ -262,7 +262,27 @@ export class ProjectileSystem {
   constructor(opts: ProjectileSystemOptions) {
     this._collision = opts.collision;
     this._bounds = opts.bounds;
-    this._maxStep = opts.maxStep ?? 0.5;
+    /**
+     * 【⚠️ `??` 挡不住 NaN → 子步进被静默关闭 → 高速弹道穿透】
+     *
+     * 后面 `const steps = this._maxStep > 0 ? ... : 1`：
+     * `NaN > 0` 为 false → `steps = 1` → 整段位移只做**一次** sweep。
+     * 而 `maxStep: 0`（文档里的"关闭分步"）也是 1，
+     * **两者行为相同，无法区分**。
+     *
+     * 实测（修复前）：speed=100、`tick(1)`（一帧位移 100 单位）
+     * - `maxStep = 0.5` → sweep 被调用 **200** 次（正确分步）
+     * - `maxStep = NaN` → sweep 被调用 **1** 次（隧穿）
+     *
+     * 子弹穿墙/穿人且完全静默。`maxStep` 一旦来自配置
+     * （JSON 里写成字符串再 `Number()`、或字段缺失），
+     * 所有高速弹道在一帧内跳过整段路径，中间目标全部漏掉。
+     *
+     * 【为什么这里用 numOr 而不是抛错】
+     * `maxStep: 0` 是文档明确支持的"关闭分步"值，必须保留；
+     * 非法值回落到默认 0.5，既修好隧穿又不破坏合法配置。
+     */
+    this._maxStep = opts.maxStep === 0 ? 0 : numOr(opts.maxStep, 0.5);
     this._defaultLifetime = opts.defaultLifetime ?? DEFAULT_LIFETIME;
   }
 
