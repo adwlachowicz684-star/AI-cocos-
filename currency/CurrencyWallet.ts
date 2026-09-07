@@ -317,9 +317,51 @@ export class CurrencyWallet {
   exchange(fromId: string, toId: string, amount: number, rate: number, reason?: string): SpendResult {
     this._require(fromId);
     this._require(toId);
+
+    /**
+     * 【⚠️ 必须在扣款前预检：目标货币装不下时，钱会凭空消失】
+     *
+     * 老实现是"先 spend 成功，再 add"：
+     * ```ts
+     * const r = this.spend(fromId, amount, reason);
+     * if (!r.ok) return r;
+     * this.add(toId, quantize(amount * rate, precision), reason);  // 装不下就截断
+     * ```
+     * `add` 内部 `Math.min(d.cap, ...)` 会把超出 cap 的部分**静默截断**。
+     *
+     * 实测（修复前）：gold=1000、gem 上限 50，
+     * `exchange('gold', 'gem', 500, 1)` → gold 变 **500**，而 gem 只到账 **50**
+     * —— 450 金币蒸发，且 `exchange` 返回 `{ok: true}` 表示"成功了"。
+     *
+     * 这是最直接的经济事故：玩家用 500 金币买了 50 钻石，
+     * 界面显示"兑换成功"，账上却少了 450。
+     * 且因为是"合法路径"，流水里两条记录都正常，对账时发现不了。
+     *
+     * 【为什么预检而不是事后回滚】
+     * 事后回滚要处理"add 部分成功后再撤销"的中间态，
+     * 而这里 add 的截断量在扣款前就能算准，预检更简单也更可靠。
+     *
+     * 【溢出时的语义选择】
+     * 拒绝整笔（返回 `insufficient`），而不是"扣掉实际能装下的那部分"——
+     * 后者会静默改变玩家的兑换数量，同样属于意外扣款。
+     * 调用方若要"最多能换多少"，应先自行查询目标货币余量。
+     */
+    const toDef = this._defs.get(toId)!;
+    const rawGain = quantize(amount * rate, toDef.precision);
+
+    if (!Number.isFinite(rawGain)) {
+      return { ok: false, reason: 'invalid-amount' };
+    }
+
+    const toCur = this._values.get(toId)!;
+    const room = quantize(toDef.cap - toCur, toDef.precision);
+    if (rawGain > room) {
+      return { ok: false, reason: 'insufficient' };
+    }
+
     const r = this.spend(fromId, amount, reason);
     if (!r.ok) return r;
-    this.add(toId, quantize(amount * rate, this._defs.get(toId)!.precision), reason);
+    this.add(toId, rawGain, reason);
     return { ok: true };
   }
 
