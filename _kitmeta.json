@@ -665,7 +665,8 @@
       "maturity": "beta",
       "purpose": "地牢生成（BSP / Room / Cellular / Maze 四种 + 死图自检）",
       "depends": [
-        "ds"
+        "ds",
+        "_core"
       ],
       "hasTest": true,
       "hasDemo": true,
@@ -693,7 +694,8 @@
       "maturity": "beta",
       "purpose": "寻路（A* + PathSmoother + FlowField 流场）",
       "depends": [
-        "ds"
+        "ds",
+        "_core"
       ],
       "hasTest": true,
       "hasDemo": true,
@@ -1036,9 +1038,7 @@
       "path": "blessing/Blessing.ts",
       "maturity": "beta",
       "purpose": "祝福堆叠：软上限递减 + 互斥（双向）+ 三选一抽取",
-      "depends": [
-        "_core"
-      ],
+      "depends": [],
       "hasTest": true,
       "hasDemo": true,
       "domain": "内容与掉落",
@@ -1050,9 +1050,7 @@
       "path": "curse/Curse.ts",
       "maturity": "beta",
       "purpose": "诅咒：增益+代价触发时机+移除条件，canRemove/remove 一致",
-      "depends": [
-        "_core"
-      ],
+      "depends": [],
       "hasTest": true,
       "hasDemo": true,
       "domain": "内容与掉落",
@@ -1197,9 +1195,7 @@
       "layer": "L1",
       "domain": "进度与统计",
       "maturity": "beta",
-      "depends": [
-        "_core"
-      ],
+      "depends": [],
       "hasTest": true,
       "hasDemo": true,
       "purpose": "成就看起来简单：if (kills >= 100) unlock('kill100')。",
@@ -1688,7 +1684,9 @@
       "layer": "L2",
       "domain": "适配与实体",
       "maturity": "beta",
-      "depends": [],
+      "depends": [
+        "_core"
+      ],
       "hasTest": true,
       "hasDemo": false,
       "added": "2026-09-04",

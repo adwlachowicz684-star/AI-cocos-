@@ -57,8 +57,23 @@ import { clampNum } from '../_core/math';
 export type InputFrame = Record<string, number | boolean>;
 
 export interface ReplayOptions {
-  /** 世界种子（必须与录制时一致） */
+  /**
+   * 世界种子（必须与录制时一致）
+   *
+   * 不传 = 未指定，回放时按 0 校验（见 `verifySeed` 的说明）。
+   */
   readonly seed?: number;
+  /**
+   * 加载回放数据时是否校验种子（**默认 true**）
+   *
+   * 【为什么默认改成 true】
+   * 见构造函数与 `load()` 里的说明：过去"不传 seed"等价于"永不校验"，
+   * 让文件头"种子不匹配要明确报错"的承诺在默认配置下完全落空。
+   *
+   * 传 `false` 可以显式关掉——**这是给"我就是要拿这份回放当输入源、
+   * 不关心种子"的场景留的口子**，请只在确实想清楚时用它。
+   */
+  readonly verifySeed?: boolean;
   /**
    * 输入变化才记录（默认 true）
    *
@@ -67,8 +82,31 @@ export interface ReplayOptions {
    * 只在输入**变化**时记一条，能省掉 95% 的体积。
    */
   readonly deltaOnly?: boolean;
-  /** 最大帧数上限（防止无限录制撑爆内存） */
+  /**
+   * 上限（防止无限录制撑爆内存）
+   *
+   * 【⚠️ 它限制的是**关键帧数**，不是帧数】
+   *
+   * 字段名和旧文档都写的是"最大帧数"，实际生效的是
+   * `keyframes.length >= maxFrames` —— 统计的是关键帧：
+   *
+   * ```
+   * 录 20 个关键帧、maxFrames = 5 → 实际保留 5 个关键帧
+   * ```
+   *
+   * 好在内存只由 keyframes 决定，**这条保护本身是有效的**，
+   * 错的是名字：叫"最大帧数"会让人以为"录到第 200000 帧就停"，
+   * 而实际是"录到第 200000 次输入变化才停"。
+   * 一场只有 50 次操作的长时间对局，两者能差出几千倍。
+   *
+   * 【推荐用新名字 `maxKeyframes`】
+   * `maxFrames` 作为别名保留（同名同义，行为完全一致），
+   * 但新代码请写 `maxKeyframes`，语义自解释。
+   * 同时传两个时以 `maxKeyframes` 为准。
+   */
   readonly maxFrames?: number;
+  /** `maxFrames` 的准确命名版本，语义同上；同时传时以它为准 */
+  readonly maxKeyframes?: number;
   /** 版本号（用于回放数据兼容性检查） */
   readonly version?: number;
 }
@@ -84,10 +122,49 @@ export interface ReplayData {
   readonly meta?: Record<string, unknown>;
 }
 
-const EMPTY_INPUT: InputFrame = {};
+/**
+ * 共享的"空输入"
+ *
+ * 【为什么用 Object.freeze】
+ * 这个对象是模块级的单例，会被**所有**回放实例在"这一帧没有输入"时返回。
+ * 调用方只要改过一次，就会污染所有实例的所有空输入帧。
+ * 冻结后非严格模式下是静默失败、严格模式下抛错——
+ * 无论哪种都比"静默改掉全局状态"好处理。
+ */
+const EMPTY_INPUT: InputFrame = Object.freeze({});
+
+/**
+ * 找"最后一个 frame <= 目标帧"的关键帧下标
+ *
+ * 【为什么单独抽成函数】`playback` 和 `seek` 都要用，
+ * 而且两者过去各自维护一份"只前进"的推进逻辑——倒带时都会出错。
+ *
+ * @returns 命中返回下标；目标帧早于第一个关键帧返回 -1（表示"还没有输入"）
+ */
+function findKeyframeIndex(
+  keyframes: ReadonlyArray<{ frame: number; input: InputFrame }>,
+  frame: number,
+): number {
+  let lo = 0;
+  let hi = keyframes.length - 1;
+  let ans = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (keyframes[mid].frame <= frame) {
+      ans = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return ans;
+}
 
 export class ReplayRecorder {
-  private readonly _seed: number;
+  /** null = 未指定种子（见构造函数注释） */
+  private readonly _seed: number | null;
+  /** 是否校验种子（默认 true，见 ReplayOptions.verifySeed） */
+  private readonly _verifySeed: boolean;
   private readonly _deltaOnly: boolean;
   private readonly _maxFrames: number;
   private readonly _version: number;
@@ -102,7 +179,38 @@ export class ReplayRecorder {
   private _keyIndex = 0;
 
   constructor(opts: ReplayOptions = {}) {
-    this._seed = opts.seed ?? 0;
+    /**
+     * 【⚠️ 为什么默认 seed 从 0 改成了 null】
+     *
+     * 原实现的校验开关是 `if (this._seed !== 0 && data.seed !== this._seed)`，
+     * 而**默认 seed 恰好就是 0** —— 于是"是否校验种子"这个开关
+     * 在默认配置下**永远是关的**：
+     *
+     * ```
+     * new ReplayRecorder()            // 默认 seed = 0
+     *   .load({ ...data, seed: 999999 })   // 不报错，静默通过
+     * new ReplayRecorder({ seed: 1 })
+     *   .load({ ...data, seed: 999999 })   // 正确抛出"种子不匹配"
+     * ```
+     *
+     * 后果落在文件头那段承诺上："版本和种子不匹配要明确报错，
+     * 否则回放会漂移"。默认配置下这条承诺**完全落空**——
+     * 回放能正常播完，但结果和录制时不一样（随机种子不同），
+     * 表现为"回放里那个人操作一模一样，结果却不一样"。
+     * 这是录像 / 复盘 / 反作弊场景下最致命的一类错误，且极难定位。
+     *
+     * 【为什么用 null 表示"不校验"而不是改判定条件】
+     * 0 是一个**合法的种子值**（很多游戏就用 0 号种子），
+     * 拿它当哨兵等于永久放弃"校验 0 号种子"这个能力。
+     * 用 `null` 表达"未指定、不校验"，语义才干净。
+     *
+     * 【兼容性】`get seed()` 原本返回 number。
+     * 未指定种子时现在返回 null —— 依赖 `rec.seed === 0` 判断的代码需要改。
+     * 这是**刻意的 breaking**：宁可让调用方立刻发现，
+     * 也不要继续"默认不校验种子"这种静默错误。
+     */
+    this._seed = opts.seed ?? null;
+    this._verifySeed = opts.verifySeed !== false;
     this._deltaOnly = opts.deltaOnly ?? true;
     // 【为什么要 clampNum】
     //
@@ -112,11 +220,13 @@ export class ReplayRecorder {
     // 于是**永不停止录制**，直到 OOM。
     //
     // 实测 record 30 次：maxFrames=10 → 停在 10；maxFrames=NaN → 30（未受限）。
-    this._maxFrames = clampNum(opts.maxFrames, 1, 1e7, 200_000); // 约 55 分钟 @60fps
+    // maxKeyframes 是新名字（见 ReplayOptions 里的注释），两者取其一
+    const cap = opts.maxKeyframes !== undefined ? opts.maxKeyframes : opts.maxFrames;
+    this._maxFrames = clampNum(cap, 1, 1e7, 200_000);
     this._version = opts.version ?? 1;
   }
 
-  get seed(): number {
+  get seed(): number | null {
     return this._seed;
   }
 
@@ -172,7 +282,7 @@ export class ReplayRecorder {
     }
 
     if (this._keyframes.length >= this._maxFrames) {
-      console.warn('[Replay] 达到最大帧数，停止录制');
+      console.warn('[Replay] 达到关键帧数上限，停止录制');
       this._recording = false;
       return;
     }
@@ -190,7 +300,10 @@ export class ReplayRecorder {
   export(meta?: Record<string, unknown>): ReplayData {
     const data: ReplayData = {
       version: this._version,
-      seed: this._seed,
+      // ReplayData.seed 类型是 number；未指定种子时导成 0。
+      // 加载侧的判定是"当前播放器 seed 为 null 才跳过校验"，
+      // 所以这个 0 不会被当成"数据来自 0 号种子"。
+      seed: this._seed ?? 0,
       frameCount: this._frame + 1,
       keyframes: this._keyframes.map((k) => ({ frame: k.frame, input: { ...k.input } })),
       ...(meta ? { meta: { ...meta } } : {}),
@@ -218,9 +331,32 @@ export class ReplayRecorder {
         `[Replay] 版本不匹配：数据是 v${data.version}，当前播放器是 v${this._version}`
       );
     }
-    if (this._seed !== 0 && data.seed !== this._seed) {
+    /**
+     * 【为什么默认就开始校验】
+     *
+     * 过去的判定是 `this._seed !== 0 && data.seed !== this._seed`，
+     * 而默认 seed 恰好是 0 —— "是否校验"这个开关在默认配置下**永远是关的**：
+     *
+     * ```
+     * new ReplayRecorder().load({ ...data, seed: 999999 })        // 不报错，静默通过
+     * new ReplayRecorder({ seed: 1 }).load({ ...data, seed: 999999 })  // 正确抛出
+     * ```
+     *
+     * 于是文件头那条承诺（"版本和种子不匹配要明确报错，否则回放会漂移"）
+     * 在最常用的配置下完全落空：回放**能播完**，但随机序列与录制时不同，
+     * 结果是"操作一模一样、结果却不一样"——录像 / 复盘 / 反作弊场景下
+     * 最致命的一类错误，而且极难定位。
+     *
+     * 现在：默认校验，未指定种子时按 0 校验（历史默认值）。
+     * 确实不关心的，显式传 `verifySeed: false`。
+     */
+    if (this._verifySeed && data.seed !== (this._seed ?? 0)) {
       throw new Error(
-        `[Replay] 种子不匹配：数据是 ${data.seed}，当前是 ${this._seed}（回放会漂移）`
+        `[Replay] 种子不匹配：数据是 ${data.seed}，当前是 ` +
+          (this._seed === null
+            ? '未指定（按 0 校验）'
+            : `${this._seed}`) +
+          `（回放会漂移）。若确实不需要校验种子，请传 verifySeed: false。`
       );
     }
     this._data = data;
@@ -229,8 +365,41 @@ export class ReplayRecorder {
     this._recording = false;
   }
 
+  /**
+   * 从 JSON 字符串加载
+   *
+   * 【⚠️ 为什么必须包 try/catch】
+   *
+   * 原实现直接 `JSON.parse(json)`，坏输入会抛一个**与回放毫无关系**的
+   * SyntaxError：
+   *
+   * ```
+   * p.loadJSON('{bad json');
+   * // SyntaxError: Expected property name or '}' in JSON at position 1
+   * ```
+   *
+   * 调用方看到这条报错，第一反应是"JSON 库坏了"或"我的字符串处理错了"，
+   * 而不是"这份回放文件损坏了"。回放数据通常来自**存档文件或网络**，
+   * 损坏是正常情况，报错必须说清是数据问题。
+   *
+   * 现在统一包装成带 `[Replay]` 前缀的错误，并保留原始信息。
+   */
   loadJSON(json: string): void {
-    this.load(JSON.parse(json) as ReplayData);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(json);
+    } catch (e) {
+      throw new Error(
+        `[Replay] 回放数据不是合法 JSON：${e instanceof Error ? e.message : String(e)}。` +
+          `回放文件可能已损坏或被截断——请检查存档 / 传输环节。`
+      );
+    }
+    if (parsed === null || typeof parsed !== 'object') {
+      throw new Error(
+        `[Replay] 回放数据格式错误：JSON 顶层必须是对象，实际是 ${parsed === null ? 'null' : typeof parsed}`
+      );
+    }
+    this.load(parsed as ReplayData);
   }
 
   /**
@@ -249,18 +418,49 @@ export class ReplayRecorder {
 
     this._frame = frame;
 
-    // 推进到 frame 所在的关键帧
-    while (
-      this._keyIndex + 1 < data.keyframes.length &&
-      data.keyframes[this._keyIndex + 1].frame <= frame
-    ) {
-      this._keyIndex++;
-    }
-    // frame 落在第一个关键帧之前 → 还没有输入
     if (data.keyframes.length === 0) return EMPTY_INPUT;
-    if (data.keyframes[this._keyIndex].frame > frame) return EMPTY_INPUT;
 
-    return data.keyframes[this._keyIndex].input;
+    /**
+     * 【⚠️ 为什么这里不能再只往前推】
+     *
+     * 原实现只有一个"往后推进"的 while，指针 `_keyIndex` **只前进不回退**。
+     * 于是顺序倒着取帧时：
+     *
+     * ```
+     * playback(1000)  // → { jump: true }，_keyIndex 推到后面的关键帧
+     * playback(500)   // while 条件不满足 → 指针不动
+     *                 // 然后 keyframes[_keyIndex].frame > 500 成立
+     *                 // → 返回 {}，而不是历史上第 500 帧真正的输入
+     * ```
+     *
+     * 实测：`playback(100)` 返回 `{jump:true}`，紧接着 `playback(50)` 返回 `{}`
+     * （期望沿用这一帧之前的输入）。
+     *
+     * 后果：拖时间轴、倒带、跳章回顾、任何乱序取帧，
+     * 都会让角色"突然失去所有输入"——站住不动，甚至被系统判 AFK。
+     * 而且**不报错**，表现为"回放播着播着人就不动了"。
+     *
+     * 【修法】指针可能落在目标帧之后时，用**二分查找**重新定位。
+     * 二分而不是线性回退，是为了让"从头拖到尾"这种大跨度跳转也是 O(log n)，
+     * 同时彻底去掉"必须顺序调用"这个隐含前提。
+     */
+    this._keyIndex = findKeyframeIndex(data.keyframes, frame);
+
+    // frame 落在第一个关键帧之前 → 还没有输入
+    if (this._keyIndex < 0) return EMPTY_INPUT;
+
+    /**
+     * 【⚠️ 为什么返回拷贝而不是内部引用】
+     *
+     * 原实现直接 `return keyframes[i].input`，
+     * 于是两次 `playback(0)` 拿到的是**同一个对象**（实测 `a === b` 为 true）。
+     * 调用方随手改一下（比如把 `jump` 置 false 再喂给逻辑层），
+     * 就把回放数据改掉了 —— 而 `record` / `export` 都做了拷贝，唯独这里没做。
+     *
+     * 另外返回的 `EMPTY_INPUT` 是模块级共享常量，
+     * 被改一次会污染**所有**回放实例的所有"无输入帧"。
+     */
+    return { ...data.keyframes[this._keyIndex].input };
   }
 
   /** 回放是否结束 */
@@ -285,13 +485,11 @@ export class ReplayRecorder {
   seek(frame: number): void {
     if (!this._data) return;
     this._frame = Math.max(0, Math.min(frame, this._data.frameCount - 1));
-    this._keyIndex = 0;
-    while (
-      this._keyIndex + 1 < this._data.keyframes.length &&
-      this._data.keyframes[this._keyIndex + 1].frame <= this._frame
-    ) {
-      this._keyIndex++;
-    }
+    // 与 playback 用同一个二分定位，保证"seek 到某帧"和"playback 到某帧"结果一致
+    this._keyIndex = Math.max(
+      0,
+      findKeyframeIndex(this._data.keyframes, this._frame),
+    );
   }
 
   /** 估算体积（字节，JSON 近似） */
