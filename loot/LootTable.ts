@@ -136,12 +136,49 @@ export class LootTable {
    * 掉落不是每帧调用，可接受。刷怪那种高频场景用 WeightedTable。
    */
   roll(rng: IRandomSource): LootDrop[] {
+    return this._roll(rng, new Set<LootTable>());
+  }
+
+  /**
+   * 带环检测的内部递归
+   *
+   * 【⚠️ 必须检测子表环路】
+   * 原实现在 `_makeDrop` 里直接 `e.child.roll(rng)`，没有任何环检测。
+   * 配置里把两张表配成互相包含（A.child=B、B.child=A，改表时的常见手误）
+   * → 实测抛 `Maximum call stack size exceeded`，**在玩家开箱那一刻才炸**。
+   *
+   * `entry()` 阶段不报错，所以配置错误会一路带到线上，
+   * 而且只在"开箱"这一个高频且玩家可见的时机暴露。
+   *
+   * 【为什么在 roll 时检测而不是 entry 时】
+   * `entry()` 被调用时子表可能还没建完（先建 A 再建 B，再让 A.child=B），
+   * 配置期的静态检测覆盖不全。运行期带 visited 集合是唯一可靠的时机。
+   *
+   * 【为什么抛错而不是静默跳过】
+   * 环是**配置错误**，不是运行时意外。静默跳过会让某张表永远掉不出东西，
+   * 排查难度比直接抛错高一个量级。
+   */
+  private _roll(rng: IRandomSource, visiting: Set<LootTable>): LootDrop[] {
+    if (visiting.has(this)) {
+      throw new Error(
+        `[LootTable] 子表存在循环引用，掉落链经过本表两次（表内条目 ${this._entries.length} 条）`
+      );
+    }
+    visiting.add(this);
+    try {
+      return this._rollInner(rng, visiting);
+    } finally {
+      visiting.delete(this);
+    }
+  }
+
+  private _rollInner(rng: IRandomSource, visiting: Set<LootTable>): LootDrop[] {
     const out: LootDrop[] = [];
     let gotRare = false;
 
     // ① 必掉项
     for (const e of this._entries) {
-      if (e.guaranteed) out.push(this._makeDrop(e, rng, false));
+      if (e.guaranteed) out.push(this._makeDrop(e, rng, false, visiting));
     }
 
     // ② 加权项：每条独立判定
@@ -157,7 +194,7 @@ export class LootTable {
          * （而不是"只掉一种"）。
          */
         if (rng.next() * total < this._weightOf(e)) {
-          out.push(this._makeDrop(e, rng, false));
+          out.push(this._makeDrop(e, rng, false, visiting));
           if (e.rare) gotRare = true;
         }
       }
@@ -167,7 +204,7 @@ export class LootTable {
     if (this._pity && !gotRare) {
       this._sinceRare++;
       if (this._sinceRare >= this._pity.threshold) {
-        const forced = this._forcePity(rng);
+        const forced = this._forcePity(rng, visiting);
         if (forced) out.push(forced);
         this._sinceRare = 0;
       }
@@ -185,19 +222,24 @@ export class LootTable {
     return e.weight * (1 + ratio * 9); // 最高 10 倍
   }
 
-  private _forcePity(rng: IRandomSource): LootDrop | null {
+  private _forcePity(rng: IRandomSource, visiting: Set<LootTable>): LootDrop | null {
     const p = this._pity!;
     if (p.fallbackId) {
       const e = this._entries.find((x) => x.id === p.fallbackId);
-      if (e) return this._makeDrop(e, rng, true);
+      if (e) return this._makeDrop(e, rng, true, visiting);
     }
     const rares = this._entries.filter((e) => e.rare);
     if (rares.length === 0) return null;
     const e = rares[Math.floor(rng.next() * rares.length)];
-    return this._makeDrop(e, rng, true);
+    return this._makeDrop(e, rng, true, visiting);
   }
 
-  private _makeDrop(e: LootEntry, rng: IRandomSource, fromPity: boolean): LootDrop {
+  private _makeDrop(
+    e: LootEntry,
+    rng: IRandomSource,
+    fromPity: boolean,
+    visiting: Set<LootTable>
+  ): LootDrop {
     const span = e.max - e.min;
     const count = span <= 0 ? e.min : e.min + Math.floor(rng.next() * (span + 1));
 
@@ -208,7 +250,7 @@ export class LootTable {
     };
 
     if (e.child) {
-      const children = e.child.roll(rng);
+      const children = e.child._roll(rng, visiting);
       return { ...drop, children };
     }
     return drop;
