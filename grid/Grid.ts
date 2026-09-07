@@ -31,7 +31,7 @@
  *
  * for (const cell of g) { ... }   // 可迭代
  * g.fill(0, 0, 5, 5, '水');
- * g.find((c) => c.value === '树');
+ * g.find((v) => v === '树');        // ⚠️ 回调第一个参数是**值本身**，不是 cell 对象
  * ```
  *
  * 【使用示例：建造放置】
@@ -180,6 +180,22 @@ export class Grid<T> implements Iterable<Cell<T>> {
 
   // ---- 查询 ----
 
+  /**
+   * 按条件查找所有匹配的格子
+   *
+   * 【⚠️ 回调第一个参数是"值本身"，不是 cell 对象】
+   *
+   * 旧文档示例写的是 `g.find((c) => c.value === '树')`，
+   * 但这里传进去的 `v` 直接来自 `_data[i]`，就是 `set(x, y, v)` 时的那个值。
+   * 对 `Grid<string>` 来说它是字符串，`c.value` 恒为 `undefined`，
+   * `undefined === '树'` 恒 false → **`find` 静默返回空数组**。
+   *
+   * 实测：`g.set(3, 4, '树')` 后，照旧文档写返回 0 条，按真实签名写返回 1 条。
+   * 调用方会以为"地图里没有树"，去查数据生成逻辑，永远查不到。
+   *
+   * （也考虑过让 find 传 cell 对象以匹配文档，但那会破坏所有现存调用方，
+   * 属于 breaking 改动——所以改文档而不是改实现。）
+   */
   find(predicate: (value: T, x: number, y: number) => boolean): Array<{ x: number; y: number; value: T }> {
     const out: Array<{ x: number; y: number; value: T }> = [];
     for (let y = 0; y < this.height; y++) {
@@ -287,6 +303,34 @@ export class GridPlacement {
      * 保险起见这里显式填充，避免以后有人再用 filter 踩同一个坑。
      */
     this._cells = new Array<string | undefined>(width * height).fill(undefined);
+    this._free = width * height;
+  }
+
+  /**
+   * 空闲格计数（**增量维护**，不每次全扫）
+   *
+   * 【为什么不用"getter 里 for 一遍"】
+   * 原实现每次读 `freeCount` 都全扫 `_cells`。建造类 UI 的典型用法是
+   * "每次放置/拆除后刷新剩余空间"，甚至每帧读一次来更新文本，
+   * 那就变成了 O(n) × 帧率。50×50 的网格一次全扫 2500 格、2000 次约 8ms，
+   * 地图再大一个量级就是实打实的帧时间。
+   *
+   * 【为什么不干脆缓存一个值、脏了就置 null】
+   * 惰性缓存要求"每个改动点都记得置脏"，漏一处就返回一个**错误的数字**，
+   * 而且错得安静——比慢更危险。这里改成所有写入/清除都走
+   * `_writeCell` / `_eraseCell` 两个出口，计数在出口里同步增减，
+   * 没有"忘记置脏"这个失败模式。
+   */
+  private _free: number;
+
+  private _writeCell(idx: number, id: string): void {
+    if (this._cells[idx] === undefined) this._free--;
+    this._cells[idx] = id;
+  }
+
+  private _eraseCell(idx: number, id: string): void {
+    if (this._cells[idx] === id) this._free++;
+    this._cells[idx] = undefined;
   }
 
   define(def: PlacementDef): this {
@@ -311,7 +355,31 @@ export class GridPlacement {
     if (rotated && !def.rotatable) return false;
 
     const { w, h } = this._size(def, rotated);
-    if (x < 0 || y < 0 || x + w > this.width || y + h > this.height) return false;
+    /**
+     * 【为什么必须先用 Number.isFinite 前置校验】
+     *
+     * 下面那串"否定式"边界判断（`x < 0 || x + w > W || ...`）对 NaN **全部为 false**——
+     * NaN 与任何值比较都是 false。于是 `canPlace('h', NaN, 3)` 返回 **true**，
+     * `place` 也就"成功"了。
+     *
+     * 而 `_cells[NaN]` 在 JS 里是数组的 `"NaN"` **字符串属性**，
+     * 不进入 `length`、不参与遍历。于是：
+     * - `at(NaN, 3)` 能查到 `h#1`（写入确实发生了）
+     * - 按坐标全图扫描看到的占用格数 = **0**（渲染层永远画不出它）
+     * - `freeCount` 不减（幽灵建筑不占地方）
+     * - 同位置第二次 `place` 返回 null（看起来"已占用"）
+     *
+     * 玩家看到的是"钱扣了、地是空的"，且不报错、不崩溃。
+     * 坐标来自 UI 拖拽 / 网络包 / 存档反序列化时，NaN 是完全可能进来的。
+     *
+     * 【为什么顺手把 `x >= 0` 换成 `!(x >= 0)`】
+     * 这是全库"模式 A"：否定式条件天然漏 NaN。
+     * 有了 isFinite 前置后两者等价，但统一成"取反式"能让后来的人
+     * 一眼看出这里是"不满足就拒绝"，不会再被 NaN 穿透。
+     */
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return false;
+    if (!(x >= 0) || !(y >= 0)) return false;
+    if (!(x + w <= this.width) || !(y + h <= this.height)) return false;
 
     for (let dy = 0; dy < h; dy++) {
       for (let dx = 0; dx < w; dx++) {
@@ -340,7 +408,7 @@ export class GridPlacement {
 
     for (let dy = 0; dy < h; dy++) {
       for (let dx = 0; dx < w; dx++) {
-        this._cells[(y + dy) * this.width + (x + dx)] = id;
+        this._writeCell((y + dy) * this.width + (x + dx), id);
       }
     }
 
@@ -374,7 +442,7 @@ export class GridPlacement {
     for (let dy = 0; dy < p.h; dy++) {
       for (let dx = 0; dx < p.w; dx++) {
         const idx = (p.y + dy) * this.width + (p.x + dx);
-        if (this._cells[idx] === instanceId) this._cells[idx] = undefined;
+        if (this._cells[idx] === instanceId) this._eraseCell(idx, instanceId);
       }
     }
 
@@ -389,10 +457,10 @@ export class GridPlacement {
 
     // 先清掉旧的，再试放，失败则还原
     const cells = this._cellsOf(p);
-    for (const i of cells) this._cells[i] = undefined;
+    for (const i of cells) this._eraseCell(i, instanceId);
 
     if (!this.canPlace(p.defId, nx, ny, p.rotated)) {
-      for (const i of cells) this._cells[i] = instanceId;
+      for (const i of cells) this._writeCell(i, instanceId);
       return false;
     }
 
@@ -403,7 +471,7 @@ export class GridPlacement {
 
     for (let dy = 0; dy < h; dy++) {
       for (let dx = 0; dx < w; dx++) {
-        this._cells[(ny + dy) * this.width + (nx + dx)] = instanceId;
+        this._writeCell((ny + dy) * this.width + (nx + dx), instanceId);
       }
     }
     return true;
@@ -425,11 +493,9 @@ export class GridPlacement {
     return this._placed.size;
   }
 
-  /** 空闲格子数 */
+  /** 空闲格子数（O(1)，由 `_writeCell` / `_eraseCell` 增量维护） */
   get freeCount(): number {
-    let n = 0;
-    for (let i = 0; i < this._cells.length; i++) if (this._cells[i] === undefined) n++;
-    return n;
+    return this._free;
   }
 
   /** 找出所有能放下的位置（UI 高亮用） */
@@ -450,6 +516,7 @@ export class GridPlacement {
   clear(): void {
     this._cells.fill(undefined);
     this._placed.clear();
+    this._free = this._cells.length;
   }
 
   destroy(): void {
@@ -499,7 +566,15 @@ export function hexDistance(a: Hex, b: Hex): number {
   return (Math.abs(dq) + Math.abs(dr) + Math.abs(dq + dr)) / 2;
 }
 
-/** 半径 n 内的所有格子（含中心） */
+/**
+ * 半径 n 的**环**（只有环上的格子，**不含中心**）
+ *
+ * 【⚠️ 曾经的注释是错的】
+ * 这里原来写"半径 n 内的所有格子（含中心）"，
+ * 实测 `hexRing(center, 1).length === 6`（是环），
+ * 而 `hexSpiral(center, 1).length === 7`（才是含中心的实心范围）。
+ * 照注释写范围伤害/建造预览会**漏掉中心格**——而中心往往正是技能落点。
+ */
 export function hexRing(center: Hex, radius: number): Hex[] {
   if (radius <= 0) return [{ ...center }];
 
@@ -529,8 +604,22 @@ export function hexSpiral(center: Hex, radius: number): Hex[] {
   return out;
 }
 
-/** axial → 像素（pointy-top） */
+/**
+ * axial → 像素（pointy-top）
+ *
+ * 【⚠️ size 为什么必须守卫】
+ * `size` 是格子半径，来自配置。它是 0 / NaN 时：
+ * - `hexToPixel` 所有格子都被压到 `{x: 0, y: 0}`（一堆格子重叠在原点，看不出错）
+ * - `pixelToHex` 是 **除以 size** → `±Infinity` → `hexRound` 喂进 `Math.round(Infinity)`
+ *   得到 `{q: Infinity, r: -Infinity}`，这个坐标会被继续传给寻路/距离计算，
+ *   把 Infinity 一路传染下去（`hexDistance` 返回 Infinity，比较恒真/恒假）。
+ *
+ * 不抛错的原因：像素互转通常在渲染/拾取循环里逐帧调用，
+ * 抛错会打断整帧渲染，而问题根源只是一份配置值。
+ * 所以非法 size 统一返回原点坐标，并在注释里写明"调用方应校验配置"。
+ */
 export function hexToPixel(h: Hex, size: number): IVec2 {
+  if (!(size > 0)) return { x: 0, y: 0 };
   const x = size * Math.sqrt(3) * (h.q + h.r / 2);
   const y = size * 1.5 * h.r;
   return { x, y };
@@ -538,6 +627,8 @@ export function hexToPixel(h: Hex, size: number): IVec2 {
 
 /** 像素 → axial（含取整到最近格子） */
 export function pixelToHex(x: number, y: number, size: number): Hex {
+  // 同上：size 非法时返回原点格，而不是让 Infinity 流进后续计算
+  if (!(size > 0)) return { q: 0, r: 0 };
   const r = (2 / 3) * y / size;
   const q = (Math.sqrt(3) / 3 * x - (1 / 3) * y) / size;
   return hexRound(q, r);

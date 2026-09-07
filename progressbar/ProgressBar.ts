@@ -35,12 +35,12 @@
  * // 分段血条（Boss 多阶段）
  * const boss = new ProgressBar({ max: 300, segments: 3 });
  * // ⚠️ 返回的是**占比 0~1**，不是数值区间
- * boss.segmentBounds(0); // { start: 0, end: 0.3233... }（约 1/3，含段间空隙）
+ * boss.segmentBounds(0); // { start: 0, end: 0.32 }（1/3 扣掉均摊空隙后）
  * boss.segmentBounds(3); // 抛错：段索引越界
  * ```
  *
  * 【⚠️ segmentBounds 返回占比，不是数值】
- * 实测 `{ max: 300, segments: 3 }` 下 `segmentBounds(0)` 是 `{start:0, end:0.3233}`，
+ * 实测 `{ max: 300, segments: 3, segmentGap: 0.02 }` 下 `segmentBounds(0)` 是 `{start:0, end:0.32}`，
  * 不是 `{0, 100}`。它给的是"相对整条"的渲染区间（含段间空隙），
  * 直接当数值用会得到完全错误的位置。
  *
@@ -144,9 +144,19 @@ export class ProgressBar {
   private _state: BarState = 'normal';
 
   constructor(opts: ProgressBarOptions = {}) {
-    this._min = opts.min ?? DEFAULTS.min;
-    this._max = opts.max ?? DEFAULTS.max;
-    if (this._max <= this._min) {
+    /**
+     * 【为什么 min/max 要先用 numOr 收口，再比较】
+     *
+     * 原写法 `if (this._max <= this._min) throw` 看起来做了校验，
+     * 但 NaN 参与 `<=` 比较**恒为 false**——`max = NaN` 直接绕过构造校验。
+     * 之后 `ratio = (value - min) / (max - min)` 得到 NaN，
+     * 整条血条的渲染宽度、分段索引、状态判定全部失效，且不报错。
+     *
+     * 实测：`new ProgressBar({ min: 0, max: NaN, value: 50 })` 不抛错、`ratio = NaN`。
+     */
+    this._min = numOr(opts.min, DEFAULTS.min);
+    this._max = numOr(opts.max, DEFAULTS.max);
+    if (!(this._max > this._min)) {
       throw new Error(`[ProgressBar] max 必须大于 min（收到 min=${this._min}, max=${this._max}）`);
     }
 
@@ -162,8 +172,23 @@ export class ProgressBar {
     this._trailDelay = Math.max(0, numOr(opts.trailDelay, DEFAULTS.trailDelay));
     this._trailSpeed = Math.max(0.01, numOr(opts.trailSpeed, DEFAULTS.trailSpeed));
     this._easeSpeed = Math.max(0, numOr(opts.easeSpeed, DEFAULTS.easeSpeed));
-    this._lowThreshold = clamp01(opts.lowThreshold ?? DEFAULTS.lowThreshold);
-    this._highThreshold = clamp01(opts.highThreshold ?? DEFAULTS.highThreshold);
+    /**
+     * 【⚠️ 为什么这里不能用 `clamp01(opts.x ?? 默认)`】
+     *
+     * 这是同一个构造函数里的**两套标准**：上面 trailDelay / easeSpeed 用的是
+     * `Math.max(0, numOr(...))`，而阈值这里用的是 `clamp01(??)`。
+     * 差别在于：`??` 挡不住 NaN，`clamp01` 底层是 `v < 0 ? 0 : v > 1 ? 1 : v`，
+     * 对 NaN 两个比较都为 false → **NaN 原样穿过去**。
+     *
+     * 实测：`new ProgressBar({ max: 100, value: 5, lowThreshold: NaN }).state`
+     * 是 `'normal'`，而默认阈值下同一血量是 `'low'`——
+     * 血条最核心的"残血预警"功能**静默失效**，玩家残血时看不到红色。
+     *
+     * 统一成 `clampNum`：非有限值回落到默认，同时保留 [0,1] 的钳制
+     * （阈值是占比，本来就必须在 0~1）。
+     */
+    this._lowThreshold = clampNum(opts.lowThreshold, 0, 1, DEFAULTS.lowThreshold);
+    this._highThreshold = clampNum(opts.highThreshold, 0, 1, DEFAULTS.highThreshold);
     this._hysteresis = Math.max(0, numOr(opts.thresholdHysteresis, DEFAULTS.hysteresis));
     this._direction = opts.direction ?? 'ltr';
 
@@ -392,10 +417,26 @@ export class ProgressBar {
         `[ProgressBar] 段索引越界：${index}（共 ${this._segments} 段）`
       );
     }
-    const each = 1 / this._segments;
-    const gap = each * this._segGap * this._segments;
-    const start = index * each + (index === 0 ? 0 : gap / 2);
-    const end = (index + 1) * each - (index === this._segments - 1 ? 0 : gap / 2);
+    /**
+     * 【⚠️ 为什么不能"首末段各扣一半空隙"】
+     *
+     * 旧算法：每段先均分 `each = 1/n`，中间段两端各扣 `gap/2`，
+     * 首段只在尾部扣 `gap/2`、末段只在头部扣 `gap/2`。
+     * 于是**中间段比两端段窄 `gap/2`**。
+     *
+     * 实测 3 段、gap = 0.02：段宽依次是 0.3233 / 0.3133 / 0.3233。
+     * 分段血条/经验条的格子不等宽，美术会当成渲染问题来查（贴图、锚点、父节点缩放），
+     * 而根因在这里的一行减法。
+     *
+     * 正确算法：先算出总共 n-1 处空隙，从总宽里一次性扣掉，剩下的 n 段**等宽**：
+     * `segW = (1 - gap*(n-1)) / n`，段 i 的起点 `i*(segW + gap)`。
+     * 这样首段贴着 0、末段贴着 1、每段一样宽（实测 3 段 gap=0.02 → 0.32/0.32/0.32）。
+     */
+    const n = this._segments;
+    const gap = this._segGap;
+    const segW = (1 - gap * (n - 1)) / n;
+    const start = index * (segW + gap);
+    const end = start + segW;
     return { start, end };
   }
 
@@ -417,6 +458,27 @@ export class ProgressBar {
   text(digits = 0): string {
     const fmt = (n: number) => (digits > 0 ? n.toFixed(digits) : String(Math.round(n)));
     return `${fmt(this._value)} / ${fmt(this._max)}`;
+  }
+
+  /**
+   * 卸载（铁律 5「可卸载」）
+   *
+   * 【为什么这个方法里没有"释放资源"的代码】
+   * 本类是纯数值层：没有回调、没有定时器、不持有外部对象，
+   * 所以没有引用需要断开。但"可卸载"这条铁律要求有 `destroy()` 出口，
+   * 否则调用方（对象池、场景切换）只能靠"不再引用它"来回收，
+   * 一旦有人误复用实例，就会读到上一局的血量/段数/状态。
+   *
+   * 所以这里做的是**把对外可见状态归零**：值回到 min、显示与延迟条归 0、
+   * 状态置 'empty'。destroy 之后再读 `snapshot()` 得到的是一个干净的初始值，
+   * 而不是上一局的残影。
+   */
+  destroy(): void {
+    this._value = this._min;
+    this._display = 0;
+    this._trailValue = 0;
+    this._trailWait = 0;
+    this._state = 'empty';
   }
 
   // ==================== 内部 ====================
