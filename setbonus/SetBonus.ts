@@ -326,9 +326,31 @@ export class SetBonusSystem {
     const out: Record<string, number> = {};
     for (const e of this.effects()) {
       const k = `${e.stat}.${e.op}`;
-      if (e.op === 'mul') out[k] = (out[k] ?? 1) * e.value;
-      else if (e.op === 'add') out[k] = (out[k] ?? 0) + e.value;
-      else out[k] = e.value;
+      if (e.op === 'mul') {
+        out[k] = (out[k] ?? 1) * e.value;
+      } else if (e.op === 'add') {
+        out[k] = (out[k] ?? 0) + e.value;
+      } else if (e.op === 'max') {
+        /**
+         * 【⚠️ max 必须聚合（取最大），不能覆盖】
+         * 原实现落在 `else out[k] = e.value` 分支——
+         * 多档位共存时**取到的是最后一个**，与 `max` 的语义无关。
+         *
+         * 实测（修复前）：`max(30)` 后 `max(10)` → 得到 **10**（应为 30）。
+         * 值越大的档位排在前面时，结果反而被后面的小值覆盖掉。
+         *
+         * 后果与配置表的书写顺序耦合：同一个套装，
+         * 策划调整 thresholds 的先后顺序就会改变实际数值，
+         * 且改完不会报错、测试也可能因为顺序"碰巧"通过。
+         */
+        out[k] = out[k] === undefined ? e.value : Math.max(out[k], e.value);
+      } else if (e.op === 'min') {
+        // 同 max：取最小，不能覆盖
+        out[k] = out[k] === undefined ? e.value : Math.min(out[k], e.value);
+      } else {
+        // 'set' 是**覆盖**语义，最后一个生效——这是对的，保持不变
+        out[k] = e.value;
+      }
     }
     return out;
   }
