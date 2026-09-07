@@ -139,14 +139,12 @@ A9 coverage 报 100%，t('item',{n:3}) 回落中文                    ✓ 与�
 
 ### ⚠️ `_kitmeta.json` 存在并发覆盖，各窗口的 `depends` 登记互相冲掉
 
-当前 `main` 上 `node scripts/check-deps.js` 报 5 条未登记：
+当前 `main` 上 `node scripts/check-deps.js` 报 **6 条**未登记：
 
 ```
-i18n        → _core      （W4-A 引入，未登记 / 被覆盖）
-rebind      → _core      （W4-B 引入，我提交时已 --fix 登记，现被覆盖回 []）
-curse       → _core      （其他窗口）
-achievement → _core      （其他窗口）
-（+1 条，见脚本完整输出）
+i18n / gameflow → _core   （W4-A 引入）
+rebind          → _core   （W4-B 即本窗口引入，提交时已登记，现被覆盖回 []）
+curse / rarity / accessibility → _core   （其它窗口引入）
 ```
 
 已确认这些 import 都是真实存在的（`i18n/I18N.ts:47` `isSafeKey`、
@@ -154,24 +152,37 @@ achievement → _core      （其他窗口）
 
 **根因**：16 个窗口并行提交，每个都整份写回 `_kitmeta.json`，后提交的覆盖先提交的。
 我（W4-B）在 `c8c1c0f` 里已把 `rebind.depends` 改成 `["_core"]`，
-但被后续窗口的提交覆盖回了 `[]` —— 这类冲突还会反复发生。
+但被后续窗口的提交覆盖回了 `[]`。
 
-**建议总审**：全部窗口交付完成后，**统一跑一次 `node scripts/check-deps.js --fix`**，
-不要指望各窗口各自登记。这不需要任何人返工。
+**这条判断已被实测证实**：本窗口推送时未登记只有 `rebind` 1 条，
+到我写这份报告时涨到 5 条，再到推送后复核时涨到 **6 条** ——
+**每多一个窗口交付就多几条**。所以"各窗口各自 --fix"是无效的，
+后提交的必然覆盖先提交的。
 
-### check-links 的 1 处断链
+**建议总审**：全部窗口交付完成后，**统一跑一次 `node scripts/check-deps.js --fix`**。
+这不需要任何人返工，也不应计入任何窗口的验收结论。
 
-当前报在 `audit/verify_W3-B.md`（我上一轮提交时是 `audit/handoff_W3-B.md`，
-说明 W3-B 期间又推进过）。W4-A 报告判断这是 `check-links.js` 的**误报**
-——脚本把代码块里形如 `](` 的内容当成了 markdown 链接。
+### check-links 的断链 —— 已闭环 ✅
 
-我认同这个判断：**该文件未变，而报的位置在变**，符合"误报随内容扫描位置漂移"的特征。
-建议按 W4-A 的建议让 `check-links.js` 跳过反引号内的内容，
-否则 16 个窗口交付期间它会一直红着，反而掩盖真正的断链。**需 W3-B 或总审处理。**
+我上一轮提交本报告时，报的是 `audit/handoff_W3-B.md` 一处断链；
+到 W4-A 报告里变成了 `audit/verify_W3-B.md`（文件未变，报的位置在变），
+W4-A 因此判断这是 `check-links.js` 的**误报**——脚本把代码块里形如 `](`
+的内容当成了 markdown 链接。
+
+**该判断已由 W3-B 证实并修复**：W3-B 在 `87b2a889` 修掉了脚本对行内代码的误判。
+现在 `node scripts/check-links.js` 输出：
+
+```
+[OK] 内部链接 42 条，断链 0 处（扫描 178 个 .md 文件）
+```
+
+本条已闭环，无需任何窗口返工。
 
 ---
 
-## 附：全库校验结果（当前 main，HEAD = 81f05b0a）
+## 附：全库校验结果
+
+**验收时**（`main` HEAD = `81f05b0a`，W4-A 交付后、其它窗口继续合入前）：
 
 ```
 ./node_modules/typescript/bin/tsc -p tsconfig.json      → exit 0
@@ -179,12 +190,26 @@ node .build/tests/run.js                                 → 通过 3696 项，�
 node -e "…runPhase10W4ATests + runPhase10W4BTests…"      → 通过 142 项，失败 0 项 ✓
 
 node scripts/check-deps.js          → 5 条未登记（见第四节，非 W4-A 独有）
-node scripts/check-links.js         → 断链 1 处（audit/verify_W3-B.md，W4-A 判断为误报）
+node scripts/check-links.js         → 断链 1 处（W4-A 判断为误报，已由 W3-B 修复）
 python3 scripts/scan-dt-guard.py    → 146 个文件，命中 0 处 ✓
 python3 scripts/scan-num-guard.py   → 命中 0 处 ✓
 python3 scripts/check-random-source.py → [OK] 未发现自建随机源 ✓
 python3 scripts/check-dup-exports.py → [OK] 无待处理的冲突 ✓
 ```
 
+**推送后复核**（重新拉取最新的 `main`，含 W5-B / W2-B / W7-B / W3-B 等后续改动）：
+
+```
+node .build/tests/run.js                                 → 通过 3696 项，失败 0 项 ✓
+node -e "…runPhase10W4BTests…"                           → 通过 71 项，失败 0 项 ✓
+                                                          （W4-A 的 71 项同样未受影响）
+node scripts/check-links.js         → [OK] 断链 0 处（W3-B 已修脚本误判）✓
+node scripts/check-deps.js          → 6 条未登记（数量仍在涨，见第四节）
+其余四项校验脚本                     → 全过 ✓
+```
+
+W4-A 的 6 个单元在复核时同样未被后续提交触碰，其 71 项测试仍全绿，
+**本报告的「通过」结论在合入后的真实仓库里依然成立**。
+
 **验收方未改动 W4-A 的任何代码**（`review_B.md` 第 0 节纪律）。
-本轮只新增/重写 `audit/verify_W4-B.md` 一个文件。
+本窗口两轮提交只新增/重写 `audit/verify_W4-B.md` 与 `audit/result_W4-B.md` 两个文件。

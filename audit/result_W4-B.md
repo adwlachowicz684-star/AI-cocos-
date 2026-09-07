@@ -86,17 +86,76 @@ python3 scripts/check-random-source.py  [OK] 未发现自建随机源 ✓
 python3 scripts/check-dup-exports.py [OK] 无待处理的冲突 ✓
 ```
 
-### 两处需要说明的校验结果
+### 两处需要说明的校验结果（**已被后续提交改变，最新状态见 §推送后复核**）
 
 1. **check-deps 曾报 `rebind → _core` 未登记**：本窗口为收口 `prettyKey` 的原型链，
    在 `rebind/Rebind.ts` 引入了 `_core/guard` 的 `hasOwn`。已用脚本自带的
    `node scripts/check-deps.js --fix` 登记（`_kitmeta.json` 里 rebind 的
    `depends: [] → ["_core"]`）。**这是本窗口对 `_kitmeta.json` 的唯一改动**，
    与别的窗口无重叠。
+   ⚠️ **但该登记已被后续窗口的提交覆盖回 `[]`** —— 详见 §推送后复核。
 
 2. **check-links 的 1 处断链不在本窗口**：位于 `audit/handoff_W3-B.md`（解析为 `audit/...` 的占位链接）。
    该文件是 W3-B 的交付物，本窗口未改动、也未修（避免与对方窗口冲突）。
-   **需 W3-B 或总审处理。**
+   ✅ **已由 W3-B 修好**：W3-B 在 `87b2a889` 修掉了 `check-links.js` 对行内代码
+   `](` 的误判，现在全库断链为 **0**（详见 §推送后复核）。本条已闭环。
+
+---
+
+## 推送后复核（在远程最新代码上重跑）
+
+推送完成后 `main` 上又合入了其它窗口（W5-B、W2-B、W7-B、W3-B、W4-A…）的改动。
+为确认本窗口的 7 个单元在**合入后的真实仓库**里仍然成立，我从远程 `main`
+重新拉了一份干净快照重跑全部校验（本轮复核时间：2026-09-08）：
+
+```
+$ ./node_modules/typescript/bin/tsc -p tsconfig.json
+exit 0
+
+$ node .build/tests/run.js
+通过 3696 项，失败 0 项                # 开工基线 3695，+1 来自其它窗口，只增不减
+全部通过 ✓
+
+$ node -e "...runPhase10W4BTests()"    # 本窗口 71 项独立运行
+通过 71 项，失败 0 项
+全部通过 ✓
+
+$ node scripts/check-links.js
+[OK] 内部链接 42 条，断链 0 处（扫描 178 个 .md 文件）   ← 已归零，见上文第 2 条
+
+$ python3 scripts/scan-dt-guard.py        扫描 146 个文件，命中 0 处 ✓
+$ python3 scripts/scan-num-guard.py       扫描 0 处命中 ✓
+$ python3 scripts/check-random-source.py  [OK] 未发现自建随机源 ✓
+$ python3 scripts/check-dup-exports.py    [OK] 无待处理的冲突 ✓
+
+$ node scripts/check-deps.js
+[✗] import 了但没登记 6 条：i18n / curse / rarity / rebind / gameflow / accessibility → _core
+```
+
+**本窗口的 7 个单元源码未被任何后续提交触碰**（已逐个核对 `c8c1c0f` 之后的
+13 个提交：只有 `_kitmeta.json` 被反复覆盖，7 个单元 0 处改动）。71 项测试全绿，
+说明本批修复在合入后的真实仓库里**依然成立**。
+
+### ⚠️ `_kitmeta.json` 的并发覆盖：已用实测证明"各自 --fix 无效"
+
+本窗口推送时已把 `rebind → _core` 登记进去，现在**它又回到了未登记列表**。
+未登记数从本窗口推送时的 1 条（`rebind`）涨到现在的 **6 条**：
+
+| 单元 | 谁引入的 `_core` import | 本窗口推送时 | 现在 |
+|---|---|---|---|
+| `rebind` | 本窗口（`hasOwn`） | ✅ 已登记 | ❌ 被覆盖回 `[]` |
+| `i18n` / `gameflow` | W4-A | 未登记 | 未登记 |
+| `curse` / `rarity` / `accessibility` | 其它窗口 | 未登记 | 未登记 |
+
+**根因**：16 个窗口并行提交，每个都整份写回 `_kitmeta.json`，后提交的覆盖先提交的。
+`_kitmeta.json` 不是文本文件意义上的冲突——Git 能合并，但**合并结果取决于谁最后写**。
+
+**本窗口本次不执行 `--fix`**，理由与 W2-B 的报告一致：`--fix` 会把 5 个其它窗口的
+登记混进本窗口这次提交，反而让"哪个窗口负责哪几条"变得不可追溯。
+且上面这张表本身就是证据——**各自 fix 会被下一次提交冲掉，只能由总审统一 fix 一次**。
+
+**请总审在全部窗口交付完毕后执行一次 `node scripts/check-deps.js --fix`。**
+这一条不阻塞本窗口交付：未登记只影响"复制单元时会漏文件"，不影响编译与测试。
 
 ### 未触碰的文件（按并行纪律）
 
@@ -111,7 +170,8 @@ mover/CharacterMover.ts
 rebind/Rebind.ts
 reddot/RedDot.ts
 shop/Shop.ts
-_kitmeta.json                 （仅 rebind.depends 一项，由 check-deps --fix 写入）
+_kitmeta.json                 （仅 rebind.depends 一项，由 check-deps --fix 写入；
+                               ⚠️ 该项已被后续窗口的提交覆盖回 []，见 §推送后复核）
 tests/run_phase10_w4b.ts      （新增）
 audit/result_W4-B.md          （新增）
 audit/verify_W4-B.md          （新增）
