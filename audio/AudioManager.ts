@@ -195,7 +195,25 @@ export class AudioManager {
     this._maxVoices = clampNum(cfg.maxVoices, 0, 512, 32);
     this._maxSamePerFrame = cfg.maxSameSoundPerFrame ?? 3;
     this._accumulate = cfg.accumulateOnDedupe ?? false;
-    this._master = clamp(cfg.masterVolume ?? 1, 0, 1);
+    /**
+     * 【⚠️ 主音量必须用 clampNum 收口，`clamp(v ?? 1, 0, 1)` 挡不住 NaN】
+     *
+     * `??` 只挡 null/undefined；而 `clamp` 本身是 `Math.min(Math.max(v, lo), hi)`，
+     * `Math.max(NaN, 0)` 仍是 **NaN** → 主音量直接变成 NaN。
+     *
+     * 实测（修复前）：`new AudioManager({masterVolume: NaN}).effectiveVolume(1)`
+     * 返回 **NaN**。这个 NaN 会一路传给引擎的音频接口，
+     * 表现通常是"静音"或"爆音"，而且**不报错、不打印任何警告**——
+     * 排查时只会看到"声音没了"，看不到音量字段是 NaN。
+     *
+     * 主音量的常见来源是玩家设置存档（拖滑块 → 序列化 → 读档），
+     * 存档被截断/版本升级字段缺失时就是 NaN，属于真实的到达路径。
+     *
+     * 【为什么下界是 0 上界是 1】
+     * 0 = 静音，是合法配置（不是非法值），不能被夹成 1。
+     * 这里要拦的只有 NaN 和越界值，顺手重定义合法语义会踩 `maxVoices` 那个坑。
+     */
+    this._master = clampNum(cfg.masterVolume, 0, 1, 1);
     this._catVol = new Map(Object.entries(cfg.categoryVolumes ?? {}));
   }
 
