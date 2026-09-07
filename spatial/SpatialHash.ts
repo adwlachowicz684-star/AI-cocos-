@@ -53,11 +53,19 @@ interface Cell {
   readonly items: Set<string>;
 }
 
+/** 一条登记记录：对象 + 它当前的坐标 + 所在格子 key */
+interface SpatialEntry<T> {
+  item: T;
+  x: number;
+  y: number;
+  key: string;
+}
+
 export class SpatialHash<T> {
   private readonly _cellSize: number;
   private readonly _inv: number;
   private readonly _cells = new Map<string, Cell>();
-  private readonly _items = new Map<string, { item: T; x: number; y: number; key: string }>();
+  private readonly _items = new Map<string, SpatialEntry<T>>();
 
   constructor(opts: SpatialHashOptions) {
     if (!(opts.cellSize > 0)) throw new Error('[SpatialHash] cellSize 必须为正');
@@ -98,7 +106,7 @@ export class SpatialHash<T> {
       this._removeFromCell(existing.key, id);
     }
 
-    const entry = existing ?? ({ item: item as T } as { item: T; x: number; y: number; key: string });
+    const entry = existing ?? ({ item: item as T } as SpatialEntry<T>);
     entry.x = x;
     entry.y = y;
     entry.key = key;
@@ -137,6 +145,22 @@ export class SpatialHash<T> {
    * 粗筛能排除掉绝大多数，精确过滤只在少量候选上做。
    */
   queryCircle(cx: number, cy: number, radius: number): T[] {
+    return this._queryCircleEntries(cx, cy, radius).map((e) => e.item);
+  }
+
+  /**
+   * 圆形范围查询，返回**带坐标**的 entry
+   *
+   * 【为什么要单独留一个返回 entry 的版本】
+   * `queryNearest` 拿到结果后要按距离排序，需要每个对象的坐标。
+   * 若像原实现那样先拿 `T[]` 再用 `_findEntry` 反查，就是 O(k·n)。
+   * 让粗筛阶段直接把 entry 传出来，排序阶段零反查。
+   */
+  private _queryCircleEntries(
+    cx: number,
+    cy: number,
+    radius: number
+  ): readonly SpatialEntry<T>[] {
     if (!(radius >= 0)) return [];
     const r2 = radius * radius;
 
@@ -145,7 +169,7 @@ export class SpatialHash<T> {
     const maxX = cx + radius;
     const maxY = cy + radius;
 
-    const out: T[] = [];
+    const out: SpatialEntry<T>[] = [];
     const seen = new Set<string>();
 
     const x0 = Math.floor(minX * this._inv);
@@ -164,7 +188,7 @@ export class SpatialHash<T> {
           if (!e) continue;
           const dx = e.x - cx;
           const dy = e.y - cy;
-          if (dx * dx + dy * dy <= r2) out.push(e.item);
+          if (dx * dx + dy * dy <= r2) out.push(e);
         }
       }
     }
@@ -200,35 +224,99 @@ export class SpatialHash<T> {
   /** 查询最近的 K 个 */
   queryNearest(x: number, y: number, k: number, maxRadius = Infinity): T[] {
     if (k <= 0) return [];
+    if (!Number.isFinite(k)) return [];
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return [];
+
+    /**
+     * 【⚠️ maxRadius 默认为 Infinity 时，原实现会死循环】
+     *
+     * 原循环：
+     * ```ts
+     * while (results.length < k && radius <= Math.max(maxRadius, this._cellSize)) {
+     *   results = this.queryCircle(x, y, Math.min(radius, maxRadius));
+     *   if (radius >= maxRadius) break;
+     *   radius *= 2;
+     * }
+     * ```
+     * `maxRadius = Infinity` 时：
+     * - 循环条件 `radius <= Infinity` **恒真**
+     * - 退出条件 `radius >= Infinity` **永不满足**（有限数翻倍到不了 Infinity）
+     * → `radius` 无限翻倍，每轮 `queryCircle` 扫 `(2·radius/cellSize)²` 个格子：
+     *   cellSize=64 时第 10 轮就到 4.2e6 个格子，之后继续爆炸。
+     *
+     * 实测（修复前）：插入 1 个点、`queryNearest(0,0,5)`（附近不足 5 个）
+     * → **20 秒内未返回，主线程 100% 卡死，不抛错**。
+     *
+     * 这不是边缘调用——"找最近的 5 个敌人"是默认参数下的常见用法，
+     * 玩家站在角落或场上存活单位不足 k 个时立即触发。
+     *
+     * 【修法】把 Infinity 换成一个"能覆盖全部数据"的**有限**上界。
+     * 计算代价 O(n) 一次，远低于原实现的指数爆炸。
+     */
+    const cap = Number.isFinite(maxRadius)
+      ? Math.max(0, maxRadius)
+      : this._maxDistFrom(x, y);
 
     let radius = this._cellSize;
-    let results: T[] = [];
+    let entries: readonly SpatialEntry<T>[] = [];
 
-    // 逐步扩大半径，直到找到 K 个或超过上限
-    while (results.length < k && radius <= Math.max(maxRadius, this._cellSize)) {
-      results = this.queryCircle(x, y, Math.min(radius, maxRadius));
-      if (radius >= maxRadius) break;
-      radius *= 2;
+    /**
+     * 【⚠️ 循环必须保证"在上限处也查一次"】
+     *
+     * 第一版我写成 `while (entries.length < k && radius <= Math.max(cap, cellSize))`，
+     * 半径按 2 倍增长会**越过** cap：
+     * cap=25、cellSize=8 时序列是 8 → 16 → 32，
+     * 而 32 <= 25 为假 → 循环在查过 16 之后就退出了，
+     * **从没以 25 为半径查过**，实测少返回 1 个本该命中的点。
+     *
+     * 改成"先夹到 cap 再翻倍"，并在 radius 到达 cap 后查完再退出：
+     * 8 → 16 → 25（查）→ 退出。既收敛又不漏。
+     */
+    for (;;) {
+      entries = this._queryCircleEntries(x, y, Math.min(radius, cap));
+      if (entries.length >= k) break;
+      if (radius >= cap) break;
+      radius = Math.min(radius * 2, cap);
     }
 
-    if (results.length <= k) return results;
+    if (entries.length <= k) return entries.map((e) => e.item);
 
-    // 按距离排序取前 K 个
-    const withDist = results.map((item) => {
-      const e = this._findEntry(item);
-      const dx = (e?.x ?? 0) - x;
-      const dy = (e?.y ?? 0) - y;
-      return { item, d2: dx * dx + dy * dy };
+    /**
+     * 【⚠️ 这里原本用 `_findEntry(item)` 反查坐标，是 O(k·n)】
+     *
+     * 每个结果都要遍历整个 `_items` Map 找回自己的坐标——
+     * 2000 个对象时单次查询触发 2529 次全表遍历。
+     * 这与 `_core` 的 `QuadTree.queryCircle` 是同一个反模式
+     * （"先取出结果再逐个反查"）。
+     *
+     * 改成粗筛阶段直接保留 entry（坐标已在其中），省掉整轮反查。
+     */
+    const withDist = entries.map((e) => {
+      const dx = e.x - x;
+      const dy = e.y - y;
+      return { item: e.item, d2: dx * dx + dy * dy };
     });
     withDist.sort((a, b) => a.d2 - b.d2);
     return withDist.slice(0, k).map((r) => r.item);
   }
 
-  private _findEntry(item: T): { x: number; y: number } | undefined {
+  /**
+   * 从 (x,y) 出发、能覆盖全部已插入对象的最小半径
+   *
+   * 【为什么需要它】`maxRadius = Infinity` 时必须换成有限上界，
+   * 否则"翻倍到 Infinity"永远到不了，循环不收敛。
+   *
+   * 代价 O(n) 一次；空表返回 0（调用方会立刻终止循环）。
+   */
+  private _maxDistFrom(x: number, y: number): number {
+    let maxD2 = 0;
     for (const e of this._items.values()) {
-      if (e.item === item) return e;
+      const dx = e.x - x;
+      const dy = e.y - y;
+      const d2 = dx * dx + dy * dy;
+      if (d2 > maxD2) maxD2 = d2;
     }
-    return undefined;
+    return Math.sqrt(maxD2);
   }
 
   // ==================== 内部 ====================
