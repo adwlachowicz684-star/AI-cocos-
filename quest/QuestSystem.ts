@@ -257,7 +257,31 @@ export class QuestSystem {
    */
   report(event: QuestEvent): number {
     let changed = 0;
-    const n = event.n ?? 1;
+
+    /**
+     * 【⚠️ n 必须是有限正数，否则会让任务瞬间完成】
+     *
+     * 老实现 `const n = event.n ?? 1` 对 NaN 完全放行：
+     * - `next[i] = Math.min(need, next[i] + NaN)` → NaN
+     * - 但 `next[i] >= need` 在 NaN 时为 false → **不会跳过已完成目标**
+     * - 而 `_isAllDone` 里 `progress[i] < need` 在 NaN 时也是 false
+     *   → 判定为"全部达标" → **任务瞬间完成且可领奖**
+     *
+     * 实测（修复前）：目标是"击杀 slime × 5"，
+     * `report({type:'kill', target:'slime', n: NaN})` 后
+     * status 直接变 `completed`，`claim()` 随即发出奖励。
+     *
+     * `event.n` 常常就是伤害值（`{type:'kill', n: damage}`），
+     * 一次除零就能触发。这是本批后果最严重的一条：
+     * 奖励超发、运营数据失真，且全程无任何报错。
+     */
+    const rawN = event.n ?? 1;
+    if (!Number.isFinite(rawN) || rawN <= 0) {
+      throw new Error(
+        `[QuestSystem] report 的 n 必须是有限正数，收到 ${event.n}`
+      );
+    }
+    const n = rawN;
 
     // 拷贝一份，因为完成会触发回调，回调里可能接新任务
     const activeIds = this.active;
@@ -308,6 +332,18 @@ export class QuestSystem {
     const def = this._defs.get(defId);
     if (!p || !def) return false;
     if (objIndex < 0 || objIndex >= def.objectives.length) return false;
+
+    /**
+     * 【⚠️ Math.max(0, NaN) 是 NaN，不是 0】
+     * 老实现靠 `Math.max(0, value)` 兜底，对 NaN 无效，
+     * 于是进度变 NaN → `_isAllDone` 的否定式判定把 NaN 当成"达标"。
+     * 这里直接拒绝非有限值（与 report 的口径一致）。
+     */
+    if (!Number.isFinite(value)) {
+      throw new Error(
+        `[QuestSystem] setProgress 的 value 必须是有限数字，收到 ${value}`
+      );
+    }
 
     const next = p.progress.slice();
     next[objIndex] = Math.max(0, value);
@@ -454,8 +490,22 @@ export class QuestSystem {
   }
 
   private _isAllDone(def: QuestDef, progress: readonly number[]): boolean {
+    /**
+     * 【⚠️ 必须用肯定式判定，不能写 `progress[i] < need`】
+     *
+     * NaN 参与 `<` 恒为 false。老实现 `if (progress[i] < need) return false`
+     * 遇到 NaN 时**不会** return false，于是一路走到 `return true`——
+     * 把"进度是 NaN"反向判定成了"全部达标"。
+     *
+     * 写成 `!(progress[i] >= need)` 后，NaN 让 `>=` 为 false、取反为 true，
+     * 立即 return false——**NaN 天然被判定为未完成**，不需要额外判断。
+     *
+     * 这是全库反复出现的同一类陷阱：否定式判定会被 NaN 利用，
+     * 肯定式判定天然拒 NaN。
+     */
     for (let i = 0; i < def.objectives.length; i++) {
-      if (progress[i] < (def.objectives[i].count ?? 1)) return false;
+      const need = def.objectives[i].count ?? 1;
+      if (!(progress[i] >= need)) return false;
     }
     return true;
   }
