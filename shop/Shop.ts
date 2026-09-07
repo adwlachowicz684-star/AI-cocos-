@@ -206,8 +206,24 @@ export class Shop {
    * 【坑】取整要在最后。中途取整会让多次折扣累积出偏差。
    */
   priceOf(itemId: string, side: TradeSide, quantity = 1): number {
+    return this._computePrice(itemId, side, quantity).price;
+  }
+
+  /**
+   * 内部算价：同时给出"定价链是否健康"
+   *
+   * 【为什么要多返回一个 valid】
+   * `priceOf` 对外只返回数字，坏定价被收口成 0——
+   * 但"收口成 0"对 UI 展示是安全的，**对交易却是灾难**（0 元购）。
+   * 所以交易路径必须能区分"这东西真的免费"和"定价算坏了"。
+   */
+  private _computePrice(
+    itemId: string,
+    side: TradeSide,
+    quantity: number
+  ): { price: number; valid: boolean } {
     const item = this._items.get(itemId);
-    if (!item) return 0;
+    if (!item) return { price: 0, valid: false };
 
     let p = item.basePrice;
 
@@ -221,7 +237,30 @@ export class Shop {
     // 自定义钩子
     if (this._pricing) p = this._pricing(p, { itemId, side, quantity });
 
-    return Math.max(0, Math.round(p));
+    /**
+     * 【⚠️ Math.max(0, NaN) 是 NaN，不是 0】
+     *
+     * 老实现靠 `Math.max(0, ...)` 兜底，但 `Math.max(0, NaN) === NaN`。
+     * `PricingFn` 是用户注入的扩展点（折扣、会员价、动态定价），
+     * 一次除零（`basePrice * (1 - discount/100)` 里 discount 是字符串）
+     * 或查表未命中（`markupTable[vipLevel]` 为 undefined）就会返回 NaN。
+     *
+     * 实测（修复前）：`setPricing(() => NaN)` 后
+     * `buy('sword', 1, wallet)` → `{ok:true}`，钱包余额被写成 **NaN**。
+     *
+     * 金币变 NaN 之后所有 `have < total` 判定恒为 false，
+     * 意味着**什么都能买**——等价于无限金币。
+     *
+     * 【为什么对外收口成 0，交易侧却要拒绝】
+     * - 对外收口成 0：UI 遍历商品列表时不至于因为一件商品崩掉整个面板
+     * - 交易侧拒绝：`valid === false` 表示定价链不可信，
+     *   此时放行就是 0 元购（白送），比崩面板严重得多
+     */
+    const rounded = Math.round(p);
+    if (!Number.isFinite(rounded) || rounded < 0) {
+      return { price: 0, valid: false };
+    }
+    return { price: rounded, valid: true };
   }
 
   /** 批量总价（考虑批量折扣的话，pricing 里能拿到 quantity） */
@@ -345,11 +384,36 @@ export class Shop {
       return { ok: false, reason: 'out_of_stock', available: stock.count };
     }
 
-    const unit = this.priceOf(itemId, 'buy', qty);
+    const { price: unit, valid } = this._computePrice(itemId, 'buy', qty);
+
+    /**
+     * 【⚠️ 定价链不可信时拒绝交易，而不是按 0 元放行】
+     * 第一版我只收口了 `priceOf`（返回 0），实测结果是
+     * `buy` 返回 `{ok:true, total:0}`——**玩家 0 元拿到商品**。
+     * 这比"钱包变 NaN"温和，但同样是白送，属于经济损失。
+     */
+    if (!valid) {
+      return { ok: false, reason: 'unknown_item' };
+    }
+
     const total = unit * qty;
     const have = readWallet(wallet, currency);
 
-    if (have < total) {
+    /**
+     * 【⚠️ 总价必须是有限数，且用肯定式判定 `!(have >= total)`】
+     *
+     * 两道防线缺一不可：
+     * 1. `total` 非有限 → 直接拒绝。否则 `have - NaN = NaN`，
+     *    余额被永久写成 NaN，此后所有消费判定失效（等价无限金币）。
+     * 2. `have < total` 改成 `!(have >= total)`：
+     *    NaN 参与 `<` 恒为 false，老写法会让"余额不足"分支永不进入。
+     *    肯定式下 NaN 走拒绝分支，天然安全。
+     */
+    if (!Number.isFinite(total)) {
+      return { ok: false, reason: 'insufficient_funds', need: total, have };
+    }
+
+    if (!(have >= total)) {
       return { ok: false, reason: 'insufficient_funds', need: total, have };
     }
 
@@ -375,7 +439,15 @@ export class Shop {
     if (!item) return { ok: false, reason: 'unknown_item' };
     if (item.sellable === false) return { ok: false, reason: 'cannot_sell' };
 
-    const unit = this.priceOf(itemId, 'sell', qty);
+    /**
+     * 【⚠️ 与 buy 同理：定价链不可信时拒绝】
+     * 卖出侧若按 0 放行，玩家可以用"卖 0 金币"把物品刷进商店库存
+     * （`stock.count += qty` 照常执行），等价于凭空造物。
+     */
+    const { price: unit, valid } = this._computePrice(itemId, 'sell', qty);
+    if (!valid) {
+      return { ok: false, reason: 'cannot_sell' };
+    }
     const total = unit * qty;
 
     wallet[currency] = readWallet(wallet, currency) + total;
