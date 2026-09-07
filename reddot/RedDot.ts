@@ -27,6 +27,27 @@
  * 这样父子永远一致，业务只需要管好叶子。
  *
  * 【零业务依赖】
+ *
+ * 【使用示例】
+ * ```typescript
+ * const rd = new RedDot();
+ *
+ * // 叶子节点：直接设数量
+ * rd.set('mail/unread', 3);
+ * rd.add('mail/unread', 1);   // 4
+ *
+ * // 父节点自动聚合：own 只看自己，get 含子节点
+ * rd.own('mail');    // 0 —— mail 自身没有红点
+ * rd.get('mail');    // 4 —— 聚合了 mail/unread
+ * rd.has('mail');    // true
+ * rd.any('mail');    // 自身或任一子节点有红点
+ *
+ * rd.clear('mail/unread');
+ * rd.get('mail');    // 0 —— 子节点清空后父节点也归零
+ * ```
+ *
+ * 【路径是树形的】用 `/` 分隔，设置子节点会自动向上聚合，
+ * 所以 UI 只需绑父节点路径即可。
  */
 
 // ==================== 类型 ====================
