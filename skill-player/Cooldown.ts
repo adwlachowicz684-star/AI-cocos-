@@ -76,11 +76,35 @@ export class Cooldown {
    */
   tick(dt: number, speedMul = 1): void {
     if (!safeDt(dt)) return;
+
+    /**
+     * 【⚠️ speedMul 必须收口——NaN 会让 _progress 永久毒化】
+     *
+     * 入口原本只校验了 `dt`，没校验 `speedMul`。
+     * `this._progress += (dt * NaN) / duration` → `_progress` 变 NaN，此后：
+     * - `while (this._progress >= 1)` 恒为 false（NaN 比较恒 false）→ 充能永不恢复
+     * - `if (this._charges >= this.maxCharges)` 也救不了它（只有充能满才重置）
+     * - **后续再用合法的 tick(dt, 1) 也恢复不了**——NaN 有粘性
+     *
+     * 实测（修复前）：`trigger()` 后 `tick(0.5, NaN)` → progress=NaN；
+     * 再 `tick(10, 1)` → 仍是 NaN，`ready` 仍为 false。
+     *
+     * `speedMul` 通常来自"冷却缩减"属性（攻速/CDR）。
+     * 属性系统一旦算出 NaN（除零、缺失字段），**该技能永久无法再次使用**，
+     * 玩家表现为"技能图标永远灰着"，重载角色数据才恢复。
+     *
+     * 【为什么回落成 1 而不是抛错】
+     * tick 是每帧调用的热路径，抛错会打断整个技能更新循环。
+     * 回落成 1（无加成）意味着"这一帧没有冷却缩减"，
+     * 是最贴近意图的中性行为，且不会污染状态。
+     */
+    const mul = Number.isFinite(speedMul) && speedMul > 0 ? speedMul : 1;
+
     if (this._charges >= this.maxCharges) {
       this._progress = 1;
       return;
     }
-    this._progress += (dt * speedMul) / this.duration;
+    this._progress += (dt * mul) / this.duration;
     while (this._progress >= 1) {
       this._progress -= 1;
       this._charges += 1;
