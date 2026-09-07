@@ -50,6 +50,8 @@ new Rarity([
 | **`weight` 必须为正** | 权重 0 会让 `roll` 永远选不到它，通常是配表笔误 |
 | **`tally` 未出现的也有键** | 方便 UI 直接遍历，不用做存在性判断 |
 | **`best([])` 返回 null** | 不是 undefined |
+| **`order` 必须是有限数** | NaN 会让比较器返回 NaN，排序结果**由引擎实现决定**（实测保持原序）→ `highest` / `lowest` / `compare` / `best` 全错且不报错。保底按 `highest` 判定档位，排序错就会给错档 |
+| **`tally` 支持 `__proto__` 这类键** | 用 `{}` 字面量累加时 `out['__proto__'] += 1` 会走原型的 setter，赋值被静默忽略 → 计数整条丢失（实测 `tally(['__proto__','__proto__','b'])` 只剩 `{"b":1}`）。现在按"自有属性"写入 |
 
 ## API 补充
 
