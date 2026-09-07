@@ -1,117 +1,190 @@
 # 验收报告 · W4-B 验收 W4-A
 
+> 被验收：`audit/result_W4-A.md`（173 行）+ `tests/run_phase10_w4a.ts`（1146 行 / 71 项）
+> 提交：`9b7225bc`（6 单元 / 15 条：已修 12 · 不成立 2 · 不修 1 · 存疑 1）
+> 验收依据：`audit/review_B.md` 的五条硬标准
+
 ## 结论
 
-**无法验收 —— W4-A 尚未交付。**
+**通过。**
 
-按 `audit/review_B.md` 的要求，验收对象是 W4-A 的两份交付物：
+五条硬标准逐条核过，15 条条目**全部达标**，无"标红"级问题。
+另有 1 处命名小问题、1 处需总审留意的语义变更、1 处**全库级并发问题**（见第四节）。
 
-| 应交付 | 位置 | 状态 |
-|---|---|---|
-| 修复与测试 | `tests/run_phase10_w4a.ts` | **不存在** |
-| 完工报告 | `audit/result_W4-A.md` | **不存在** |
+W4-A 有三处做得比要求更好，值得其他窗口照抄：
 
-仓库 `main` 分支当前只有 `tests/run_phase10_w7a.ts` 与 `audit/result_W7-A.md`（W7-A 已交付）。
-`review_B.md` 的五条硬标准（是否复现 / 测试是否有效 / 有无对照用例 / 有无顺手重构 / 有无误判设计）
-全部要求**阅读对方的报告与测试代码**，对方未交付则五条标准无对象可判，
-我不能凭空给"通过"或"不通过"。
-
-因此本文件改做两件**现在就能做**的事：
-
-1. 独立复核 W4-A 清单里的 9 条 P1 在**当前代码**上是否仍成立（用只读脚本调公开 API，不改任何代码）；
-2. 把结果留给 W4-A 与总审，作为其开工/验收时的对照基线。
+1. **两条"不成立"都给了实测证据，且都拒绝了照着改**。
+   `W4A-03` 若照审查意见把 `needCount` 换成 `numOr(spec.count, 1)`，
+   会把"抛错"改成"静默变 1 发"——**正好是该条意见自己要消灭的静默行为**。
+   W4-A 顶住了，还写了测试把守卫固化下来。
+2. **`W4A-11②` 存疑项不自己拍板**。DDA 的 `currencyGain` 方向确实反了，
+   但任改一个方向都动线上经济曲线，W4-A 只补注释 + 加测试固定现状，交总审裁决。
+3. **`W4A-12③` 判"不修"给了契约层面的理由**：`forEach` 的"回调里可改集合"
+   依赖"先复制再遍历"，改惰性迭代器会同时破坏两条既有契约。
 
 ---
 
-## 逐条验收
+## 一、逐条验收
 
-| 条目 | 标准1复现 | 标准2测试有效 | 标准3对照用例 | 标准4无顺手重构 | 标准5未误判设计 | 备注 |
+✅ 达标 · ⚠️ 小问题（建议补，不阻塞）· ❌ 实质问题（需返工）· N/A 不适用
+
+| 条目 | 标准1<br>复现 | 标准2<br>测试有效 | 标准3<br>对照用例 | 标准4<br>无顺手重构 | 标准5<br>未误判设计 | 备注 |
 |---|---|---|---|---|---|---|
-| P1 `bullet-pattern` 自定义 ShapeFn 速度恒为 0 | — | — | — | — | — | **缺陷仍在**，见下 |
-| P1 `bullet-pattern` `interval` NaN 永不开火 | — | — | — | — | — | **缺陷仍在** |
-| P1 `bullet-pattern` `compileShape` count 未收口 | — | — | — | — | — | **已修**（HEAD 上已用 `needCount`） |
-| P1 `entity` 回调里注销自己跳过下一个 | — | — | — | — | — | **缺陷仍在** |
-| P1 `entity` `destroy(id)` 两种相反返回值 | — | — | — | — | — | **缺陷仍在** |
-| P1 `gameflow` `historyLimit <= 1` 历史无限增长 | — | — | — | — | — | **缺陷仍在** |
-| P1 `i18n` `onChange` 只存单个回调 | — | — | — | — | — | **缺陷仍在** |
-| P1 `i18n` `has()` 与 `t()` 口径不一致 | — | — | — | — | — | **缺陷仍在** |
-| P1 `i18n` 覆盖率认 6 种复数形式 | — | — | — | — | — | **缺陷仍在** |
+| W4A-01 `bullet-pattern` ShapeFn 速度 | ✅ | ✅ | ✅ | ✅ | ✅ | 新增 `opts.speed` 可选字段，`ShapeSpec` 优先，向后兼容 |
+| W4A-02 `bullet-pattern` interval NaN | ✅ | ✅ | ⚠️ | ✅ | ✅ | 见"小问题 1" |
+| W4A-03 `bullet-pattern` count 收口 | ✅ | N/A | ✅ | ✅ | ✅ | **判不成立，附实测**；未改一行代码 |
+| W4A-04 `entity` 派发中自注销 | ✅ | ✅ | ✅ | ✅ | ✅ | 五处派发统一走 `_dispatch()`，非顺手重构 |
+| W4A-05 `entity` destroy 无效 id | ✅ | ✅ | ✅ | ✅ | ✅ | 两种上下文统一为 `false` |
+| W4A-06 `gameflow` historyLimit | ✅ | ✅ | ✅ | ✅ | ✅ | 改 `clampNum` + 正数起点裁剪 |
+| W4A-07 `i18n` onChange 多播 | ✅ | ✅ | ✅ | ✅ | ✅ | 改 `Set`，原返回取消函数的契约保留 |
+| W4A-08 `i18n` has()/t() 口径 | ✅ | ✅ | ✅ | ✅ | ⚠️ | 见"需留意 1"（语义变更，方向正确） |
+| W4A-09 `i18n` 覆盖率复数口径 | ✅ | ✅ | ✅ | ✅ | ✅ | **只收窄统计侧，未动 `_pluralKeyOf` 的两形式设计** |
+| W4A-10 `bullet-pattern` P2 四项 | ✅ | ✅ | ✅ | ✅ | ✅ | 含 1 条分拆；`destroy()` 补齐 |
+| W4A-11 `difficulty` P2 | ✅ | ✅ | ✅ | ✅ | ✅ | 存疑项交总审，行为未改 |
+| W4A-12 `entity` P2 | ✅ | ✅ | ✅ | ✅ | ✅ | ①不成立（附实测）②补无参 destroy ③不修（附契约理由） |
+| W4A-13 `gameflow` P2 | ✅ | N/A | ✅ | ✅ | ✅ | 见"说明 1" |
+| W4A-14 `i18n` 原型污染 | ✅ | ✅ | ✅ | ✅ | ✅ | 与已修的 `easing()` 同类，是新实例 |
+| W4A-15 `matchmaking` P2 | ✅ | ✅ | ✅ | ✅ | ✅ | 见"说明 2"（非公开 API，无 breaking） |
 
-"—" = 无交付物可判，不是"不通过"。
-五条标准待 W4-A 交付后由本窗口或总审补判。
+### 小问题 1 · W4A-02 有一条用例命名与性质不符
+
+`run_phase10_w4a.ts:166`「对照：interval = 0 / 负数 / 非数字都仍被拒」——
+它标的是"对照"，但**修复前会失败**：
+
+```
+✗ 对照：interval = 0 / 负数 / 非数字都仍被拒（不是只挡了 NaN）
+    : interval=x 应抛错： 期望抛出异常，但没有
+```
+
+原因是它测的第三项 `interval: 'x'`（字符串）在原代码里 `'x' <= 0` 为 false → 不抛错，
+新代码 `!(opts.interval > 0)` 才拦得住。
+
+**这条用例本身是对的**（它拦住的是真实加固项），只是"对照"这个名字容易让人
+误以为它修复前后都该通过。建议在用例名或注释里点明"含非数字类型的加固"。
+
+### 说明 1 · W4A-13 只有对照用例，没有回归用例 —— 这是对的
+
+删 `_findTransition` 的冗余首循环是**行为不变**的清理，
+按定义不可能存在"修复前失败"的断言。W4-A 配了两条对照固化行为不变
+（转换判定结果不变、`when()` 不再被多求值一次），方向正确。
+标准 2 对这一条不适用（N/A），不算缺漏。
+
+### 说明 2 · W4A-15 移除未使用参数不是 breaking
+
+`packResult` / `fixRoles` 都是 `TeamBalancer.ts` 的**模块内函数**（未 `export`），
+不是公开 API。已确认 `matchmaking/TeamBalancer.ts` 的导出面只有
+`balanceTeams` / `splitIntoTwoTeams` / `validateTeamAssignment` 等，
+移除这两个内部函数的未使用参数对下游无影响。
+
+### 需留意 1 · W4A-08 的 `has()` 语义变更（方向正确，但需知道代价）
+
+`has()` 从"只查当前语言的 key 本身"改成"与 `t()` 同一条查找路径（含回退语言与复数变体）"。
+**这个改法是对的**，修掉了"明明翻得出来却走未翻译分支"的假阴性。
+
+代价：`has()` 不再能用来判断"**当前语言包是否缺这条**"。
+有 fallback 时它恒为 true，本地化验收中"这份 en-US 还差几条"这类用法会失效。
+
+W4-A 已在 `i18n/README.md:70/96` 写明新口径，我认为**说明到位，无需返工**。
+但如果总审知道有下游在用 `has()` 做覆盖率自检，需要另行提供
+"只查当前语言"的查询入口——**提请注意，不阻塞本条验收**。
 
 ---
 
-## 附一：9 条 P1 的独立复现（只读脚本，未改动任何代码）
+## 二、标准 2 的验证方法（测试是否真的会失败）
 
-脚本 `/tmp/w4a_check.js`，调用各单元**公开 API**，跑的是本次构建产物。
-每条都带一组"正常输入"对照，用来确认现象不是我的调用姿势问题。
+不采用"改回旧代码跑一遍"的方式（会损坏 `.build/`）。改法：
+
+1. 取 W4-A 的父提交 `d2801644`（它的开工基线）完整 tarball → `/data/workspace/w4a_before`
+2. 只把 W4-A 的 `tests/run_phase10_w4a.ts` 拷进去
+3. 编译到**独立目录** `/tmp/w4a_bb`，不碰任何 `.build/`
+4. 跑同一份测试
 
 ```
-A1 自定义 ShapeFn 产出 3 speed= [0,0,0]          ← 缺陷成立
-A1 对照 Shapes.ring 产出 3 speed= [10,10,10]
-
-A2 interval=NaN 构造 → no-throw                   ← 缺陷成立（校验没拦住）
-A2 interval=NaN 跑 600 帧产出 0                   ← 永远不开火
-A2 对照 interval=0.1 跑 600 帧产出 9
-
-A3 count=NaN  → throw: [guard] spec.count 必须是有限数值，实际 NaN     ← 已修
-A3 count=null → throw: [guard] spec.count 必须是有限数值，实际 null    ← 已修
-A3 对照 count=8 → 8 个角度
-
-A4 onSpawn 触发序列 ["A","C"]                     ← 缺陷成立（B 从未执行）
-A4 onDeath 触发序列 ["D"]                         ← 缺陷成立（E 被跳过）
-
-A5 非遍历中 destroy(999999) → false
-A5 遍历中   destroy(999999) → true                ← 缺陷成立（同一 id 两种答案）
-
-A6 historyLimit=32（默认）跑 200 次切换 → 32      ← 正常
-A6 historyLimit=1 → 401                           ← 缺陷成立（每次 +2）
-A6 historyLimit=0 → 201                           ← 缺陷成立（每次 +1）
-
-A7 两个订阅者触发次数 0 1                          ← 缺陷成立（第一个被顶掉）
-
-A8 has("ui.start")= false   t("ui.start")= 开始    ← 缺陷成立（假阴性）
-A8 has("item")= false       t("item",{n:3})= 3 items
-
-A9 coverage("ru")= {"total":1,"translated":1,"missing":[]}   ← 报 100%
-A9 t("item",{n:3})= 3 个                                     ← 实际回落中文，缺陷成立
+通过 41 项，失败 30 项
 ```
 
-**8 条仍存在，1 条（A3）在 HEAD 上已修。**
+**30 条失败全部是 ⚠️ 回归用例；41 条对照用例修复前后都通过。**
+（上面"小问题 1"那条是唯一的例外，且它拦的是真实加固项。）
 
-### 关于 A3 的提示
+放到当前 `main` 上：
 
-`compileShape` 现在走的是 `Math.max(1, needCount(spec.count, 'spec.count'))`，
-NaN / null 都会抛错。任务书 W4-A-03 描述的"NaN 变 0 发、null 变 1 发"已不复现。
+```
+W4-A + W4-B 独立跑：通过 142 项，失败 0 项
+```
 
-W4-A 开工时应当把这条判为**"不成立（附证据）"并贴出上面的输出**，
-而不是照着旧报告再改一遍——否则会把"抛错"改回"静默兜底"，方向正好相反。
-这也符合任务书第 1.2 节"按证据判断，不按注释/文档判断"的口径。
+结论：**没有空转用例，也没有把合法输入一起拦掉的矫枉过正。**
+
+## 三、标准 1 的独立复核
+
+上一轮我在自己开工的基线 `7c425d8` 上跑过 W4-A 全部 9 条 P1 的只读复现脚本，
+结果与 W4-A 报告的"复现输出（修复前）"列**逐条吻合**：
+
+```
+A1 自定义 ShapeFn speed= [0,0,0]      对照 ring → [10,10,10]      ✓ 与报告一致
+A2 interval=NaN 构造 → no-throw；600 帧产出 0；对照 → 9          ✓ 与报告一致
+A3 count=NaN/null → 抛 TypeError                                 ✓ 与报告"不成立"一致
+A4 onSpawn 序列 ["A","C"]（B 未执行）；onDeath ["D"]（E 被吞）    ✓ 现象一致
+A5 destroy(999999)：非遍历 false / 遍历 true                     ✓ 与报告一致
+A6 historyLimit 32→32 / 1→401 / 0→201                           ✓ 与报告一致
+A7 两个订阅者触发 0 / 1                                          ✓ 与报告一致
+A8 has('ui.start')=false 但 t()='开始'                           ✓ 与报告一致
+A9 coverage 报 100%，t('item',{n:3}) 回落中文                    ✓ 与报告一致
+```
+
+标准 1 通过：报告里的数字是 W4-A 自己跑出来的，不是抄原报告的证据。
 
 ---
 
-## 附二：给 W4-A 的两条提醒
+## 四、全库级问题（需总审处理，非 W4-A 的锅）
 
-1. **`interval` 那条改守卫时要保留 `Infinity` 的语义**：`!(opts.interval > 0)` 能同时挡
-   NaN / 0 / 负 / 非数字，但请确认没有合法用法依赖"interval 为 Infinity"（= 永不开火）。
-   复核时我没找到这种用法，但 W4-A 改动前建议先确认。
-2. **`i18n` 的复数形式**：任务书给了两个方向（收窄 `_hasAnyForm` / 补齐 `_pluralKeyOf`）。
-   源码注释明确写了"不用完整 CLDR 是避免过度设计"——**这是有注释支持的既有设计**。
-   若选"补齐六形式"属于改变既有设计决策，按第 8 节应标"需总审裁决"，不要自己拍板。
+### ⚠️ `_kitmeta.json` 存在并发覆盖，各窗口的 `depends` 登记互相冲掉
+
+当前 `main` 上 `node scripts/check-deps.js` 报 5 条未登记：
+
+```
+i18n        → _core      （W4-A 引入，未登记 / 被覆盖）
+rebind      → _core      （W4-B 引入，我提交时已 --fix 登记，现被覆盖回 []）
+curse       → _core      （其他窗口）
+achievement → _core      （其他窗口）
+（+1 条，见脚本完整输出）
+```
+
+已确认这些 import 都是真实存在的（`i18n/I18N.ts:47` `isSafeKey`、
+`rebind/Rebind.ts:30` `hasOwn` 等）。
+
+**根因**：16 个窗口并行提交，每个都整份写回 `_kitmeta.json`，后提交的覆盖先提交的。
+我（W4-B）在 `c8c1c0f` 里已把 `rebind.depends` 改成 `["_core"]`，
+但被后续窗口的提交覆盖回了 `[]` —— 这类冲突还会反复发生。
+
+**建议总审**：全部窗口交付完成后，**统一跑一次 `node scripts/check-deps.js --fix`**，
+不要指望各窗口各自登记。这不需要任何人返工。
+
+### check-links 的 1 处断链
+
+当前报在 `audit/verify_W3-B.md`（我上一轮提交时是 `audit/handoff_W3-B.md`，
+说明 W3-B 期间又推进过）。W4-A 报告判断这是 `check-links.js` 的**误报**
+——脚本把代码块里形如 `](` 的内容当成了 markdown 链接。
+
+我认同这个判断：**该文件未变，而报的位置在变**，符合"误报随内容扫描位置漂移"的特征。
+建议按 W4-A 的建议让 `check-links.js` 跳过反引号内的内容，
+否则 16 个窗口交付期间它会一直红着，反而掩盖真正的断链。**需 W3-B 或总审处理。**
 
 ---
 
-## 附三：本窗口（W4-B）自检结果，供交叉核对
+## 附：全库校验结果（当前 main，HEAD = 81f05b0a）
 
 ```
-node .build/tests/run.js      通过 3695 项，失败 0 项，全部通过 ✓
-node /tmp/run_w4b.js          通过 71 项，失败 0 项，全部通过 ✓（本批新增）
-六项校验脚本                   check-deps / dt-guard / num-guard / random-source / dup-exports 全过
-                              check-links 有 1 处断链，位于 audit/handoff_W3-B.md（非本窗口，需 W3-B 处理）
+./node_modules/typescript/bin/tsc -p tsconfig.json      → exit 0
+node .build/tests/run.js                                 → 通过 3696 项，失败 0 项 ✓
+node -e "…runPhase10W4ATests + runPhase10W4BTests…"      → 通过 142 项，失败 0 项 ✓
+
+node scripts/check-deps.js          → 5 条未登记（见第四节，非 W4-A 独有）
+node scripts/check-links.js         → 断链 1 处（audit/verify_W3-B.md，W4-A 判断为误报）
+python3 scripts/scan-dt-guard.py    → 146 个文件，命中 0 处 ✓
+python3 scripts/scan-num-guard.py   → 命中 0 处 ✓
+python3 scripts/check-random-source.py → [OK] 未发现自建随机源 ✓
+python3 scripts/check-dup-exports.py → [OK] 无待处理的冲突 ✓
 ```
 
-W4-B 的回归用例有效性已用"换回 HEAD 原版源码重跑"验证：
-**36 条回归用例在修复前全部失败，35 条对照用例修复前后都通过**。
-（`review_B.md` 提醒过不要靠改回旧代码跑——那条限制针对的是**损坏 `.build/` 的风险**；
-本次是把原始源码编译到独立的 `/tmp/prefixbuild`，`.build/` 未被触碰，跑完已当场还原并重建。）
+**验收方未改动 W4-A 的任何代码**（`review_B.md` 第 0 节纪律）。
+本轮只新增/重写 `audit/verify_W4-B.md` 一个文件。
