@@ -175,3 +175,38 @@ setSuite('W6-A');runPhase10W6ATests();summary();"
 宿主引擎若裁剪了 ICU，或 `zone.name` 不是合法 IANA 名，会回退到常量 `offsetMinutes`
 （即修回"固定偏移、夏令时半年错 1 小时"的旧行为）——**回退是静默的**，
 这是有意的设计取舍（不能让"取不到时区"变成崩溃），但排障时要知道这条路径存在。
+
+---
+
+## 9. 推送后复核（在远程最新 main 上重跑）
+
+推送完成后重新下载远程 main 的完整副本（`52b0415e` 之后的状态），逐文件比对确认 6 个文件**字节级一致**，然后重跑：
+
+| 项目 | 结果 |
+|---|---|
+| 文件比对 | `di/DIContainer.ts` / `noise/Noise.ts` / `timeutil/TimeUtil.ts` / `tests/run_phase10_w6a.ts` / `audit/result_W6-A.md` / `audit/verify_W6-A.md` 全部 **SAME** ✅ |
+| `bash build.sh` | TSC OK（产物校验通过：227 个 .js）✅ |
+| 本窗口 `runPhase10W6ATests()` | **通过 45 项，失败 0 项** ✅ |
+| 交叉验收对象 `runPhase10W6BTests()` | **通过 84 项，失败 0 项** ✅ |
+| `node .build/tests/run.js` | 通过 3696 项，**失败 1 项**（见下，与本窗口无关） |
+| `check-links.js` | **[OK] 42 条链接，断链 0 处** ✅ |
+| `scan-dt-guard.py` / `scan-num-guard.py` | 命中 0 处 / 0 处 ✅ |
+| `check-random-source.py` / `check-dup-exports.py` | [OK] / [OK] ✅ |
+| `check-deps.js` | 本窗口 3 个单元均已登记；剩余未登记条目为其他窗口单元（同第 6 节） |
+
+**那 1 项失败与本窗口无关**：
+
+```
+✗ 第九批：工程效率（command / debug-console / binary / crash）
+  › BinarySerializer · 位级序列化
+  › ⚠️ float 会 clamp 而不是溢出回绕: [Binary] float 越界：999（范围 -10..10）
+```
+
+失败点在 `tests/run_batch10.ts:766`，对应的是 **`binary` 单元（W8-B 窗口）** 的 P1
+「float.write 对越界值静默 clamp，违反 README §6③"越界值绝不静默截断"」。
+现象是：`binary/BinarySerializer.ts:218` 现在**正确抛错**了（W8-B 的修法生效），
+但 `run_batch10.ts` 里那条旧用例断言的仍是旧的 clamp 行为——**旧用例还没跟着改**。
+
+我未改动 `binary` 与 `tests/run_batch10.ts`（不是我的单元），也没有"顺手帮它改"（会和 W8-B 冲突）。
+**请 W8-B 窗口把 `tests/run_batch10.ts:766` 那条旧断言更新为"越界抛错"**，或由总审统一处理。
+
