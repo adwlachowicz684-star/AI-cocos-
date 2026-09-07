@@ -134,6 +134,52 @@ write(1)                  → ok，读回 1
 真正越界的都是明确的逻辑错误（写 999 进 0..10 这种）。
 我没有为此加 epsilon 容差——加容差等于"换一种更小的静默"，与 §6③ 的立场矛盾。
 
+---
+
+### 3.2 【回应 W2-B §3.8】`curse` 上的同构洞是 **4 条，不是 2 条**
+
+`audit/result_W2-B.md` §3.8 提请裁决：`curse` 上有两条我在 `blessing` 已修掉的同构洞
+（`pick` 的 NaN 权重、`importState` 不触发 `onChange`），并建议由 W2-B 补修。
+
+**我支持由 W2-B 补修**（`curse` 是它的单元，且它明确表示会连带补对照用例）。
+但我把 `curse` 与 `blessing` 逐条对了一遍，**实测发现还有 2 条 W2-B 没列出来的同款洞**。
+若只按 §3.8 修 2 条，`curse` 仍会带着另外两条 `blessing` 已没有的 bug 上线——
+正是任务书 §1.2 说的"换个地方重新长出来"。
+
+复核脚本：仓库外 `/data/workspace/repro_curse.js`（只读，**未改动 `curse` 一个字**）。
+
+**W2-B 已报的 2 条（我独立复现，结论一致）**
+
+| 洞 | 实测输出 |
+|---|---|
+| `pick` 的 NaN 权重 | 3 个诅咒、c3 权重 NaN、300 次 → `{"c1":0,"c2":0,"c3":300}`，**永远命中池尾** |
+| `importState` 不触发 onChange | `add(c1)` → `["add:c1"]`；`importState([{c1,4层}])` → 仍 `["add:c1"]`；`importState([])` → 仍 `["add:c1"]` |
+
+**W2-B 未列的 2 条（本次新增）**
+
+| 洞 | 实测输出 | 对应我在 blessing 的修法 |
+|---|---|---|
+| `importState` 的 `stacks` **完全不校验** | `stacks=-3` → 实际 **-3**，`effects` = `-6`；`NaN` → **NaN**（effects 的 value 变 NaN）；`Infinity` → **Infinity**；`2.7` → **2.7**（effects = 5.4） | 我的 P1-8 前半段：`this._stacks.set(id, Math.min(this._safeCount(n), cap))`，非有限→0、负数→0、小数→floor |
+| `set` 效果被层数缩放 | 1 层 → `100`；2 层 → **200**；3 层 → **300**。对照：`add` 2 层 = 6、`mul` 2 层 = 1.44（按层数缩放是对的） | 我的 P1-7（Blessing.ts:313）：`e.op === 'set' ? e.perStack : ...` |
+
+**为什么 W2-B 会漏掉这两条**（推测，供它复核时参考）：
+它对齐的是"我报告里写在 `curse` 可见位置的现象"，
+而 `set` 缩放要看 `CurseOp` 是否含 `'set'`——`curse/Curse.ts:34` 是
+`'add' | 'mul' | 'set'`，`effects()`（L380）只有 `mul` / 其它 两支，
+`set` 落进 `e.value * n`，与我修 `blessing` 前的写法逐字同构。
+`importState`（L439-450）则是 `stacks: e.stacks ?? 1` 一行带过，
+`??` 只挡 `null/undefined`、挡不住 NaN——就是模式 B。
+
+**一条不适用的（别照抄）**：`blessing` 的 P1-6（`remove` 负数变加层 / `add` NaN 污染层数）
+在 `curse` 上**不成立**——`curse` 的 `add(id, now)` 固定 +1 层、`remove(id, force)` 收的是布尔，
+没有数值型层数入口。修的时候不要生搬。
+
+**给 W2-B 补修时的三句提醒**（来自我踩过的坑）：
+1. `importState` 的通知要**幂等**（同一 id 只报一次最终值），否则已经在读档后手动刷 UI 的调用方会重绘多次；
+2. "消失的"要**报一次 0**，否则 UI 图标撤不下来（我在 blessing 上为此单独写了一条用例）；
+3. `set` 与层数无关这点要在 `curse/README.md` 里写明——我在 `blessing/README.md` 补了"三种 op 与层数的关系"表，
+   否则下一个人看到 `effects()` 的写法还是会以为 `set` 该乘层数。
+
 ### 3.2 三条"N/A"（无 destroy）与两条"不成立"的口径
 
 - **A6 / B9 / B13**：三个单元都是纯逻辑，没有 `install`、监听器或定时器，
