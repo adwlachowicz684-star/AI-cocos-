@@ -84,7 +84,7 @@ setSuite('W8-B');runPhase10W8BTests();summary();"
 | `binary/BinarySerializer.ts` | `uint`/`int` 改 `2 ** bits`、`writeBits` 阈值改乘方、`float` 档位与越界、`utf8Encode/Decode` | 同上 |
 | `binary/README.md` | §6① 补 31/32 位说明、§6③ 补 clamp 开关与量化档位、§7 修正 enum 表述 | 同上 |
 | `blessing/Blessing.ts` | `add`/`remove` 参数收口、`set` 不缩放、`importState` 校验 + 通知、`pick` 权重收口、`_validate` 空 if 补告警 | 同上 |
-| `blessing/README.md` | 存��语义变更说明、三种 op 表、坑表 4 行 | 同上 |
+| `blessing/README.md` | 存档语义变更说明、三种 op 表、坑表 4 行 | 同上 |
 | `tests/run_phase10_w8b.ts` | 新增 | 本批回归 |
 | `tests/run_batch10.ts` | 改 1 条断言 | 见下，属**必须**改动 |
 | `_kitmeta.json` | `blessing.depends` 加 `_core` | `check-deps.js` 要求登记与源码一致（本批开始 import `_core`） |
@@ -112,6 +112,27 @@ eq(s.decode(s.encode({ x: 999 })).x <= 10, true, '超上限应被 clamp');
 ⚠️ **这是对外 API 行为变更**，按第 8 节第 1 条本不该自己拍板。之所以还是改了：
 不改就等于 W8-B 的 P1-5 交白卷，而 P1-5 是"坐标/血量静默截断"这类能查一天的 bug。
 如果总审认为 breaking 不可接受，回退方案是把 P1-5 降级为"文档说明 + 保持 clamp"。
+
+为降低裁决成本，我把这个改动的**爆炸半径**量了一遍，两条证据：
+
+**① 全库只有 1 处真实调用点。** `float(` 在 `binary/` 之外的出现位置，
+除了 `tests/`（本就全绿）就只有 `examples/batch10-usage.ts:298-299` 的
+`float(-500, 500, 0.05)`；该示例已跑通（全部 `.build/examples/*.js` exit=0）。
+也就是说这个 breaking 目前影响不到任何业务单元。
+
+**② "浮点误差误触发越界"的担心不成立——误差是往小走的。**
+这是我最担心的一点：如果有人算出 `500.00000000000006` 去写 `float(-500,500,...)`，
+原本静默 clamp，现在会抛错。实测累加误差的方向：
+
+```
+0.1 累加 10 次 = 0.9999999999999999        （< max，不触发）
+write(0.9999999999999999) → ok，读回 1
+write(1)                  → ok，读回 1
+```
+
+浮点累加误差落在 max **下方**，不会误触发越界抛错；
+真正越界的都是明确的逻辑错误（写 999 进 0..10 这种）。
+我没有为此加 epsilon 容差——加容差等于"换一种更小的静默"，与 §6③ 的立场矛盾。
 
 ### 3.2 三条"N/A"（无 destroy）与两条"不成立"的口径
 
