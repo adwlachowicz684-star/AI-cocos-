@@ -61,7 +61,9 @@ expr.variables();        // ['level']
 | 用 `eval` | RCE 风险 | 本实现不支持任何副作用 |
 | 除零产生 NaN | NaN 沿伤害管线传播，最后表现为"打怪没伤害"，要追十几层 | 除零返回 **0** |
 | 未定义变量抛错 | 整张表加载失败 | 默认当 0；要严格用 `evaluateStrict()` |
-| 拼错变量名 | 永远是 0，没有任何报错 | 用 `variables()` 对照检查 |
+| 拼错变量名 | 永远是 0，没有任何报错 | 用 `variables()` 对照检查，或接 `setExpressionWarningHandler()` |
+| 三元分支里写负值 | 早先版本会抛"意外的符号 -"，指向 `-` 的位置，与三元毫无关联 | 现已支持：`hp > 0 ? -dmg : 0` |
+| 把 `toString` / `constructor` 当函数写 | 早先版本会命中 `Object.prototype` 上的同名成员，错误信息完全指错方向 | 查表只认内建自有属性，报"未知函数" |
 | 热重载后公式变了但没重编译 | 改了不生效 | 热重载时要重建 `Expression` 对象 |
 
 ## API
@@ -69,10 +71,43 @@ expr.variables();        // ['level']
 | 成员 | 说明 |
 |---|---|
 | `new Expression(src)` | 编译（**语法错误在此抛出**） |
-| `evaluate(vars?)` | 求值。未定义变量当 0 |
+| `evaluate(vars?)` | 求值。未定义变量当 0（**会告警一次**，见下） |
 | `evaluateStrict(vars?)` | 严格求值，未定义变量抛错 |
 | `variables()` | 列出用到的变量名（**检查配置拼写**） |
 | `source` | 原始表达式 |
+| `setExpressionWarningHandler(h)` | 接告警出口（`h = null` 卸载） |
+
+### 除零与取模零：返回 0（**已知取舍，不是 bug**）
+
+```
+10 / 0   → 0
+10 % 0   → 0
+a / b    → b 为 0 时得到 0
+```
+
+`Infinity` / `NaN` 会沿伤害管线传播，最后表现为"打怪没伤害"，
+要顺着管线追十几层才能找到源头；返回 0 至少是**可预测的**
+（通常表现为"这条公式没生效"，一眼能看出来）。
+需要严格检查时用 `evaluateStrict()` + 业务侧显式校验分母。
+
+### 非 strict 模式下的静默降级：会留痕
+
+`evaluate()` 是宽松入口：未定义变量、`null`、`[]` 一律当 0。
+这是刻意的（配置里常常引用"现在还没设置"的变量），
+但"拼错变量名"和"确实填了 0"在返回值上完全无法区分。
+
+所以宽松归宽松，**留一条痕**：
+
+```typescript
+setExpressionWarningHandler((m) => logger.warn(m));   // 接上宿主 Logger
+setExpressionWarningHandler(null);                    // 卸载
+
+new Expression('critRate + 0.1').evaluate({});        // 0.1，并告警一次：未定义的变量 critRate
+```
+
+- 默认**静默**（不装 handler 就什么都不做）——表达式每帧求值，默认打印会刷屏
+- 每个表达式、每个键**只报一次**，不重复刷
+- 返回值仍然是 0（改成抛错会让既有配置全线加载失败）
 
 ## 典型场景
 

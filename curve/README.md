@@ -72,21 +72,25 @@ interface Keyframe { readonly time: number; readonly value: number }
 | 关键帧乱序 | 求值错误 | 构造时自动排序 |
 | 直接改共享曲线的关键帧 | 所有引用它的地方都变了 | 用 `clone()` |
 | 想用 `easeOutQuad` 这类名字 | 不存在（那是 Easing 的概念） | Curve 用关键帧定义形状 |
+| 时间算成 `NaN`（如 `t/duration` 除零） | `evaluate` 返回 NaN，一个 NaN 帧污染后续所有帧 | 入口挡掉 NaN，按"时间未定义"返回起点值 |
+| 空曲线上取 `minValue` / `maxValue` | 归一化 `(v-min)/(max-min)` 得 `0/0 = NaN` | 空曲线返回 0（不是 ∓Infinity） |
+| `integrate(samples)` 传 `Infinity` / `0` | 前者死循环卡死主线程，后者静默返回 0 | 直接抛错（不静默改参数） |
 
 ## API
 
 | 成员 | 说明 |
 |---|---|
 | `addKey(time, value)` | 添加关键帧（自动排序） |
-| `evaluate(time, mode?)` | 求值（超范围 clamp） |
+| `evaluate(time, mode?)` | 求值（超范围 clamp；**`time` 为 NaN 时返回起点值**） |
 | `evaluateNormalized(u, mode?)` | 按 0–1 求值 |
-| `integrate(samples?, mode?)` | 曲线下积分（算总位移） |
+| `integrate(samples?, mode?)` | 曲线下积分（算总位移；**`samples` 为 0 / 非有限数时抛错**） |
 | `duration` / `startTime` / `endTime` | 时间范围 |
-| `minValue` / `maxValue` | 值域 |
+| `minValue` / `maxValue` | 值域（**空曲线返回 0**） |
 | `clone()` | 克隆（避免污染模板） |
 | `keyCount` | 关键帧数量 |
+| `destroyed` | 是否已释放 |
 | `toKeyframes()` | 导出关键帧数组（**存档 / 可视化编辑器**用） |
-| `destroy()` | 释放（**之后不能再 evaluate**） |
+| `destroy()` | 释放（**之后再 evaluate 会抛错**） |
 
 > ⚠️ **`toKeyframes()` 与构造时的关键帧数组不一定相同。**
 > 它返回的是**排序后**的内部数组——
@@ -94,10 +98,17 @@ interface Keyframe { readonly time: number; readonly value: number }
 > 拿它做存档是安全的（已排序），
 > 但拿它和原始配置做 diff 会得到一堆假差异。
 
-> ⚠️ **`destroy()` 之后不能再 `evaluate()`。**
+> ⚠️ **`destroy()` 之后不能再 `evaluate()`——会抛错。**
 > 换场景时如果只丢引用不 `destroy()`，
 > 曲线数据还占着内存——对少量曲线无所谓，
 > 但"每个敌人一条曲线"这种用法下会累积。
+>
+> 【为什么是抛错而不是返回 0】
+> 以前 destroy 只清空关键帧，`evaluate()` 走"空曲线返回 0"分支静默返回 0，
+> 而 0 是一个完全合法的输出值——没有任何东西能区分
+> "曲线本来就是 0" 和 "曲线已经被释放了"。
+> 抛错把"用了已释放的曲线"这件事钉在调用点。
+> 想复用请重新构造，或提前 `clone()` 一份。
 
 > **`keyCount` 为 0 时 `evaluate()` 返回什么由实现决定，别依赖。**
 > 空曲线是无效状态，构造时应至少给一个关键帧。
