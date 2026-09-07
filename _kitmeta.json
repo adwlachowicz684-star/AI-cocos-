@@ -1050,7 +1050,9 @@
       "path": "curse/Curse.ts",
       "maturity": "beta",
       "purpose": "诅咒：增益+代价触发时机+移除条件，canRemove/remove 一致",
-      "depends": [],
+      "depends": [
+        "_core"
+      ],
       "hasTest": true,
       "hasDemo": true,
       "domain": "内容与掉落",
