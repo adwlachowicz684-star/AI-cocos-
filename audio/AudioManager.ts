@@ -29,7 +29,7 @@
  * 那些只是分类名（字符串），由调用方定义。
  */
 
-import { clamp } from '../_core/math';
+import { clamp, clampNum } from '../_core/math';
 
 // ==================== 类型 ====================
 
@@ -167,7 +167,32 @@ export class AudioManager {
   private _evicted = 0;
 
   constructor(cfg: AudioManagerConfig = {}) {
-    this._maxVoices = cfg.maxVoices ?? 32;
+    /**
+     * 【⚠️ 容量类字段必须用 clampNum 收口，不能用裸 `??`】
+     *
+     * `??` 只挡 null/undefined，挡不住 NaN。
+     * 而 `if (this._active.size >= this._maxVoices)` 在 NaN 时恒为 false
+     * → **"通道已满 → 抢占/拒绝"这条保护路径永不进入**。
+     *
+     * 实测（修复前）：`{maxVoices: NaN}` 时播 500 个不同音效，
+     * 活跃数 = **500**（上限完全失效）。
+     * 对照 `{maxVoices: 32}` → 活跃数 32，正常。
+     *
+     * 后果是内存/句柄泄漏：`_active` Map 只增不减，
+     * 引擎侧音频通道被打爆，表现为"声音逐渐失真/卡顿，内存持续上涨"，
+     * 而 `describe()` 打印的是 `活跃 500/NaN`，需要仔细看才发现。
+     */
+    /**
+     * 【⚠️ 下界必须是 0，不能是 1】
+     *
+     * 第一版我写成 `clampNum(cfg.maxVoices, 1, 512, 32)`，
+     * 把 `maxVoices: 0` 也夹成了 1——结果"静音配置"变成"允许 1 个音效"，
+     * 既有测试 `new AudioManager({maxVoices: 0})` 期望 `rejected > 0` 立刻变红。
+     *
+     * `0` 是**有意义的配置**（完全静音），不是非法值。
+     * 这里要拦的只有 NaN（以及离谱的大值），不该顺手重定义合法语义。
+     */
+    this._maxVoices = clampNum(cfg.maxVoices, 0, 512, 32);
     this._maxSamePerFrame = cfg.maxSameSoundPerFrame ?? 3;
     this._accumulate = cfg.accumulateOnDedupe ?? false;
     this._master = clamp(cfg.masterVolume ?? 1, 0, 1);
