@@ -42,6 +42,27 @@
  *    ├── collision:   1234                              (number)
  *    └── perception / attack-token / targeting: 直接复用实体 id
  * ```
+ *
+ * 【使用示例】
+ * ```typescript
+ * const reg = new EntityRegistry<{ hp: number }>();
+ *
+ * const id = reg.spawn({ hp: 30 }, { tags: ['enemy'] });
+ * reg.isAlive(id);          // true
+ * reg.query('enemy');       // [id]  按标签查活着的
+ *
+ * // ⚠️ id 会被复用，但代际号递增——旧 id 不会指向新实体
+ * reg.kill(id, 'killed');   // 标记死亡（仍可 get 查死因）
+ * reg.destroy(id);         // 释放槽位
+ * const id2 = reg.spawn({ hp: 10 });
+ * reg.isAlive(id);         // false —— 旧 id 不会"复活"成新实体
+ * ```
+ *
+ * 【⚠️ SLOT_CAPACITY 是 id 编码模数，不是数量上限】
+ * `SLOT_CAPACITY = 1048576`（2^20），id 由 `index + generation * SLOT_CAPACITY` 拼成。
+ * 它约束的是"槽位下标能有多大"，**spawn 本身没有数量检查**——
+ * 槽位超过 2^20 时不会抛错，而是 index 进位污染 generation 位，导致 id 碰撞。
+ * 真要达到这个量级前，内存早就先撑不住了，所以这里刻意不做检查。
  */
 
 // ==================== 常量 ====================
