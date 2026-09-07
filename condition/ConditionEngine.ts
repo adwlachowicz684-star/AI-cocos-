@@ -157,19 +157,63 @@ export class ConditionEngine {
 
   /** 单个条件的进度（用于 UI） */
   private _progressOf(c: Condition, actual: number): number {
-    if (c.value === 0) return actual === 0 ? 1 : 1;
+    /**
+     * 【⚠️ 零值条件：直接按"是否满足"给 0/1，不能返回常量 1】
+     *
+     * 原实现 `return actual === 0 ? 1 : 1;` —— 两个分支返回同一个值，
+     * 是**写了一半的三元**。于是所有 `value === 0` 的条件
+     * （`x < 0`、`x != 0`、`x >= 0`）无论满足与否进度都是 1。
+     *
+     * 实测（修复前）：`{op:'<', value:0}`、actual=5（**不满足**）→ progress = **1**，
+     * 而 `completed` 是 false —— 进度条显示 100% 却判定未完成。
+     *
+     * 【为什么是 0/1 而不是渐进值】
+     * 阈值为 0 时不存在"走了多少比例"的中间态
+     * （`actual / 0` 是 Infinity 或 NaN），
+     * 所以退化为"满足即 1，不满足即 0"是唯一自洽的选择。
+     */
+    if (c.value === 0) return this._compare(actual, c.op, 0) ? 1 : 0;
+
     const p = actual / c.value;
     switch (c.op) {
       case '>':
       case '>=':
         return Math.min(1, Math.max(0, p));
+
       case '<':
       case '<=':
-        // "小于 5" 的进度：值越小越接近完成
-        return actual <= c.value ? 1 : Math.max(0, 1 - (actual - c.value) / Math.max(1, c.value));
+        /**
+         * 【反向条件：值越**低**越满足，进度越高】
+         *
+         * "血量低于 30%"：血量 10% → 满进度；血量 100% → 0。
+         * 实测确认这个方向是**正确的**，与 `>=` 相反是它的本意，不是 bug。
+         * （有报告建议反转它，按那个改会让"残血任务"的进度条倒着走。）
+         *
+         * 【为什么分母用 Math.abs】
+         * 原实现 `Math.max(1, c.value)` 对**负阈值**是错的：
+         * `value = -10` 时 `Math.max(1, -10) = 1`，
+         * 于是 `1 - (actual + 10) / 1` 会瞬间掉到 0，失去渐进。
+         * 用 `Math.abs` 后按阈值自身的量级归一化，正负压阈都合理。
+         */
+        return actual <= c.value
+          ? 1
+          : Math.max(0, 1 - (actual - c.value) / Math.max(1, Math.abs(c.value)));
+
       case '==':
-      case '!=':
         return actual === c.value ? 1 : 0;
+
+      case '!=':
+        /**
+         * 【⚠️ 必须与 `==` 相反】
+         * 原实现两个分支共用 `actual === c.value ? 1 : 0`，
+         * 于是 `!=` 的进度被算成了 `==` 的进度。
+         *
+         * 实测（修复前）：`{op:'!=', value:0}` 在 actual=0（不满足）和
+         * actual=5（满足）两种情况下 progress 都是 **1**
+         * —— 进度条完全不携带信息，玩家无法判断还差多少。
+         */
+        return actual !== c.value ? 1 : 0;
+
       default:
         return 0;
     }
