@@ -488,7 +488,12 @@ export class Raycasting {
 
     this.visible.clear();
 
-    if (ox < 0 || oy < 0 || ox >= this._w || oy >= this._h) return 0;
+    /**
+     * 【同样改用取反形式】
+     * `ox < 0 || oy < 0 || ...` 对 NaN 恒为 false，会让 NaN 起点继续往下走，
+     * 最终把 NaN 传进 `_castRay`。取反形式天然拦住 NaN。
+     */
+    if (!this._inBounds(ox, oy)) return 0;
 
     this.visible.mark(ox, oy);
 
@@ -510,6 +515,23 @@ export class Raycasting {
   }
 
   private _castRay(x0: number, y0: number, x1: number, y1: number): void {
+    /**
+     * 【⚠️ 入口必须挡住非有限坐标，否则 `for(;;)` 永不退出】
+     *
+     * 原实现的越界检查是 `x < 0 || y < 0 || x >= w || y >= h`——
+     * **NaN 参与比较恒为 false**，拦不住；
+     * 步进条件 `e2 > -dy` / `e2 < dx` 在 `e2 = NaN` 时同样恒 false
+     * → `x`/`y` 永不前进 → 死循环。
+     *
+     * 实测（修复前）：`compute(NaN, NaN, 4)` → **主线程冻死**，
+     * 5 秒超时被杀（退出码 124）。正常 `compute(5,5,4)` 返回 17 格。
+     *
+     * 起点坐标算成 NaN 的现实来源：目标被销毁后 `atan2`、`Math.hypot` 除零等。
+     * 一次射线投射就能冻死主线程，**无异常、无日志**，表现只是"游戏卡住"。
+     */
+    if (!Number.isFinite(x0) || !Number.isFinite(y0)) return;
+    if (!Number.isFinite(x1) || !Number.isFinite(y1)) return;
+
     let dx = Math.abs(x1 - x0);
     let dy = Math.abs(y1 - y0);
     const sx = x0 < x1 ? 1 : -1;
@@ -519,8 +541,25 @@ export class Raycasting {
     let x = x0;
     let y = y0;
 
+    /**
+     * 【迭代上限：最后一道防线】
+     * Bresenham 正常最多走 `dx + dy + 1` 步。
+     * 这里放宽到 `2 * (w + h) + 8`，既能覆盖所有合法射线，
+     * 又保证即使上面某一处守卫被改坏，也只会"少画一格"而不是冻死主线程。
+     * 卡死是这类可视算法最坏的失败模式——它连日志都留不下。
+     */
+    const maxSteps = 2 * (this._w + this._h) + 8;
+    let steps = 0;
+
     for (;;) {
-      if (x < 0 || y < 0 || x >= this._w || y >= this._h) return;
+      /**
+       * 【为什么用取反而不用四个比较】
+       * `!_inBounds(x, y)` 对 NaN 返回 **true**（因为 `_inBounds` 内部
+       * 的 `x >= 0` 对 NaN 为 false，整体为 false，取反为 true）——
+       * 取反形式天然覆盖 NaN，四个比较的形式则天然漏掉 NaN。
+       */
+      if (!this._inBounds(x, y)) return;
+      if (++steps > maxSteps) return;
 
       this.visible.mark(x, y);
       if (this._isWall(x, y)) return;   // 墙可见，但后面挡住
@@ -537,6 +576,11 @@ export class Raycasting {
         y += sy;
       }
     }
+  }
+
+  /** 坐标是否在地图内（NaN 会被判为不在内） */
+  private _inBounds(x: number, y: number): boolean {
+    return x >= 0 && y >= 0 && x < this._w && y < this._h;
   }
 
   canSee(x: number, y: number): boolean {
