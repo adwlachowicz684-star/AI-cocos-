@@ -27,6 +27,25 @@
  * 也天然可测试。
  *
  * 【零业务依赖】
+ *
+ * 【使用示例】
+ * ```typescript
+ * // 从 SRT 文本解析（也支持手工构造 lines）
+ * const track = new SubtitleTrack({ lines: parseSRT(srtText) });
+ *
+ * // 每帧按播放时间查询当前该显示哪些行（单位：毫秒）
+ * for (const a of track.at(playTimeMs)) {
+ *   showText(a.line.text, a.speakerLabel);
+ * }
+ *
+ * track.speakersAt(playTimeMs);  // 当前正在说话的人（可用于分屏高亮）
+ * ```
+ *
+ * 【⚠️ 时间单位统一是毫秒】
+ * `SubtitleLine.start` / `.end`、`at()` / `speakersAt()` 的入参**都是毫秒**，
+ * `parseSRT` 也不做换算（SRT 里的 `00:00:01,000` 解析成 `1000`）。
+ * 实测：`parseSRT` 得 `{start:1000,end:3000}`，`at(1)` 命中 0 条而 `at(1000)` 命中 1 条。
+ * 若按秒传，字幕将**永远不显示且不报错**——半开区间 `[start, end)` 匹配不上任何行。
  */
 
 // ==================== 类型 ====================
