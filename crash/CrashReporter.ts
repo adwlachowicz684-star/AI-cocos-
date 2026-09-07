@@ -182,6 +182,24 @@ export class CrashReporter {
   private _minLogLevel = DEFAULT_MIN_LOG_LEVEL;
   private _installed = false;
   private _prevHandler: unknown = null;
+  /**
+   * `unhandledrejection` 的监听器引用
+   *
+   * 【⚠️ 必须保存引用，否则 uninstall 无法移除它】
+   * 原实现注册的是**匿名箭头函数**，引用没保存，
+   * `uninstall()` 里 `removeEventListener` **完全没被调用**。
+   *
+   * 后果：
+   * 1. 卸载后监听器仍挂在全局，继续给一个"已关闭"的 reporter 上报；
+   *    `this` 被闭包持有 → reporter 及其 `_ring` / `_seen` / `_context` 全部无法回收
+   * 2. `install → uninstall → install` 每循环一次**叠加**一个监听器，
+   *    重复上报、重复采样
+   * 3. 热更新 / 场景切换时销毁旧 reporter 建新的，旧的永远活着
+   *
+   * 这是铁律 5「可卸载」的直接违反，且是最难查的那种泄漏——
+   * 对象看似被释放，实际被全局事件总线吊着。
+   */
+  private _rejectionHandler: ((e: unknown) => void) | null = null;
 
   constructor(opts: CrashReporterOptions = {}) {
     this._ring = new BreadcrumbRing(clampNum(opts.breadcrumbLimit, 1, 1e6, 30));
@@ -356,6 +374,7 @@ export class CrashReporter {
     const g = globalThis as unknown as {
       onerror?: unknown;
       addEventListener?: (t: string, f: (e: unknown) => void) => void;
+      removeEventListener?: (t: string, f: (e: unknown) => void) => void;
     };
 
     // 浏览器 / 小游戏环境
@@ -372,10 +391,22 @@ export class CrashReporter {
 
     // Promise 未捕获异常
     if (typeof g.addEventListener === 'function') {
-      g.addEventListener('unhandledrejection', (e: unknown) => {
+      /**
+       * 【为什么先移除再注册】
+       * 极端情况下 install 可能被连续调用（`_installed` 守卫之外的路径），
+       * 先移除能避免叠加。正常路径下此时 `_rejectionHandler` 为 null，无副作用。
+       */
+      const prev = this._rejectionHandler;
+      if (prev && typeof g.removeEventListener === 'function') {
+        g.removeEventListener('unhandledrejection', prev);
+        this._rejectionHandler = null;
+      }
+      const handler = (e: unknown): void => {
         const reason = (e as { reason?: unknown }).reason;
         this.capture(reason ?? new Error('unhandledrejection'), 'fatal');
-      });
+      };
+      this._rejectionHandler = handler;
+      g.addEventListener('unhandledrejection', handler);
     }
 
     this._installed = true;
@@ -385,7 +416,21 @@ export class CrashReporter {
   uninstall(): void {
     if (!this._installed) return;
     if (typeof globalThis === 'undefined') return;
-    const g = globalThis as unknown as { onerror?: unknown };
+    const g = globalThis as unknown as {
+      onerror?: unknown;
+      removeEventListener?: (t: string, f: (e: unknown) => void) => void;
+    };
+
+    /**
+     * 【⚠️ 必须移除 unhandledrejection，不能只恢复 onerror】
+     * 原实现只做了 `g.onerror = this._prevHandler` 一件事，
+     * 监听器被永久留在全局。详见 `_rejectionHandler` 的注释。
+     */
+    if (typeof g.removeEventListener === 'function' && this._rejectionHandler) {
+      g.removeEventListener('unhandledrejection', this._rejectionHandler);
+    }
+    this._rejectionHandler = null;
+
     g.onerror = this._prevHandler as never;
     this._prevHandler = null;
     this._installed = false;
