@@ -90,6 +90,7 @@ const p = computePerformance({
 | `ddaValue` | 当前 DDA 调节量（**调试用**：一直是 0 说明没生效） |
 | `smoothedPerformance` | 平滑后的玩家表现 |
 | `allMultipliers()` | **全部**倍率（做难度详情页） |
+| `destroy()` | 卸载：清掉 `onAdjust` 回调并复位 DDA（**不动**难度档配置） |
 
 ```typescript
 // 难度详情页：一次列出全部倍率
@@ -97,6 +98,11 @@ for (const [k, v] of Object.entries(diff.allMultipliers())) {
   rows.push(`${k}: ×${v.toFixed(2)}`);
 }
 ```
+
+> ⚠️ **`currencyGain` 的方向存疑，已上报总审裁决（行为未改）。**
+> 它在 `PLAYER_FAVORING` 集合里，意味着"玩家表现好 → 金币收益下降"。
+> 可能是有意的防刷设计，也可能是照抄 `playerDamage` 时误放。
+> 在裁决前请**按现状理解**：想绕开这个方向读 `baseMultiplier('currencyGain')`。
 
 > ⚠️ **判断"DDA 有没有生效"看 `ddaValue`，不要自己算。**
 > DDA 是**平滑后**再叠加的（`smoothedPerformance` → `ddaValue`），

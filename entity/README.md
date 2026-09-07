@@ -110,6 +110,13 @@ reg.queryAll(['enemy', 'boss']);
 
 **槽位 0 保留给 `INVALID_ID`**，所以 `idIndex` 恒 > 0 —— `isValidId` 正是靠这一点区分"合法 id"与"非法 id"。
 
+> **⚠️ 槽位是复用的，"spawn 次数"不等于"槽位数"**
+> 曾有审查意见认为"spawn 无上限 → 超过 1048576 后 `idIndex === 0` → 实体静默查不到"。
+> 实测：**20 万次 `spawn` + `destroy` 之后占用槽位仍是 0**
+> ——`destroy` 会把槽位压回 `_free` 空闲栈，下次 `spawn` 直接复用。
+> 要撞到那个上界需要**同时存活**超过 100 万个实体，
+> 而在那之前内存早就先撑不住了。所以这里刻意不做检查（与文件头的设计说明一致）。
+
 ### ② kill 与 destroy 分离
 
 | 方法 | 做什么 | 何时用 |
@@ -183,6 +190,7 @@ reg.forEach((rec) => {
 |---|---|
 | `kill(id, reason?)` | 标记死亡，触发 `onDeath` |
 | `destroy(id)` | 真正移除 |
+| `destroy()` | **无参重载**：等价于 `clear()`，给只认 `destroy` 名字的清理代码用 |
 | `clear()` | 清空（换关卡） |
 | `onDeath` / `onSpawn` / `onDestroy` | 回调，均返回取消函数 |
 

@@ -76,6 +76,32 @@ seq.tick(dt, (step) => {
 Shapes.triple('bullet', [5, 8, 12])   // 第 n 颗取 speeds[n % len]
 ```
 
+> ⚠️ **但 `shape` 传函数（`ShapeFn`）时必须额外给 `EmitterOptions.speed`。**
+>
+> `ShapeFn` 只返回角度偏移数组，没有 `ShapeSpec`，拿不到 `speed`，
+> 此时 `BulletSpawn.speed` 一律取 `opts.speed`，**缺省是 0**：
+>
+> ```typescript
+> // ✗ 打出的子弹全部原地不动（speed 全是 0）
+> bp.addEmitter({ id: 'boss', shape: () => [0, 1, 2], interval: 0.1 });
+>
+> // ✓ 显式给速度
+> bp.addEmitter({ id: 'boss', shape: () => [0, 1, 2], interval: 0.1, speed: 8 });
+> ```
+>
+> 缺省 0 而不是报错，是为了兼容"只想要角度、速度由业务另算"的用法。
+> 如果你的弹幕突然**堆在发射点不动**，先查这里。
+
+### `aimAtTarget: false` 就是固定角度
+
+`aimAtTarget: false` 时**不再自动瞄准目标**，角度取 `fixedAngle`（缺省 `0`，即 +X 方向）。
+此前必须同时传 `fixedAngle` 才生效，否则仍然自动瞄准——与字段文档相反。
+
+```typescript
+bp.addEmitter({ id: 'laser', shape: ..., interval: 2,
+                aimAtTarget: false, fixedAngle: Math.PI / 2 });  // 固定朝上
+```
+
 ### `delay` 的精确语义
 
 **第一发出现在 `delay + interval` 时刻。**
@@ -97,6 +123,15 @@ Shapes.triple('bullet', [5, 8, 12])   // 第 n 颗取 speeds[n % len]
 `dt` 很大（掉帧）时可能跨过多次开火间隔。
 用 `if` 会漏掉中间的几次——表现为「卡顿后弹幕缺了一段」。
 
+> ⚠️ **但补发有上限（64 发/帧），且达到上限后积压的时间会被丢弃。**
+>
+> 曾经达到上限时保留未消耗的时间，于是掉一帧大的之后
+> 接下来**连续好几帧都在补发**（实测 dt=10s、interval=0.01s 时，
+> 前三帧各产出 64 发）——表现为「卡了一下之后 Boss 突然连喷十几轮」，
+> 玩家躲不掉，还会以为是自己卡了导致的判定问题。
+>
+> 掉帧那一帧本身就不可信，积压的时间不该补发。现在截断后直接清零。
+
 ## API
 
 ### `BulletSystem`（发射器集合）
@@ -112,6 +147,7 @@ Shapes.triple('bullet', [5, 8, 12])   // 第 n 颗取 speeds[n % len]
 | `isEmitterDone(id)` | 该发射器是否已打完 |
 | `allDone` | **全部**发射器是否已打完（波次结算用） |
 | `reset()` | 全部重置 |
+| `destroy()` | 卸载（清空发射器与在途产出，换场后不会再吐上一关的弹幕） |
 
 ### `SequencePlayer`（时间轴编排）
 

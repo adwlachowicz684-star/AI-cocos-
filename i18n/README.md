@@ -67,10 +67,11 @@ i18n.t('缺失的key');                      // '缺失的key'（回退，不是
 | `setLocaleTable(locale, table)` | 替换整个包（**热重载**） |
 | `setLocale(locale)` | 切换（不存在则保持，返回 false） |
 | `t(key, vars?)` | 翻译 |
-| `has(key)` | 是否存在 |
+| `has(key, vars?)` | 能否翻出来（**与 `t()` 同一条查找路径**：含回退语言与复数变体） |
 | `coverage(locale)` | 覆盖率 `{total, translated, missing}` |
 | `missingKeys` | 运行时缺失过的 key |
 | `onChange(fn)` | 语言切换回调（**UI 要自己刷新**） |
+| `onChange(fn)` 返回值 | 取消订阅（**可多播**：多个组件可同时订阅） |
 
 **未在上面列出的**：
 
@@ -91,6 +92,20 @@ i18n.t('缺失的key');                      // '缺失的key'（回退，不是
 > 热重载语言包（开发期改了 JSON 重新加载）必须用后者——
 > 用 `addLocale()` 的话，删掉的 key 还在，
 > 表现为"我明明删了这条文案怎么还显示"。
+
+> ⚠️ **`has()` 的口径必须与 `t()` 一致，别自己只查当前语言。**
+> 此前 `has()` 只查"当前语言的 key 本身"，于是
+> `has('ui.start') === false` 但 `t('ui.start') === '开始'`（来自回退语言）、
+> `has('item') === false` 但 `t('item', {n:3}) === '3 items'`（来自 `item_other`）。
+> 用 `has()` 决定"显示翻译还是显示 key"会得到大量假阴性——
+> 明明翻得出来却走了未翻译分支。
+> 现在两者共用同一条查找路径。
+
+> ⚠️ **覆盖率只认运行时能命中的复数形式（`_one` / `_other`）。**
+> CLDR 有六种复数形式，但本模块的 `_pluralKeyOf` 只实现 one/other。
+> 语言包只写 `item_few` / `item_many` 时：
+> 覆盖率曾报 100%，而 `t('item', {n:3})` 实际回落中文——**报告说谎比没有报告更糟**。
+> 现在这类 key 会被正确计入 missing。
 
 > ⚠️ **`destroy()` 之后 `onChange` 回调不再触发。**
 > 换场景时如果只切语言不 `destroy()`，

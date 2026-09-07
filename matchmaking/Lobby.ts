@@ -391,4 +391,31 @@ export class Lobby {
       revision: this._revision,
     };
   }
+
+  /**
+   * 卸载（rule5：有 install 就要有对应的 destroy）
+   *
+   * 【为什么不直接复用 `clear()`／让调用方丢掉实例】
+   *
+   * 房间的生命周期通常是"玩家建了 Room 对象 → 把 Lobby 挂上去 → 房间销毁"。
+   * 而 Lobby 里装的是**玩家的个人标识**（id、加入时间、准备状态），
+   * 房间逻辑之外往往还有一份"我在哪个房间"的反查表指向这个实例。
+   * 只丢弃引用不清数据，这份数据会一直留在内存里，
+   * 直到所有反查表都被回收——而那是不可控的。
+   *
+   * 【为什么把 state 置成 'closed' 而不是 'open'】
+   * 让"已卸载"这件事在外部**可见**：
+   * 之后再调 `canStart()` 会走 `already-started` 分支而不是 `too-few`，
+   * 于是"房间已经没了但 UI 还在点开局"会得到一个明确的失败原因，
+   * 而不是"人数不够"这种会引导玩家去找人的错误提示。
+   */
+  destroy(): void {
+    this._players = [];
+    this._ready.clear();
+    this._joinedAt.clear();
+    this._hostId = null;
+    this._password = undefined;
+    this._state = 'closed';
+    this._revision++;
+  }
 }

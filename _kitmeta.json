@@ -466,7 +466,9 @@
       "path": "i18n/",
       "maturity": "beta",
       "purpose": "本地化（复数/插值/回退/覆盖率）",
-      "depends": [],
+      "depends": [
+        "_core"
+      ],
       "hasTest": true,
       "hasDemo": true,
       "domain": "通用工具",
@@ -1235,7 +1237,9 @@
       "layer": "L2",
       "domain": "工程与运维",
       "maturity": "beta",
-      "depends": [],
+      "depends": [
+        "_core"
+      ],
       "hasTest": true,
       "hasDemo": true,
       "purpose": "主菜单 → 游戏中 → 暂停 → 结算 → 回主菜单",
