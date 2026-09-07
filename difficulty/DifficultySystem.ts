@@ -29,7 +29,7 @@
  * 由业务去查并应用。
  */
 
-import { clamp, clamp01, lerp, safeDt } from '../_core/math';
+import { clamp, clamp01, lerp, safeDt, numOr } from '../_core/math';
 import { hasOwn } from '../_core/guard';
 
 // ============================================================
@@ -243,6 +243,31 @@ export class DifficultySystem {
     const p = clamp01(performance);
 
     /**
+     * 【⚠️ 脏样本必须丢弃，不能参与平滑——否则 NaN 会自我复制】
+     *
+     * `clamp01(NaN)` 返回 **NaN**（实现是 `v < min ? min : v > max ? max : v`，
+     * NaN 两个比较都 false 于是穿透）。于是：
+     * ```
+     * _smoothPerf = lerp(0.51, NaN, alpha) = NaN
+     * 此后每一次 report：lerp(NaN, p, alpha) = NaN   ← 自我复制
+     * ```
+     * 而 `_applyDDA` 里 `Math.abs(NaN - _ddaValue) > 1e-6` 为 false，
+     * 于是既不更新 ddaValue 也不触发 onAdjust——**完全静默**。
+     *
+     * 实测（修复前）：一次 `report(NaN, 10)` 之后，
+     * 再用合法值 `report(0.1)` 连续 20 次，`smoothedPerformance` **仍是 NaN**，
+     * `ddaValue` 冻结在初始的 0.0005 不再变化。
+     *
+     * 触发源是现成的：`computePerformance({ hurtRatio: NaN })` 直接返回 NaN，
+     * 而 `hurtRatio` 的常见写法就是 `hurt / maxHp`，`maxHp = 0` 时即 NaN。
+     *
+     * 【为什么是丢弃而不是抛错】
+     * performance 是每帧喂进来的观测值，偶发脏样本不该让整个 DDA 崩掉。
+     * 丢弃一次采样对指数平滑几乎无影响，却换来了"不会永久中毒"。
+     */
+    if (!Number.isFinite(p)) return;
+
+    /**
      * 【指数平滑 + 样本加权】
      *
      * 前几次采样权重低（还没摸清玩家水平），
@@ -386,24 +411,43 @@ export function computePerformance(parts: {
   /** 剩余资源比例 0~1（血量、道具） */
   resourceLeft?: number;
 }): number {
+  /**
+   * 【⚠️ 每个分量都要单独收口，不能只靠末尾的除法】
+   *
+   * 原实现 `sum += (1 - clamp01(parts.hurtRatio)) * 0.35`：
+   * `clamp01(NaN)` 仍是 NaN → `(1 - NaN)` = NaN → 整条 sum 被污染，
+   * 而 `weight` 照常累加，于是 `sum / weight` = NaN。
+   *
+   * 实测（修复前）：`computePerformance({ hurtRatio: NaN })` → **NaN**。
+   * 而 `hurtRatio` 的常见写法就是 `hurt / maxHp`，`maxHp = 0` 时即 NaN——
+   * 这是 `report()` 被 NaN 污染的主要入口。
+   *
+   * 【为什么坏分量按"不计入"处理，而不是记 0 分】
+   * 记 0 分等于"玩家表现极差"，会让难度无端下调；
+   * 不计入（连权重一起跳过）才是"这条数据缺失"的正确语义。
+   */
   let sum = 0;
   let weight = 0;
 
-  if (parts.hurtRatio !== undefined) {
-    sum += (1 - clamp01(parts.hurtRatio)) * 0.35;
+  const hurt = numOr(parts.hurtRatio, NaN);
+  if (Number.isFinite(hurt)) {
+    sum += (1 - clamp01(hurt)) * 0.35;
     weight += 0.35;
   }
-  if (parts.deaths !== undefined) {
+  const deaths = numOr(parts.deaths, NaN);
+  if (Number.isFinite(deaths)) {
     // 0 死 = 1.0，1 死 = 0.6，2 死 = 0.3，3+ = 0
-    sum += clamp01(1 - parts.deaths / 3) * 0.3;
+    sum += clamp01(1 - deaths / 3) * 0.3;
     weight += 0.3;
   }
-  if (parts.clearSpeed !== undefined) {
-    sum += clamp01(parts.clearSpeed) * 0.2;
+  const clearSpeed = numOr(parts.clearSpeed, NaN);
+  if (Number.isFinite(clearSpeed)) {
+    sum += clamp01(clearSpeed) * 0.2;
     weight += 0.2;
   }
-  if (parts.resourceLeft !== undefined) {
-    sum += clamp01(parts.resourceLeft) * 0.15;
+  const resourceLeft = numOr(parts.resourceLeft, NaN);
+  if (Number.isFinite(resourceLeft)) {
+    sum += clamp01(resourceLeft) * 0.15;
     weight += 0.15;
   }
 
