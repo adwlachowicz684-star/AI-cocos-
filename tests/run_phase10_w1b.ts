@@ -164,6 +164,42 @@ export function runPhase10W1BTests(): void {
     });
   });
 
+  describe('audio · 铁律 5 可卸载（清单外新发现，见附录）', () => {
+    test('⚠️ AudioManager.destroy() 必须清掉去重记录（stopAll 不清）', () => {
+      const a = new AudioManager({ maxVoices: 8 });
+      a.play('boom');
+      // as 断言：修复前 AudioManager 没有 destroy，运行时抛 TypeError → 用例失败
+      (a as unknown as { destroy(): void }).destroy();
+      eq(a.activeCount, 0, '活跃实例必须清空');
+      // 关键区别：stopAll() 刻意保留去重记录（换场景时要继续生效），
+      // destroy() 是"不要了"，必须连记录一起清，否则 _lastPlayed 长期吊着 soundId
+      const b = new AudioManager({ maxVoices: 8 });
+      b.play('boom');
+      b.stopAll();
+      eq(b.activeCount, 0, 'stopAll 也清空活跃实例');
+      // 两者都能继续用（destroy 是新增的收尾入口，不改变 stopAll 的既有语义）
+      const c = new AudioManager({ maxVoices: 8 });
+      c.stopAll();
+      assert(c.play('after-stop') !== null, 'stopAll 之后仍可播放');
+    });
+
+    test('⚠️ BgmStack.destroy() 必须让所有层停止并清空层表', () => {
+      const bgm = new BgmStack({
+        layers: [{ name: 'base' }, { name: 'drum' }],
+        states: { calm: { base: 1, drum: 0 }, battle: { base: 1, drum: 1 } },
+        initialState: 'battle',
+        transitionMs: 100,
+      });
+      bgm.update(200);
+      assert(bgm.playingLayers().length > 0, '先确认有层在播');
+      // 修复前：BgmStack 既没有 destroy 也没有 stopAll
+      (bgm as unknown as { destroy(): void }).destroy();
+      eq(bgm.playingLayers().length, 0, '销毁后不应有层在播（否则"幽灵 BGM"）');
+      eq(bgm.layers().length, 0, '层表必须清空，防止调用方复活已销毁的栈');
+      eq(bgm.outputLevel, 0, '输出音量应为 0');
+    });
+  });
+
   describe('audio · P1 BgmStack.setState 的原型链守卫', () => {
     test('⚠️ setState("toString") 必须拒绝，不得静音全部层', () => {
       const bgm = new BgmStack({

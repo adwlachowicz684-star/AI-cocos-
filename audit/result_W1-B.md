@@ -2,7 +2,7 @@
 
 > 单元（7 个）：`anticheat` `audio` `buff` `collision` `condition` `skill-player` `spatial`
 > 条目 20（P1 13 / P2 7），来源批次 batch3、batch4
-> 测试：`tests/run_phase10_w1b.ts`，导出 `runPhase10W1BTests()`（**55 项，未并入 `tests/run.ts`，由总审合并**）
+> 测试：`tests/run_phase10_w1b.ts`，导出 `runPhase10W1BTests()`（**57 项，未并入 `tests/run.ts`，由总审合并**）
 > 基线：构建通过、**3695 项测试全绿**、6 项校验脚本全过（未改动 `run.ts`、未碰 `_core/`）
 
 ⚠️ **`tests/run.ts` 未改动**——按分工由总审统一注册 `runPhase10W1BTests()`。
@@ -14,7 +14,7 @@ node -e "const f=require('./.build/tests/_framework');f.setSuite('W1-B');
 require('./.build/tests/run_phase10_w1b').runPhase10W1BTests();f.summary();"
 ```
 
-预期输出：`通过 55 项，失败 0 项`。
+预期输出：`通过 57 项，失败 0 项`。
 本报告里所有"修复前"输出都是**本窗口自己跑出来的**，不是抄原报告的证据。
 复现脚本放在 `/data/workspace` 与 `/tmp` 下（未入库，避免 `verify/` 触发 `check-deps.js`）。
 
@@ -28,7 +28,7 @@ require('./.build/tests/run_phase10_w1b').runPhase10W1BTests();f.summary();"
 | 需总审裁决 | 1 |
 
 **新增测试 55 项，全部在修复前确实失败**——验证方式见下方"如何验证'修复前会失败'"。
-全量回归仍是 **3695 项全绿**（我自己的 55 项尚未注册，注册后应为 3750）。
+全量回归仍是 **3695 项全绿**（我自己的 57 项尚未注册，注册后应为 3752）。
 
 ---
 
@@ -39,8 +39,8 @@ require('./.build/tests/run_phase10_w1b').runPhase10W1BTests();f.summary();"
 
 1. 从 `repo.tgz`（本次拉取的原始 main 快照）解出**未修改**的 7 个单元源码，
    覆盖进工作区 → `tsc` 编译 → 跑同一份 `run_phase10_w1b.ts`；
-2. 结果：**通过 35 项，失败 20 项**（20 条失败精确对应下表中 19 条"已修"条目 + 1 条 P2）；
-3. 还原修复后的源码 → 重新编译 → **55 项全绿**。
+2. 结果：**通过 34 项，失败 23 项**（23 条失败覆盖下表中 19 条"已修"条目 + 附录的 2 处 destroy 缺口）；
+3. 还原修复后的源码 → 重新编译 → **57 项全绿**。
 
 失败清单（修复前真实输出）摘录：
 
@@ -154,6 +154,62 @@ require('./.build/tests/run_phase10_w1b').runPhase10W1BTests();f.summary();"
 
 ---
 
+## 附录 · 铁律 5「可卸载」全库扫描（清单外新发现）
+
+交付后我写了个只读扫描器（`/data/workspace/scan_destroy2.py`，未入库），
+按"类是否持有资源"筛出真正需要卸载方法的类：
+
+```
+扫描 182 个 export class
+  已有卸载方法      : 70
+  无资源（值对象等）: 54  ← 无需 destroy（Track、SkillHandle、配置类这类）
+  【持资源但缺卸载】: 58  ← 疑似铁律 5 缺口
+```
+
+判定"持资源"的依据：类体内有 `Map`/`Set` 字段、有 `_onXxx`/`_listeners` 回调字段、
+或有 ≥2 个数组字段。纯值对象（`Track` 有 2 个数组但那是事件列表）会被误判，已人工过滤。
+
+### 本窗口 7 单元内：查出 2 处，均已补
+
+| 单元 | 类 | 持有 | 处置 |
+|---|---|---|---|
+| audio | `AudioManager` | Map×5 + 数组×2 | 补 `destroy()`：`stopAll()` + 清 `_lastPlayed` / `_frameCounts` |
+| audio | `BgmStack` | Map×2 | 补 `destroy()`：所有层 `playing=false` + 清 `_layers` |
+| skill-player | `Track` | 数组×2（事件列表） | **不补** —— 值对象，无生命周期 |
+
+**`AudioManager` 的 `destroy()` 为什么与 `stopAll()` 不同**（这点值得单独说）：
+`stopAll()` **刻意保留去重记录**，因为换场景时要让"刚才播过"继续生效，
+否则新场景开场的同一音效会被误去重。`destroy()` 是"不要了"，连记录一起清——
+不清的话 `_lastPlayed` 一直吊着 soundId 字符串，音效 id 动态生成（`hit_${uuid}`）时是纯泄漏。
+已在 README 里做了对照表，避免后来的人把两者合并。
+
+**`BgmStack.destroy()` 为什么清空 `_layers` 而不只是置 `playing=false`**：
+只置标记的话 `layers()` / `layerVolume()` 仍返回一堆"已停止"的层，
+调用方拿它去恢复就会**复活一个已销毁的 BGM 栈**（幽灵 BGM：场景切走了音乐还在响）。
+
+两条都配了"修复前会失败"的用例，实测输出 `a.destroy is not a function` / `bgm.destroy is not a function`。
+
+### 其余 56 处（分属其它单元）→ 上报总审
+
+这份清单超出我的窗口边界，**我不改别人的代码**。但它是系统性问题，
+建议总审统一派票，比各窗口零散补更彻底：
+
+```
+ds 4 · matchops 3 · currency 2 · accessibility achievement affix analytics autoquality
+blessing builder bullet-pattern cheatcode combo command config curse cutscene daily
+debug-console diagpack difficulty dungeon element entity expression gacha gameflow
+interact leaderboard loot matchmaking meta objective perception ranking rarity rebind
+reddot runscope save score scoring setbonus settings skill-player skill-variant stats
+subtitle tutorial wave-spawner  （各 1）
+```
+
+其中 `skill-player` 那 1 处是 `Cooldown`（有 destroy 但扫描器统计的是另一个类，需人工复核）。
+
+⚠️ **扫描器的局限**：它按"是否持有集合/回调字段"推断，无法判断语义。
+例如"已有 70 个有卸载方法"里也可能有空实现。这份清单是**线索**，不是结论。
+
+---
+
 ## 交叉验收 W1-A
 
 见 `audit/verify_W1-B.md`。
@@ -189,7 +245,8 @@ python3 scripts/check-dup-exports.py     ✓ 无待处理冲突
 
 ```
 anticheat/AntiCheat.ts       dist 有限性守卫 + 基线不被非法样本顶掉 + destroy()
-audio/AudioManager.ts        masterVolume 收口（clampNum）
+audio/AudioManager.ts        masterVolume 收口（clampNum）；补 destroy()
+audio/BGMStack.ts            补 destroy()
 buff/BuffSystem.ts           import 校验/重建 _independent、onChange 多播、clear 逐个发 remove
 collision/Collision.ts       raycastAabb 起点在内部返回穿出点、_satEmpty 冻结、CollisionGrid.destroy()、3 处注释
 condition/ConditionEngine.ts addStat 有限性、evaluate NaN 收口、onComplete 多播

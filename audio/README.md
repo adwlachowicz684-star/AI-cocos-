@@ -120,7 +120,8 @@ console.log(audio.describe());
 | `stop(id)` | 按句柄 id 停 |
 | `stopSound(soundId)` | 按 soundId 停**所有**同名实例，返回停掉的数量 |
 | `stopCategory(cat)` | 停一整类，返回停掉的数量 |
-| `stopAll()` | 全停 |
+| `stopAll()` | 全停（**保留去重记录**，换场景用这个） |
+| `destroy()` | 销毁（连去重记录一起清，不再使用用这个） |
 | `setMasterVolume(v)` / `masterVolume` | 主音量 |
 | `setCategoryVolume(cat, v)` / `getCategoryVolume(cat)` | 分类音量 |
 | `effectiveVolume(id)` | 该实例的**实际**音量（主 × 分类 × 实例） |
@@ -130,6 +131,23 @@ console.log(audio.describe());
 | `isPlaying(soundId)` | 该 soundId 是否正在播 |
 | `stats()` / `resetStats()` | 统计（被拒 / 去重 / 抢占次数） |
 | `describe()` | 一行诊断文本 |
+
+> ⚠️ **`stopAll()` 与 `destroy()` 的区别在"去重记录"，不在"停不停"。**
+>
+> 两者都会停掉所有活跃实例和延迟队列。区别在于：
+>
+> | | 活跃实例 | 延迟队列 | `_lastPlayed` 去重记录 |
+> |---|---|---|---|
+> | `stopAll()` | 清 | 清 | **保留** |
+> | `destroy()` | 清 | 清 | 清 |
+>
+> 保留是刻意的：**换场景时**你想让"刚才播过"的记录继续生效，
+> 否则新场景开场的同一音效会被误判为重复而丢掉。
+>
+> 而 `destroy()` 是"这个管理器不要了"，必须连记录一起清——
+> 不清的话 `_lastPlayed` 会一直吊着 soundId 字符串。
+> 音效 id 动态生成时（`hit_${uuid}`）这就是纯泄漏：
+> 每放一次多一个条目，永不释放。
 
 > ⚠️ **`play()` 被拒时返回 `null`，不是句柄。**
 > 不判空直接用 `handle.id` 会抛 `TypeError`——

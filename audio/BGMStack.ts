@@ -427,6 +427,35 @@ export class BgmStack {
    *
    * 输出"状态 × 层"的矩阵，一眼看出哪格漏了。
    */
+  /**
+   * 【铁律 5】可卸载
+   *
+   * 同单元的 `AudioManager` 有 `stopAll` 但没有 `destroy`，本类两个都没有——
+   * 这是全库铁律 5 扫描（见 `audit/result_W1-B.md` 附录）在本单元查出的两处缺口之一。
+   *
+   * 把所有层标记为停止、清空层表：
+   * 调用方（音频层适配器）通常持有 `LayerState` 的引用，
+   * 若不把 `playing` 置 false，销毁后它照着旧状态继续播放就会"幽灵 BGM"——
+   * 场景已经切走了，音乐还在响，且没人能再关掉它（管理器已经不在了）。
+   *
+   * 【为什么清空 `_layers` 而不是只置 playing=false】
+   * 只置标记的话 `layers()` / `layerVolume()` 仍会返回一堆"已停止"的层，
+   * 调用方拿它去恢复播放就会复活一个已销毁的 BGM 栈。
+   * 清空之后所有查询都返回空，语义干净。
+   */
+  destroy(): void {
+    for (const ls of this._layers.values()) {
+      ls.playing = false;
+      ls.current = 0;
+      ls.target = 0;
+      ls.from = 0;
+    }
+    this._layers.clear();
+    this._inTransition = false;
+    this._elapsed = 0;
+    this._prevState = null;
+  }
+
   describeMatrix(): string {
     const names = this._layerCfgs.map((l) => l.name);
     const w = Math.max(10, ...names.map((n) => n.length * 2)) + 2;

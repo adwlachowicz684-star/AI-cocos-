@@ -421,6 +421,26 @@ export class AudioManager {
     this._pending.length = 0;
   }
 
+  /**
+   * 【铁律 5】可卸载
+   *
+   * `stopAll()` 只停声音，**不清去重记录**——这是刻意的：
+   * 换场景时你想让"刚才播过"的记录继续生效，避免新场景开场的同一音效被误去重。
+   *
+   * `destroy()` 是"这个管理器不要了"，所以连去重记录一起清。
+   * 不清的话 `_lastPlayed` / `_frameCounts` 会一直吊着 soundId 字符串，
+   * 长期运行（音效 id 动态生成的场景，如 `hit_${uuid}`）就是纯泄漏。
+   *
+   * 【为什么不动 `_rejected` / `_deduped` / `_evicted` 统计】
+   * 调用方可能在销毁前刚读过 `describe()`；清掉统计等于抹掉现场。
+   * 这些是数字，不持有引用，GC 不关心它们。
+   */
+  destroy(): void {
+    this.stopAll();
+    this._lastPlayed.clear();
+    this._frameCounts.clear();
+  }
+
   // ==================== 音量 ====================
 
   /** 设置主音量 */
