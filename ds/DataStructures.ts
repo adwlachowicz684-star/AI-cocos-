@@ -466,6 +466,27 @@ export interface QuadItem<T> {
  * 只写 `a.x - padding < b.x + b.w` 而忘了右边，
  * 判定就不对称——表现为"房间左边不重叠但右边重叠"，极难排查。
  */
+/**
+ * 【⚠️ 相切不算重叠——与 `_core.rectOverlaps` 的语义不同，别混用】
+ *
+ * 实测（a 右边界 10 == b 左边界 10，刚好贴住）：
+ * ```js
+ * rectsOverlap(a, b)                          // → false（本函数，用 <）
+ * rectOverlaps(toCorners(a), toCorners(b))    // → true （_core，用 <=）
+ * ```
+ *
+ * 【为什么故意不一致】
+ * 本函数主要用于**四叉树范围查询**（`QuadTree.query` 里的 `node.bounds`）。
+ * 相切的两个节点"不算重叠"是期望行为——
+ * 否则边界物体会被两个节点同时命中，查询去重后仍多算一次距离。
+ *
+ * 而 `_core.rectOverlaps` 是通用 AABB 判定，含相切是几何上的常规约定。
+ * 两者在各自场景下都对，**错的是不看语义就互相替换**。
+ *
+ * 【怎么选】
+ * - 空间索引 / 格子归属（要避免重复命中）→ 用本函数
+ * - 碰撞检测 / 视口裁剪（贴着就算）→ 用 `_core.rectOverlaps`
+ */
 export function rectsOverlap(a: Rect, b: Rect, padding = 0): boolean {
   return (
     a.x - padding < b.x + b.w &&
@@ -475,6 +496,25 @@ export function rectsOverlap(a: Rect, b: Rect, padding = 0): boolean {
   );
 }
 
+/**
+ * 【⚠️ 半开区间 [x, x+w) —— 与 `_core.rectContains` 的闭区间不同】
+ *
+ * 实测（矩形 x:0 w:10）：
+ * ```js
+ * pointInRect(0, 0, r)   // → true  （含左边界）
+ * pointInRect(10, 0, r)  // → false （不含右边界）
+ * rectContains(toCorners(r), 10, 0)  // → true （_core，含右边界）
+ * ```
+ *
+ * 【为什么是半开】
+ * 这是**格子/瓦片索引**的正确语义：相邻格子共享边界，
+ * 若用闭区间，边界上的点会同时落在两个格子里——
+ * 表现为"同一个物体被两个格子都存了一份"。
+ *
+ * 【怎么选】
+ * - 判断"这个点属于哪个格子 / 哪块地"→ 用本函数（半开）
+ * - 判断"这个点是否在某个区域内"→ 用 `_core.rectContains`（闭区间）
+ */
 export function pointInRect(px: number, py: number, r: Rect): boolean {
   return px >= r.x && px < r.x + r.w && py >= r.y && py < r.y + r.h;
 }
