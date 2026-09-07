@@ -222,16 +222,54 @@ subtitle tutorial wave-spawner  （各 1）
 tsc -p tsconfig.json --outDir .build     ✓ 211 个 .js，产物校验通过
 node .build/tests/run.js                 ✓ 通过 3695 项，失败 0 项
 node scripts/check-deps.js               ✓ 全部通过
-node scripts/check-links.js              △ 内部链接 44 条，断链 1 处（audit/handoff_W3-B.md，未经我改动）
+node scripts/check-links.js              ✓ 44 条内部链接，0 处真断链（报出的 1 处是脚本误报，见下）
 python3 scripts/scan-dt-guard.py         ✓ 命中 0 处
 python3 scripts/scan-num-guard.py        ✓ 命中 0 处
 python3 scripts/check-random-source.py   ✓ 未发现自建随机源
 python3 scripts/check-dup-exports.py     ✓ 无待处理冲突
 ```
 
-⚠️ `check-links` 那 1 处断链来自 `audit/handoff_W3-B.md`（W3-B 窗口的文件）。
-我已用原始快照 diff 确认：**该文件未经我改动**，断链在开工前就存在。
-按并行纪律，我不改别人的文件，回报总审。
+### 更正：那 1 处"断链"是 `check-links.js` 的误报，不是真断链
+
+我上一版报告写"断链 1 处"，**这个结论是错的**，现更正。
+
+`audit/handoff_W3-B.md` 两处被判为链接的位置，实际是**行内反引号里的 TypeScript 源码**：
+
+```
+行 268：`if (id in this._derived) { return this._derived[id](...) }`
+行 269：`this._derived['toString'](get)`
+```
+
+`this._derived[id](...)` 里的 `](` 是数组索引后跟函数调用，
+被 `check-links.js` 当成了 markdown 的 `[text](url)` 语法。
+
+我写脚本逐行判定过：这两处**既不在 ``` 围栏代码块内、也不是链接**，
+是行内代码（inline code）。所以脚本的问题是——
+**它只按正则找 `](`，没有跳过行内反引号包裹的内容**。
+
+> 顺带一提：`verify_W3-A.md` 里把它描述为"TypeScript 代码片段被误判"，方向是对的，
+> 但写的是"代码块"。准确说法是**行内代码**——修脚本时要跳过的是反引号，不只是围栏。
+
+**建议总审派一票修 `scripts/check-links.js`**：让它先剥离 `` `...` `` 再找链接。
+这类误报会持续污染所有窗口的自检输出（每个窗口都会看到"断链 1 处"然后去查一个不存在的链接）。
+按并行纪律，我不改 `scripts/`。
+
+### 另一处：纠正 `verify_W3-A.md` 的一个误判
+
+`verify_W3-A.md` 称"`scripts/check-dup-exports.js` 在仓库中不存在，
+导致六项校验有一项无法执行，疑似漏传"。
+
+**这个判断不成立**，我核过了：
+
+| 项 | 实际 |
+|---|---|
+| `scripts/check-dup-exports.py` | ✅ **存在**（六项校验用的就是这个） |
+| 任务书 `handoff_W1-B.md` / `review_B.md` 引用的 | `.py`（不是 `.js`） |
+| `_kitmeta.json` 里的引用 | 无（`grep` 零命中） |
+
+所以六项校验**可以全部执行、且全部通过**。
+`W3-A` 大概是照着某个旧版任务书敲了 `.js`。
+不影响其交付质量，但会误导总审以为仓库文件有缺失，特此更正。
 
 ⚠️ `build.sh` 在本次执行中偶发两次 502 中断（任务书第 6 节已预告）。
 处理方式：改用 `tsc -p tsconfig.json --outDir .build` 直出并校验 `.build/tests/run.js` 存在，
