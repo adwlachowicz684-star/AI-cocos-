@@ -257,7 +257,30 @@ export class Inventory {
     const s = this._slots[index];
     if (!s || s.def === null) return null;
 
-    const take = amount >= s.count ? s.count : amount;
+    /**
+     * 【⚠️ amount 必须收口：NaN 会让格子数量永久变 NaN，且槽位永不回收】
+     *
+     * 老实现 `const take = amount >= s.count ? s.count : amount;`
+     * 的问题不在比较，而在 `amount` 本身：
+     * - `NaN >= s.count` 为 false → `take = NaN`
+     * - `s.count -= NaN` → **count 变 NaN**
+     * - 接着 `if (s.count === 0)` 对 NaN 恒为 false
+     *   → `s.def` 不被清空 → **槽位永远占着**
+     *
+     * 实测（修复前）：`add('potion', 10)` 后 `removeAt(0, NaN)`
+     * → 槽 0 的 count 变成 **NaN**，且该槽仍被标记为已占用。
+     *
+     * 后果是这个格子永久报废：既显示不出正确数量，
+     * 也不能被新物品使用（"背包莫名少了一格"），
+     * 且 NaN 会继续扩散到任何读取该格子数量的地方（堆叠上限判定、UI 显示）。
+     *
+     * 【为什么 NaN 回落成 Infinity（取全部）】
+     * 默认参数就是 `Infinity`（"不传数量 = 全取走"）。
+     * 无法解释的数量按"全取走"处理，至少让状态回到一个合法且可预测的值，
+     * 而不是卡在 NaN 上。
+     */
+    const want = Number.isFinite(amount) || amount === Infinity ? amount : Infinity;
+    const take = want >= s.count ? s.count : want;
     s.count -= take;
 
     const result: Slot = { def: s.def, count: take, ...(s.data !== undefined ? { data: s.data } : {}) };
@@ -265,6 +288,18 @@ export class Inventory {
       s.def = null;
       delete s.data;
     }
+
+    /**
+     * 【防御：万一 count 还是坏了，也要把槽位还回来】
+     * 正常路径到不了这里。留着是为了保证"槽位泄漏"这件事
+     * 不会因为上面任何一处改动而重新出现。
+     */
+    if (!Number.isFinite(s.count) || s.count <= 0) {
+      s.count = 0;
+      s.def = null;
+      delete s.data;
+    }
+
     this._emit('remove', [index]);
     return result;
   }
@@ -376,7 +411,26 @@ export class Inventory {
   split(index: number, amount: number, to = -1): number {
     const s = this._slots[index];
     if (!s || s.def === null) return -1;
-    if (amount <= 0 || amount >= s.count) return -1;
+
+    /**
+     * 【⚠️ 必须用"不满足就拒绝"的判定，不能用"满足才继续"】
+     *
+     * 老实现 `if (amount <= 0 || amount >= s.count) return -1;`
+     * 对 **NaN 两个判断都是 false** → 不拒绝，继续执行：
+     * ```
+     * t.count = NaN;      // 新格子数量是 NaN
+     * s.count -= NaN;     // 原格子数量也变 NaN
+     * ```
+     * 实测（修复前）：`split(0, NaN)` 返回 1（看起来成功了），
+     * 而两个格子的 count 都变成了 **NaN**。
+     *
+     * 这是全库反复出现的同一类失效：
+     * **否定式条件（`x <= 0`）拦不住 NaN，肯定式（`x > 0`）才能。**
+     *
+     * 另外 `amount >= s.count` 也要一并改成肯定式，
+     * 否则 `s.count` 本身是 NaN 时会同样穿透。
+     */
+    if (!(amount > 0) || !(amount < s.count)) return -1;
 
     const target = to >= 0 ? to : this.firstEmpty;
     if (target < 0 || target >= this._slots.length) return -1;
