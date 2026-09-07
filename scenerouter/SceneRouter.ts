@@ -35,6 +35,29 @@
  * 本模块**不认识任何引擎 API**，只管编排顺序与状态。
  *
  * 【零业务依赖】
+ *
+ * 【使用示例】
+ * ```typescript
+ * const router = new SceneRouter({ outMs: 300, inMs: 300 });
+ *
+ * router.goTo('battle', { levelId: 7 });
+ * // 每帧推进（驱动退场/加载/入场三个阶段）
+ * router.tick(dtMs);
+ *
+ * // 宿主在场景资源就绪后调用，否则会停在 loading 直到超时
+ * router.notifyLoaded();
+ *
+ * router.back();   // 返回上一场景
+ * ```
+ *
+ * 【⚠️ tick 的单位是毫秒，与全库大多数 dt（秒）相反】
+ * `outMs` / `inMs` / `loadTimeout` 都是毫秒，`tick` 入参也是毫秒：
+ * 实测 `outMs:300, inMs:300` 下，`tick(16.7)` 约 69 帧完成，
+ * 而 `tick(0.0167)` 要 35966 帧——差 500 倍。
+ * 按秒传不会报错，只会表现为"转场慢到像是卡住了"，极难归因。
+ *
+ * 【⚠️ notifyLoaded 必须被调用】
+ * 加载阶段有兜底超时，忘调不会永久卡死，但会让每次切场景都白白等满超时。
  */
 import { clampNum, safeDt } from '../_core/math';
 
