@@ -90,6 +90,19 @@ export interface ObjectiveState {
 // 事件
 // ============================================================
 
+/**
+ * 目标事件
+ *
+ * 【事件顺序契约】
+ * - `activated` → 若干 `progress` → `completed`（或 `failed`）
+ * - **`completed` / `failed` 是终态事件，之后不会再收到该目标的 `progress`**
+ *   （一次 `setProgress` 同时触发完成判定与进度上报时，只发 `completed`）
+ *
+ * 【为什么必须写死这一条】
+ * 早期实现在完成后还会补发一条 `progress/10`，订阅方（任务追踪 UI）收到
+ * `completed` 后再收到 `progress`，会把"已完成"态覆盖回"进行中"。
+ * 顺序约定不写清楚，这类 bug 会随着订阅方注册顺序不同随机出现。
+ */
 export interface ObjectiveEvent {
   readonly type: 'activated' | 'completed' | 'failed' | 'progress';
   readonly id: string;
@@ -241,8 +254,41 @@ export class ObjectiveSystem {
     if (!s || s.status !== 'active') return;
     if (s.progress === value) return;
 
+    /**
+     * 【为什么非有限值直接拒绝，而不是"收口到 0"】
+     *
+     * 进度来自外部计数（击杀数、采集数、网络包）。一旦写进 NaN：
+     * - `s.progress = NaN`，UI 显示 "NaN / 10"
+     * - 后面的 `progress >= target` 恒 false → 目标**永远完不成**
+     * - `protect` 类的 `progress <= 0` 也挡不住 NaN（NaN <= 0 恒 false → 永远不失败）
+     * - 而且 `NaN === value` 恒 false，下一次 setProgress 也无法纠正到同一值之外
+     *   ——进度条就此**永久卡死且无法自愈**
+     *
+     * 收口成 0 同样危险：那等于"玩家进度被清零"。
+     * 所以这里只拒绝这一次写入，保留上一次的有效进度。
+     */
+    if (!Number.isFinite(value)) return;
+
     s.progress = value;
     this._check(s);
+
+    /**
+     * 【⚠️ 为什么完成/失败之后不再补发 progress】
+     *
+     * 旧实现无脑在 `_check` 之后补一条 `progress` 事件，于是订阅方收到的是
+     * `completed/10 | progress/10`——**先完成，再来一条"进度 10"**。
+     * UI 通常是"收到 progress 就把目标卡片刷成进行中态"，
+     * 结果刚点亮的"已完成"被随后那条 progress 又覆盖回"进行中"，
+     * 表现为"通关了但 UI 说还在打"，且与事件到达顺序强耦合（换个订阅顺序就好了，
+     * 极难复现）。
+     *
+     * 完成 / 失败事件里已经带了最终 progress，不需要再补一条。
+     */
+    if (s.status !== 'active') {
+      this._checkAll();
+      return;
+    }
+
     this.onEvent?.({ type: 'progress', id, progress: s.progress, target: s.def.target });
 
     /**
@@ -284,7 +330,33 @@ export class ObjectiveSystem {
     this.onEvent?.({ type: 'activated', id, progress: s.progress, target: s.def.target });
   }
 
-  /** 重置 */
+  /**
+   * 卸载：清掉三个外部回调引用并复位
+   *
+   * 【为什么必须有它】铁律 5「可卸载」。
+   * 本类持有 `onEvent` / `onAllComplete` / `onFailed` 三个外部回调，
+   * 它们通常闭包引用着 UI 面板甚至场景节点。没有 `destroy()` 的话，
+   * 关卡对象被回收、系统还在别处被引用时，整棵 UI 树都会被挂在回调上无法释放。
+   */
+  destroy(): void {
+    this.reset();
+    this.onEvent = undefined;
+    this.onAllComplete = undefined;
+    this.onFailed = undefined;
+  }
+
+  /**
+   * 重置
+   *
+   * 【⚠️ reset() 不触发任何 onEvent】
+   *
+   * 这是刻意的：reset 的语义是"回到初始快照"，不是"发生了一批状态迁移"。
+   * 若在这里补发事件，调用方在重开关卡时会先收到一串历史状态，
+   * 与真实推进过程混在一起。
+   *
+   * 需要刷新 UI 的调用方请在 reset 后自行读 `all()` / `active()` 拉一次全量，
+   * 而不是等事件——这也是为什么事件顺序（见 `setProgress`）必须干净。
+   */
   reset(): void {
     this._time = 0;
     this._finished = false;

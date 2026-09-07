@@ -52,7 +52,7 @@
  * ```
  */
 
-import { clamp, safeDt } from '../_core/math';
+import { clamp, numOr, safeDt } from '../_core/math';
 
 export interface DashOptions {
   /**
@@ -119,18 +119,40 @@ export interface DashOptions {
   exitMomentum?: number;
 }
 
-/** 冲刺状态 */
+/**
+ * 冲刺状态
+ *
+ * 【⚠️ 'recovery' 是预留状态，当前版本**不会**被赋给 `state`】
+ *
+ * 状态机图里画了 `dashing → recovery → idle`，但实现里冲刺结束
+ * （`tick` 的收尾分支）是**直接回到 idle**——全文件从未写过 `'recovery'`。
+ * 实测一次冲刺过程中 `state` 只出现过 `'dashing'`，结束后立刻是 `'idle'`。
+ *
+ * 为什么不顺手补上 recovery：
+ * 把"冲刺后的一段恢复期"变成真实状态，会让 `state` 在冲刺结束后
+ * 多出一个非空值，所有 `state === 'idle'` 判定的调用方（能否再次冲刺、
+ * 能否被 AI 打断、动画机切回待机）都会改变行为——**这是 breaking 改动**，
+ * 而且"恢复期该多长"没有配置出处（硬编码违反铁律 4）。
+ *
+ * 所以这里保留类型成员、明确标注它是预留位：
+ * 调用方不要写 `state === 'recovery'` 的分支，也不要以为冲刺后一定有恢复态。
+ * 需要恢复期语义的，用 `ready` / `cooldownLeft` 判断。
+ */
 export type DashState = 'idle' | 'dashing' | 'recovery';
 
 /**
  * 冲刺控制器
  *
- * 【状态机】
+ * 【状态机（实际行为）】
  * ```
- * idle ──tryStart──▶ dashing ──▶ recovery ──▶ idle
+ * idle ──tryStart──▶ dashing ──(duration 到点)──▶ idle
  *                       │
  *                       └── cancel() ──▶ idle
  * ```
+ *
+ * 注意：早期文档画了 `dashing → recovery → idle`，
+ * 但 `recovery` 从未被赋值（详见 `DashState` 的注释）。
+ * 冲刺结束后 `state` 立刻是 `idle`，冷却由 `cooldownLeft` 单独表达。
  */
 export class DashController {
   private _distance: number;
@@ -166,12 +188,43 @@ export class DashController {
   private _dashCount = 0;
 
   constructor(opts: DashOptions = {}) {
-    this._distance = opts.distance ?? 4;
-    this._duration = opts.duration ?? 0.22;
+    /**
+     * 【为什么这里必须用 numOr，不能只写 `?? 4`】
+     *
+     * `??` 只挡 null / undefined，**挡不住 NaN**。
+     * 而 duration / distance 来自配表或存档：填错一次就是 NaN。
+     *
+     * NaN 一旦进来，后面的链条是：
+     * `clamp(_t / NaN, 0, 1)` → NaN（`NaN < 0`、`NaN > 1` 都是 false，clamp 原样返回）
+     * → `d0 / d1` 为 NaN → `deltaX / deltaY` 为 NaN → 写进角色坐标。
+     *
+     * 而 `NaN + 任何数 === NaN`，角色坐标**永久变 NaN**：
+     * 碰撞、渲染、寻路全部失效且不报错，表现为"角色突然消失、游戏半瘫"。
+     * 这是 A 类缺陷"一个 NaN 帧让坐标永久变 NaN"的实锤路径。
+     *
+     * 所以两个字段都先用 numOr 收口到默认，再对"必须为正"的字段做肯定式守卫。
+     */
+    this._distance = numOr(opts.distance, 4);
+    // 【为什么 duration 还要 !(d > 0) 守卫】0 或负数会让 `_t / _duration` 直接变成
+    // 0/0 = NaN（或让 `tick` 首帧就命中 `_t >= _duration` 的收尾分支 → 整段冲刺瞬移完成）。
+    // 否定式守卫对 NaN 无效，所以用肯定式：非正数一律回落到默认时长。
+    const dur = numOr(opts.duration, 0.22);
+    this._duration = dur > 0 ? dur : 0.22;
     this._invulnRatio = opts.invulnerableRatio ?? 0.7;
     this._cooldown = opts.cooldown ?? 0.5;
     this._maxCharges = opts.charges ?? 1;
-    this._falloff = opts.falloff ?? 2;
+    /**
+     * 【为什么 falloff 下界是 0，不是"不限制"】
+     * 内部衰减指数是 `p = falloff + 1`，位移曲线 `s(u) = 1 - (1-u)^p`：
+     * - `falloff = 0`  → p = 1 → `s(u) = u`，**匀速**，合法（有意的"无衰减"配置）
+     * - `falloff = -1` → p = 0 → `s(u) ≡ 0`，整段位移恒 0
+     *
+     * 实测 falloff = -1 的表现不是"冲不动"，而是**瞬移**：
+     * 分段位移每帧都是 0，只有最后一帧走 tick 的收尾分支一次性跳到终点，
+     * 衰减曲线、无敌帧节奏、残影间隔全部失效——但总距离看着是对的，极难排查。
+     * 所以夹紧到 0：保留"匀速"这个合法语义，去掉 p < 1 这段无意义区间。
+     */
+    this._falloff = Math.max(0, numOr(opts.falloff, 2));
     this._endBrake = opts.endBrake ?? 0.15;
     this._exitMomentum = opts.exitMomentum ?? 0;
     this._charges = this._maxCharges;
@@ -282,8 +335,26 @@ export class DashController {
     this._dx = 0;
     this._dy = 0;
 
+    /**
+     * 【为什么是"每消耗一层就续上冷却"，而不是"耗尽才启动"】
+     *
+     * 旧写法 `if (this._charges <= 0 && this._cdLeft <= 0)` 只在**最后一层**
+     * 用掉时才设冷却。于是 charges = 2 时用掉第 1 层（剩 1）不设 CD，
+     * `tick` 里的充能恢复分支 `if (this._cdLeft > 0)` 永不执行 →
+     * 第二层**永远无法恢复**。
+     *
+     * 实测：charges = 2 用掉 1 层后等 5 秒（cooldown 只有 0.5s），
+     * chargesLeft 仍然是 1。
+     * 后果是 JSDoc 里承诺的"哈迪斯式连冲两次"退化成：
+     * 开局能连冲两次，之后每次只能用一层，且这一层还要靠"耗尽后的 CD"慢慢回。
+     * 配置写着 `charges: 2`，数值同学查配置查不出问题，玩家说不清哪里不对。
+     *
+     * 改法：消耗任意一层都启动（或续上）冷却。
+     * `if (this._cdLeft <= 0)` 而不是直接覆盖：连冲两层时第二层不该把
+     * 已经跑了一半的冷却重置回满，否则"连冲两次"的反而是更长的空窗。
+     */
     this._charges--;
-    if (this._charges <= 0 && this._cdLeft <= 0) this._cdLeft = this._cooldown;
+    if (this._cdLeft <= 0) this._cdLeft = this._cooldown;
     this._dashCount++;
 
     return true;
@@ -299,7 +370,17 @@ export class DashController {
    * 这是"冲刺能取消后摇"这条手感铁律的落地方式。
    */
   canCancel(): boolean {
-    return this._state === 'idle' && this._charges > 0;
+    /**
+     * 【为什么不写成一份独立逻辑】
+     * 这里曾经与 `ready` 是两份逐字相同的实现。
+     * 冗余本身无害，但"两份一样的判断"迟早会被人改掉其中一份——
+     * 那时业务层看到的"能不能冲刺"和"能不能打断"就会悄悄分叉，
+     * 而这两个语义在本单元里**必须是同一个**（见类注释②：冲刺要能取消后摇，
+     * 判断依据就是"空闲且有充能"）。
+     *
+     * 所以显式委托给 `ready`：语义不变，但只有一处真相。
+     */
+    return this.ready;
   }
 
   /** 中断冲刺（撞墙、被抓取） */
