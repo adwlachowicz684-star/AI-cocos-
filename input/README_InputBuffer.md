@@ -139,7 +139,7 @@ interface InputBufferOptions { window?: number; /* ... */ }
 
 串联使用，互不依赖。
 
-## 三个坑
+## 四个坑
 
 **① 暂停时必须传 dt = 0**
 否则暂停期间缓冲继续「老化」，恢复后输入已失效。
@@ -150,6 +150,18 @@ interface InputBufferOptions { window?: number; /* ... */ }
 
 **③ 搓招匹配后要清空队列**
 否则 `↓↘→A` 触发后队列里还剩 `→A`，下一个招式 `→A` 会立刻被误触发。
+
+**④ `maxQueue` / `window` 传 NaN 不会"按默认走"**
+`??` 只挡 `null` / `undefined`，NaN 会原样存进去：
+
+| 字段 | NaN 的后果 |
+|---|---|
+| `maxQueue` | 裁剪判定 `queue.length > NaN` 恒为 false → **队列永不裁剪**（实测连按 50 次后长度 50） |
+| `window` | `now - t <= NaN` 恒为 false → `peek` 永远 false、`consume` 时灵时不灵 |
+
+现在构造用 `clampNum(maxQueue, 1, 64, 6)` 与 `numOr(window, 0.15)`，
+`window` 的 setter 也先 `numOr` 再 `Math.max(0, …)`——
+`Math.max(0, NaN)` 是 NaN，单独一个 `Math.max` 挡不住。
 
 ### 搓招允许中间有多余输入
 
