@@ -218,7 +218,21 @@ export class SkillQueue {
 
   /** 改窗口（比如"手速慢的玩家给长一点"） */
   set window(v: number) {
-    this._opts.window = Math.max(0, v);
+    /**
+     * 【⚠️ `Math.max(0, v)` 挡不住 NaN】
+     *
+     * `Math.max(0, NaN)` 返回 **NaN**（不是 0），
+     * 于是排队项的过期判断 `now - queuedAt > window` 变成
+     * `x > NaN` → 恒为 false……等等，方向要小心：
+     * 实际判断是 `now - queuedAt <= this._opts.window`，
+     * 对 NaN 恒为 false → **所有排队项立即过期**。
+     *
+     * 表现为"技能队列配好之后一个都排不进去"，
+     * 而 `window` 的值看起来是"配过了的"。
+     *
+     * 用 `numOr` 兜底到 0（0 = 不过期，与 `Math.max(0, ...)` 的既有语义一致）。
+     */
+    this._opts.window = clampNum(v, 0, 1e6, 0);
   }
 
   get capacity(): number {
