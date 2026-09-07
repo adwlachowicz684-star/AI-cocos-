@@ -2,7 +2,7 @@
 
 > 单元（7 个）：`anticheat` `audio` `buff` `collision` `condition` `skill-player` `spatial`
 > 条目 20（P1 13 / P2 7），来源批次 batch3、batch4
-> 测试：`tests/run_phase10_w1b.ts`，导出 `runPhase10W1BTests()`（**57 项，未并入 `tests/run.ts`，由总审合并**）
+> 测试：`tests/run_phase10_w1b.ts`，导出 `runPhase10W1BTests()`（**58 项，未并入 `tests/run.ts`，由总审合并**）
 > 基线：构建通过、**3695 项测试全绿**、6 项校验脚本全过（未改动 `run.ts`、未碰 `_core/`）
 
 ⚠️ **`tests/run.ts` 未改动**——按分工由总审统一注册 `runPhase10W1BTests()`。
@@ -14,7 +14,7 @@ node -e "const f=require('./.build/tests/_framework');f.setSuite('W1-B');
 require('./.build/tests/run_phase10_w1b').runPhase10W1BTests();f.summary();"
 ```
 
-预期输出：`通过 57 项，失败 0 项`。
+预期输出：`通过 58 项，失败 0 项`。
 本报告里所有"修复前"输出都是**本窗口自己跑出来的**，不是抄原报告的证据。
 复现脚本放在 `/data/workspace` 与 `/tmp` 下（未入库，避免 `verify/` 触发 `check-deps.js`）。
 
@@ -28,7 +28,7 @@ require('./.build/tests/run_phase10_w1b').runPhase10W1BTests();f.summary();"
 | 需总审裁决 | 1 |
 
 **新增测试 55 项，全部在修复前确实失败**——验证方式见下方"如何验证'修复前会失败'"。
-全量回归仍是 **3695 项全绿**（我自己的 57 项尚未注册，注册后应为 3752）。
+全量回归仍是 **3695 项全绿**（我自己的 58 项尚未注册，注册后应为 3753）。
 
 ---
 
@@ -39,8 +39,8 @@ require('./.build/tests/run_phase10_w1b').runPhase10W1BTests();f.summary();"
 
 1. 从 `repo.tgz`（本次拉取的原始 main 快照）解出**未修改**的 7 个单元源码，
    覆盖进工作区 → `tsc` 编译 → 跑同一份 `run_phase10_w1b.ts`；
-2. 结果：**通过 34 项，失败 23 项**（23 条失败覆盖下表中 19 条"已修"条目 + 附录的 2 处 destroy 缺口）；
-3. 还原修复后的源码 → 重新编译 → **57 项全绿**。
+2. 结果：**通过 35 项，失败 23 项**（23 条失败覆盖下表中 19 条"已修"条目 + 附录的 2 处 destroy 缺口）；
+3. 还原修复后的源码 → 重新编译 → **58 项全绿**。
 
 失败清单（修复前真实输出）摘录：
 

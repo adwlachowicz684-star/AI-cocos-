@@ -361,6 +361,32 @@ export function runPhase10W1BTests(): void {
       eq(removed.length, 2, '两个 buff 各自发一次 remove');
       eq(cleared, 1, 'clear 事件保留，只监听 clear 的依赖方不受影响');
     });
+
+    test('⚠️ 对照：destroy() 期间仍会通知，之后彻底不再触发', () => {
+      const b = new BuffSystem();
+      b.register({ id: 'a', duration: 5 });
+      b.register({ id: 'c', duration: 5 });
+      const during: string[] = [];
+      b.onChange((ch) => { during.push(ch.kind); });
+      b.apply('a');
+      b.apply('c');
+      during.length = 0;
+      b.destroy();
+      // destroy() 内部走 clear()，所以会发出 remove×2 + clear×1。
+      // 这是**既有行为**（改动前 destroy 也会发一条 clear），此处锁住防止误改。
+      eq(during.length, 3, 'destroy 期间的通知次数（remove,remove,clear）');
+
+      // 真正要守住的是"之后不再触发"——README 对 destroy 的承诺
+      let after = 0;
+      const b2 = new BuffSystem();
+      b2.register({ id: 'a', duration: 5 });
+      b2.onChange(() => { after++; });
+      b2.apply('a');
+      b2.destroy();
+      after = 0;
+      b2.update(1);
+      eq(after, 0, 'destroy 之后任何操作都不再触发回调');
+    });
   });
 
   // ==================== P1 · collision ====================
