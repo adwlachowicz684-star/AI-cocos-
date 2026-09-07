@@ -27,7 +27,7 @@
  * 【零业务依赖】
  */
 
-import { clamp, maxOf, minOf } from '../_core/math';
+import { clamp, maxOf, minOf, numOr } from '../_core/math';
 
 // ==================== 类型 ====================
 
@@ -130,7 +130,20 @@ const DEFAULTS = {
 function resolve(cfg?: TeamMmrConfig) {
   return {
     strategy: cfg?.strategy ?? DEFAULTS.strategy,
-    weightBase: cfg?.weightBase ?? DEFAULTS.weightBase,
+    /**
+     * 【⚠️ 为什么用 numOr 而不是 `??`（P1）】
+     * `??` 只挡 null/undefined：
+     * `weightBase = NaN` → 每个权重 `NaN ** i` 都是 NaN → `num` 与 `den` 全 NaN
+     * → `base = NaN/NaN = NaN` → 整队匹配分 NaN，**不抛错**。
+     *
+     * 【为什么不用 clampNum】
+     * 下面的 `baseRating` 注释里特意保留了一条：负的 weightBase 是合法输入
+     * （负权重在某些建模里有用），真正的问题是分母可能被消成 0，
+     * 而那件事已经由 `den === 0` 分支兜住了。
+     * 所以这里**只兜非有限值，不设上界**——
+     * 按 _core 的约定，普通配置类字段用 numOr，容量/上限类才用 clampNum。
+     */
+    weightBase: numOr(cfg?.weightBase, DEFAULTS.weightBase),
     maxSpread: cfg?.maxSpread ?? DEFAULTS.maxSpread,
     partyPenalty: cfg?.partyPenalty ?? DEFAULTS.partyPenalty,
     penaltyDecay: cfg?.penaltyDecay ?? DEFAULTS.penaltyDecay,
@@ -156,7 +169,7 @@ export function teamMmr(
     throw new Error('[TeamMMR] 队伍为空');
   }
 
-  const ratings = players.map((p) => p.rating);
+  const ratings = collectRatings(players);
   const spread = maxOf(ratings, 0) - minOf(ratings, 0);
   const base = baseRating(ratings, c.strategy, c.weightBase);
   const penalty = partyPenalty(players, c);
@@ -240,6 +253,59 @@ function baseRating(
       return num / den;
     }
   }
+
+  /**
+   * 【⚠️ 为什么必须有 default（P1）】
+   *
+   * TS 的穷尽性检查只在**类型内**生效——它能保证 `MmrStrategy` 的 4 个值
+   * 都被 case 覆盖，但挡不住运行时的脏字符串
+   * （配置文件里写成 `average` / `Weighted` / `'avg '`，
+   * 或者从 JSON 读进来根本没校验过）。
+   *
+   * 没有 default 时，所有 case 都不匹配 → 函数**隐式返回 undefined** →
+   * `effective = undefined + penalty = NaN`。
+   * 实测（修复前）：`strategy: 'average'` → `base = undefined`、`effective = NaN`，
+   * 一次错误都不会抛。
+   *
+   * 后果：匹配分恒为 NaN → 玩家被分进任意对局，
+   * 表现为"排不到人"或"分局实力悬殊"，改一个配置字符串就能触发。
+   *
+   * 【为什么选择抛错而不是静默回落 'weighted'】
+   * strategy 是**开发期配置**，不是运行期数据：
+   * 它错了就该在第一次调用时炸出来，而不是让线上静默地
+   * 用另一种策略算分——那样连"配置写错了"这个事实都观察不到。
+   * （运行期数据本模块另有不同的处理口径，见 `den === 0` 的降级分支。）
+   */
+  throw new Error(
+    `[TeamMMR] 未知的队伍分策略：${JSON.stringify(strategy)}` +
+    `（可选：avg / weighted / max / topHalf）`
+  );
+}
+
+/**
+ * 取出并校验全队分数（P1）
+ *
+ * 【为什么在入口拦，而不是在 maxOf/minOf 里容错】
+ * rating 来自服务端返回或新玩家默认值，出现 null/NaN 的概率不算低。
+ * 一旦放进去：`maxOf` / `minOf` / 加权求和会把它传染成 NaN，
+ * 接着 `spread` 是 NaN、`base` 是 NaN、`effective` 是 NaN，
+ * 再往下 `validateParty` 的 `spread > maxSpread` 对 NaN 恒为 false
+ * ——**本该被拒绝的队伍被放行**。
+ *
+ * 与其让 NaN 一路穿到 UI 上显示 "NaN"，不如在入口带着玩家 id 抛错：
+ * 谁的分有问题一眼就能看到，而不是回头去猜是哪一个。
+ */
+function collectRatings(players: readonly MmrPlayer[]): number[] {
+  const out: number[] = [];
+  for (const p of players) {
+    if (!Number.isFinite(p.rating)) {
+      throw new Error(
+        `[TeamMMR] 玩家 "${p.id}" 的 rating 不是有限数：${p.rating}`
+      );
+    }
+    out.push(p.rating);
+  }
+  return out;
 }
 
 /**
@@ -291,7 +357,9 @@ export type PartyViolation =
   | 'empty'
   | 'spread'
   | 'size'
-  | 'duplicate';
+  | 'duplicate'
+  /** 队内存在非有限的分数值（NaN / Infinity） */
+  | 'rating';
 
 /**
  * 校验组队是否合法
@@ -323,6 +391,27 @@ export function validateParty(
       reason: 'size',
       detail: `队伍 ${players.length} 人，超过上限 ${maxSize}`,
     };
+  }
+
+  /**
+   * 【⚠️ 分数值本身必须先验有限性（P1）】
+   *
+   * 下面 `spread > c.maxSpread` 对 NaN 恒为 false：
+   * 一个 rating = NaN 的队伍，分差算出来是 NaN，
+   * 判定"没有超过上限" → **本该被拦下的队伍被放行**。
+   * 炸鱼/代练的分差限制在这种情况下完全失效，且不报错。
+   *
+   * 这里返回 ok:false 而不是抛错：validateParty 的定位是
+   * "在 UI 上拦下来并给出原因"，抛错会让整个匹配界面挂掉。
+   */
+  for (const p of players) {
+    if (!Number.isFinite(p.rating)) {
+      return {
+        ok: false,
+        reason: 'rating',
+        detail: `玩家 "${p.id}" 的分数值非法：${p.rating}`,
+      };
+    }
   }
 
   // 【注意】本作用域没有 ratings 变量，必须现场 map。
@@ -362,23 +451,37 @@ export function fillFromPool(
 
   const target = teamMmr(party, c).effective;
 
-  let best: MmrPlayer | null = null;
-  let bestDiff = Infinity;
+  /**
+   * 【⚠️ 为什么先排序再校验，而不是逐个校验（P2）】
+   *
+   * 修复前对**每个**候选都跑一次 `validateParty + teamMmr`，
+   * 而 `validateParty` 内部还要再 map 一遍 ratings——
+   * 池子 1000 人 × 队伍 5 人时是全量的 O(pool × party) 扫描，
+   * 可我们要的其实只有一个：离 target 最近的那个**合法**候选。
+   *
+   * 按 |rating − target| 升序排好之后，
+   * **第一个通过校验的候选就是原算法会选中的那个**（判据完全相同：
+   * 都是"差值最小且通过 validateParty"），
+   * 但绝大多数情况下只需校验前几个就能返回。
+   *
+   * 【为什么差值要用 numOr 兜底】
+   * 池子里混进 rating = NaN 的脏数据时 `Math.abs(NaN)` 是 NaN，
+   * 而 `sort` 的比较器返回 NaN 会让排序结果**由引擎实现决定**——
+   * 排在哪里都不对。兜成 Infinity 让脏数据稳定地沉到最后，
+   * 后面 validateParty 会把它判为非法并跳过。
+   */
+  const ranked = pool
+    .map((p) => ({ p, d: numOr(Math.abs(p.rating - target), Infinity) }))
+    .sort((a, b) => a.d - b.d);
 
-  for (const p of pool) {
+  for (const { p } of ranked) {
     // 补进来的人不能破坏分差限制
     const merged = [...party, p];
     if (!validateParty(merged, c).ok) continue;
-
-    const d = Math.abs(p.rating - target);
-    if (d < bestDiff) {
-      bestDiff = d;
-      best = p;
-    }
+    return { pick: p, result: teamMmr(merged, c) };
   }
 
-  if (!best) return null;
-  return { pick: best, result: teamMmr([...party, best], c) };
+  return null;
 }
 
 // ==================== 便捷 ====================
@@ -428,5 +531,21 @@ export function suggestedWindow(
    * 分差每 100 分，窗口额外放宽 20%。
    */
   const uncertainty = 1 + r.spread / 500;
-  return clamp(baseWindow * uncertainty, baseWindow, baseWindow * 3);
+  /**
+   * 【⚠️ 为什么不能直接 clamp(v, baseWindow, baseWindow * 3)（P2）】
+   *
+   * `clamp` 的实现假设 `min <= max`。`baseWindow` 为负时这个假设不成立：
+   * min = -100、max = -300，于是 `v < min` 与 `v > max` 的判定互相颠倒，
+   * clamp 会把结果钉在上界而不是下界——返回值看似合理，语义是错的。
+   * 实测（修复前）：`suggestedWindow(team, -100)` 返回 -100。
+   *
+   * 【为什么不用 clampNum 把 baseWindow 夹成正数】
+   * 调用方传负值说明上游算错了，把它悄悄变成正数（或 0）
+   * 等于替调用方"修正"了一个我们并不理解其意图的输入。
+   * 这里只做两件事：非有限值兜到 0，以及让 min/max 真的构成区间。
+   */
+  const bw = numOr(baseWindow, 0);
+  const lo = Math.min(bw, bw * 3);
+  const hi = Math.max(bw, bw * 3);
+  return clamp(numOr(bw * uncertainty, bw), lo, hi);
 }
