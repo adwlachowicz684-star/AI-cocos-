@@ -118,6 +118,15 @@ export class Transition {
   private _loadDone = false;
   private _loadError: string | null = null;
 
+  /**
+   * 当前转场的代号（每次 start/reset 递增）
+   *
+   * 【为什么需要它】见 `_beginLoad` 的注释：
+   * 在飞的 Promise 完成时无法知道"自己是第几次转场发起的"，
+   * 只能靠一个前后比对的标识来判定自己是否已过期。
+   */
+  private _loadToken = 0;
+
   constructor(loader: SceneLoader, cfg: TransitionConfig = {}) {
     this._loader = loader;
     this._outMs = Math.max(1, numOr(cfg.outMs, 300));
@@ -146,6 +155,8 @@ export class Transition {
     this._error = null;
     this._loadDone = false;
     this._loadError = null;
+    // 递增 token：让上一次转场在飞的 Promise 结果失效
+    this._loadToken++;
 
     // 立即发起异步加载（与淡出并行，节省时间）
     this._beginLoad(scene);
@@ -158,10 +169,38 @@ export class Transition {
      * 串行的话总时长 = 淡出 + 加载；
      * 并行的话 = max(淡出, 加载)。
      * 加载通常远慢于淡出，并行能省下完整的淡出时间。
+     *
+     * 【⚠️ 必须区分"这次结果属于哪次转场"】
+     *
+     * 老实现在 `.then` 里直接 `this._loadDone = true`，
+     * 没有任何标识说明这个结果属于哪一次 `start()`。
+     * 于是：
+     * ```
+     * start('a')            // a 的 loader 挂起
+     * reset(); start('b')   // b 的 loader 还没完成
+     * a 的 Promise resolve  → _loadDone = true   ← 属于 a，却被 b 读到
+     * 下一帧 update()       → 阶段从 load 跳到 in（b 根本没加载完）
+     * ```
+     * 实测（修复前）：`start('a')` → `reset()` → `start('b')`（b 永不 resolve）
+     * → a resolve 后再 `update(1)` → 阶段变成 **`in`**。
+     *
+     * 后果：转场黑幕提前拉开，玩家看到未初始化完成的场景
+     * （地形缺失、角色掉出世界、资源还没上屏）。
+     * 完全静默——没有超时、没有错误、进度条还显示正常。
+     * 在"玩家快速连点切换""加载中途取消"这两个极常见操作下必现。
+     *
+     * 【修法】用单调递增的 token 标记每次转场，
+     * 回调里比对 token，不匹配的（过期的）结果直接丢弃。
+     * `reset()` 递增 token，从而让所有在飞的 Promise 自然失效。
      */
+    const token = this._loadToken;
     this._loader(scene).then(
-      () => { this._loadDone = true; },
+      () => {
+        if (token !== this._loadToken) return;   // 过期结果，丢弃
+        this._loadDone = true;
+      },
       (e: unknown) => {
+        if (token !== this._loadToken) return;   // 过期结果，丢弃
         this._loadDone = true;
         this._loadError = e instanceof Error ? e.message : String(e);
       }
@@ -313,6 +352,12 @@ export class Transition {
     this._error = null;
     this._loadDone = false;
     this._loadError = null;
+    /**
+     * 【⚠️ 递增 token 是 reset 的关键副作用】
+     * 只清标志是不够的——在飞的 Promise 仍会在完成时把 `_loadDone` 写回 true。
+     * 递增 token 后，那些回调因 token 不匹配而丢弃自己的结果。
+     */
+    this._loadToken++;
   }
 
   /**
@@ -328,6 +373,8 @@ export class Transition {
     this._error = null;
     this._loadDone = false;
     this._loadError = null;
+    // 同 start：让上一次（失败的）加载结果失效
+    this._loadToken++;
     this._beginLoad(scene);
     return true;
   }
