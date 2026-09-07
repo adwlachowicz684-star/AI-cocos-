@@ -158,7 +158,43 @@ Markdown 链接语法残缺（只剩右半边括号），被脚本解析成指�
 基线（我开工前第一次跑校验）时即存在，
 且该文件属于 **W3-B** 窗口的任务书，本窗口不修改它。建议总审通知 W3-B 窗口处理。
 
-## 七、给总审的一句话
+## 七、推送后复核（在远端最新 main @ `ef2d264` 上重跑）
+
+推送时基准是 `df65fca`，此后 W2-A 等窗口又合入了改动。
+我在**远端最新 main 的完整副本**上重跑了一遍：
+
+```
+bash build.sh                     # TSC OK（226 个 .js）
+W5-A 52 项独立跑                  # 通过 52 项，失败 0 项 ✓
+W5-A 源码改动完好性                # 9 个单元全部在（fixSeconds / _nextId /
+                                  #   QUEST_STATUSES / turn 的 rng / fsm 的 _started /
+                                  #   skill-queue 的 numOr / steering 的 rand 必填 /
+                                  #   telemetry 的 destroy）✓
+node .build/tests/run.js          # 通过 3696 项，失败 1 项
+                                  #   ✗ 第九批 › BinarySerializer › float 会 clamp 而不是溢出回绕
+                                  #   ← W8-B 修 P1-5 后漏改旧测试所致（W2-A 已定位认领），
+                                  #     与本窗口无关
+node scripts/check-links.js       # [OK] 42 条，断链 0 处 ✓（W3-B 那条已被修掉）
+其余 4 个脚本                      # 全过 ✓
+```
+
+⚠️ **唯一被覆盖的是 `_kitmeta.json`**：我在 `8521b0c` 里用官方 `check-deps.js --fix`
+登记的 `turn → _core`，在最新 main 上又变成"未登记"了——
+有窗口在此之后推送了基于旧 base 的 `_kitmeta.json`。
+当前 main 上未登记的一共 9 条（含 `blessing` / `curse` / `i18n` 等），
+按并行纪律我不代改别人的，请总审统一 `check-deps.js --fix` 一次，
+并提醒各窗口**推送 `_kitmeta.json` 前先基于最新 main**。
+
+## 八、给总审的一句话
 
 编号 5（skill-queue 的 `window`）的现有注释是**主动论证过"这是设计如此"但结论为假**的典型，
 建议把"兜底到 0"这个写法在全库扫一遍——同样的推理方式可能不止这一处。
+
+**这句话在验收 W5-B 时立刻应验了**：他们在 `input/InputBuffer.ts` 的 `window` setter 上
+踩了同一个坑（`numOr(v, 0)` + 注释声称"与构造函数同口径"，但构造函数兜的是 0.15）。
+实测 `window = 0` 时输入缓冲除"同一时间戳"外全部失效，等于没修。
+详见 `audit/verify_W5-A.md` 的 🔴 返工项。
+
+> 另：本目录下的 `verify_W5-A.md`（我对 W5-B 的交叉验收）**已重写**。
+> 上一版误判"W5-B 尚未交付"，原因是我在陈旧的本地副本上 `ls audit/`——
+> 教训是**验收前必须先拉远端最新**，不能在开工时的快照上做判断。

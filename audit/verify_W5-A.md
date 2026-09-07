@@ -1,72 +1,201 @@
 # 验收报告 · W5-A 验收 W5-B
 
+> 验收对象：`audit/result_W5-B.md` + `tests/run_phase10_w5b.ts`（+ 7 个单元源码改动）
+> 验收基准：远端 main @ `ef2d264`（已包含 W5-B 与 W5-A 双方的改动）
+> 验收方式：在**远端最新 main 的完整副本**上重跑，交叉核对五条硬标准
+
+⚠️ **本报告替换了上一版**。上一版写"W5-B 尚未交付"是**我的错**：
+我当时用开工前（13:35）下载的本地副本去 `ls audit/`，而 W5-B 在 17:44 就已推送。
+本地副本陈旧，远端早已存在交付物。已重新拉取远端 main 全套重验。
+
+---
+
 ## 结论
 
-**无法验收 —— W5-B 尚未交付。**
+**有条件通过。**
 
-按 `audit/review_A.md` §1，W5-B 应产出两个交付物，在本次验收时**均不存在**：
+14 条中 13 条五条硬标准全过；**1 条（P2-4 · input 的 `window` setter）存在实质问题，需返工**。
+另有 2 条建议（非阻塞）与 1 项与 W5-B 无关的全库现状，写在最后。
 
-| 应交付 | 路径 | 实际 |
-|---|---|---|
-| 修复报告 | `audit/result_W5-B.md` | ❌ 不存在（整个 `audit/` 下没有任何 `result_*` 文件） |
-| 回归测试 | `tests/run_phase10_w5b.ts` | ❌ 不存在（`tests/` 下只有本窗口的 `run_phase10_w5a.ts`） |
-
-因此 §2 的五条硬标准（复现 / 测试有效 / 对照用例 / 无顺手重构 / 未误判设计）
-**无法逐条给出判断**——它们全部是针对"对方的交付物"的，没有对象可验。
-
-按验收纪律，"验收方不直接改对方代码"，所以我没有替 W5-B 修任何一条。
-
----
-
-## 二、我做了什么替代工作
-
-为了让 W5-B 开工时不用从零复现，我用**独立只读脚本**（放在仓库外，未修改任何 W5-B
-单元代码，未改 `tests/run.ts`）对清单里的 7 条 P1 做了现状核查，确认现象在当前代码上
-是否真实成立。以下输出都是我实际跑出来的：
-
-| 条目 | 核查结论 | 实测输出 |
-|---|---|---|
-| `accessibility` — `fontScale` 构造校验挡不住 NaN | ✅ **现象成立** | `new Accessibility({ fontScale: NaN }).fontScale` → `NaN`。构造里是 `opts.fontScale ?? 1` 后再 `if (this._fontScale <= 0) throw`——`NaN <= 0` 为 false，直接穿透 |
-| `analytics` — `variance` 灾难性消去 | ✅ **现象成立**（且比原报告更严重） | `variance(1e9+1..1e9+4)` → **0**（数学期望 1.667）；`variance(1e12+1..1e12+4)` → **0**；对照 `variance(1,2,3,4)` → `1.6666666666666667`。注意 `Math.max(0, v)` 会把消去后的负值也一并抹成 0，不是"轻微为负"那么温和 |
-| `feedback` — `update` 的 dt 守卫挡不住 Infinity | ✅ **现象成立** | `update(Infinity)` → `timeScale = 1`、`activeCount = 0`（一帧内被推完，反馈完全看不到）；对照 `update(1/60)` → `timeScale = 0.1`、`activeCount = 1`。守卫是 `!(realDt > 0)`，`Infinity > 0` 为 true，不进分支 |
-| `mmr` — `baseRating` 的 switch 无 default | ✅ **现象成立** | 2 人队伍：`strategy='avg'` → `base=1100`；`'max'` → `1200`；**`'min'` → `base=undefined`**；**`'garbage'` → `base=undefined, effective=NaN`**。非法 strategy 静默返回 undefined 并污染 `effective` |
-| `mmr` — `MmrPlayer.rating` 无有限性校验 | ✅ **现象成立** | `teamMmr([{rating:NaN},{rating:1200}], {strategy:'avg'})` → `base = null`（NaN）、`effective = null`、`spread = null`。一个 NaN 传染整局匹配分 |
-| `rarity` — `order` 只查重复不查有限性 | ⚠️ **未实测**（脚本未覆盖，留给 W5-B 自己复现） | — |
-| `scenerouter` — 时间单位与全库不一致（毫秒 vs 秒） | ⚠️ **未实测**（需对比 README 与 `tick` 签名，留给 W5-B 自己复现） | — |
-
-（上面用到的只读脚本放在仓库外的 `verify/` 目录，没有进仓库，也不会触发
-`check-deps.js` 的未登记目录报错。）
+| 指标 | 结果 |
+|---|---|
+| 交付物齐备 | ✅ `result_W5-B.md` / `run_phase10_w5b.ts` / `examples/accessibility-usage.ts` 均存在 |
+| 独立跑测 | ✅ **53 项全绿** |
+| 全量回归 | ✅ 3696 通过 / 1 失败（失败项为 **W8-B 引入的既有红灯**，与 W5-B 无关，见 §附） |
+| 反向验证（修复前） | ✅ 26 过 / 27 失败，且数字与用例结构**自洽**（我核过账，见 §标准 2） |
+| 我独立复现 | ✅ 其中 4 条我在**自己的旧副本（W5-B 之前的 main）**上独立跑出过同样现象 |
 
 ---
 
-## 三、给 W5-B 的提醒（开工前看一眼）
+## 逐条验收
 
-1. **`analytics.variance` 的修法要小心**：`Math.max(0, v)` 现在把灾难性消去的结果
-   （一个巨大的负数）也抹成 0。改成两遍遍历（Welford 或先算 mean 再算 Σ(x−m)²）之后，
-   要确认 `Math.max(0, …)` 还需要保留——它是为了挡浮点误差，但也会掩盖真实错误。
-2. **`mmr.baseRating` 的 `'min'` 分支也返回 undefined**：这不只是"非法 strategy"的问题，
-   连一个**合法**策略都不通。修 default 时顺手确认 `'min'` 是不是漏了分支，
-   别只加 `default` 就了事。
-3. **`feedback` 的守卫别写成 `!(realDt > 0)` 的变体**：要挡的是"非有限值"，
-   直接 `Number.isFinite(realDt) && realDt > 0` 最清楚。
-4. **`accessibility` 的 `shakeScale`**：原报告说"构造不 clamp 而 setter clamp"，
-   统一口径时先确认 setter 的 clamp 范围——别把合法的 `0`（关闭震动）夹成 1，
-   这是全库已经踩过一次的坑（`maxVoices` 把"静音配置 0"夹成 1）。
+| 条目 | 单元 | 标准1 复现 | 标准2 测试有效 | 标准3 对照 | 标准4 无顺手重构 | 标准5 未误判设计 | 备注 |
+|---|---|---|---|---|---|---|---|
+| P1-1 | accessibility | ✅ | ✅ | ✅ | ✅ | ✅ | 见下"亮点" |
+| P1-2 | analytics | ✅ | ✅ | ✅ | ⚠️ 建议 | ✅ | 算法重写必要，但见 §建议 1 |
+| P1-3 | feedback | ✅ | ✅ | ✅ | ✅ | ✅ | |
+| P1-4 | mmr | ✅ | ✅ | ✅ | ✅ | ✅ | |
+| P1-5 | mmr | ✅ | ✅ | ✅ | ✅ | ✅ | 对照组保住了 `weightBase = -1` 的既有降级分支，很好 |
+| P1-6 | rarity | ✅ | ✅ | ✅ | ✅ | ✅ | 还主动更正了原报告夸大的"全错"，严谨 |
+| P1-7 | scenerouter | ✅ | ✅ | ✅ | ✅ | ✅ | 只改名不改单位，已上报总审裁决——**处理得当** |
+| P2-1 | accessibility | ✅ | ✅ | ✅ | ✅ | ✅ | `shouldPlay` 合并分支有注释论证，非顺手重构 |
+| P2-2 | analytics | ✅ | ✅ | ✅ | ✅ | ✅ | |
+| P2-3 | feedback | ✅ | ✅ | ✅ | ✅ | ✅ | `popup` 只改文档 + 用测试钉住真实行为，**教科书式处理** |
+| **P2-4** | **input** | ✅ | **❌ 实质问题** | ⚠️ | ✅ | ✅ | **见下"🔴 返工项"** |
+| P2-5 | mmr | ✅ | ✅ | ✅ | ⚠️ 建议 | ✅ | `fillFromPool` 改了算法，见 §建议 2 |
+| P2-6 | rarity | ✅ | ✅ | ✅ | ✅ | ✅ | `defineProperty` 而非 `Object.create(null)`，理由充分 |
+| P2-7 | scenerouter | ✅ | ✅ | ✅ | ✅ | ✅ | load progress 恒 0 判定为"设计使然"并写进文档，正确 |
 
 ---
 
-## 四、附：全库校验结果（本窗口交付后）
+## 🔴 返工项：P2-4 · input 的 `window` setter 兜底到 0
 
-```bash
-bash build.sh                       # TSC OK（产物校验通过：211 个 .js）
-node .build/tests/run.js            # 通过 3695 项，失败 0 项
-node scripts/check-deps.js          # 全部通过 ✓
-node scripts/check-links.js         # 44 条内部链接，断链 1 处（audit/handoff_W3-B.md，非本窗口引入）
-python3 scripts/scan-dt-guard.py    # 扫描 146 个文件，命中 0 处 ✓
-python3 scripts/scan-num-guard.py   # 扫描 0 处命中 ✓
-python3 scripts/check-random-source.py  # [OK] 未发现自建随机源 ✓
-python3 scripts/check-dup-exports.py    # [OK] 无待处理的冲突 ✓
+### 问题
+
+`input/InputBuffer.ts` 里同一个字段的两条路径**兜底值不一致**：
+
+```ts
+// :127  构造函数
+this._window = numOr(opts.window, 0.15);      // NaN → 0.15（文档默认值）✅
+
+// :146  setter
+this._window = Math.max(0, numOr(v, 0));      // NaN → 0  ❌
 ```
 
-> `tests/run.js` 的 3695 项里**不含**本窗口新增的 52 项——`tests/run.ts` 按任务书 §6
-> 由总审统一合并注册，我没有改它。W5-B 交付后同样如此，请总审一并合并。
+而 `:144` 的注释白纸黑字写着：
+
+> 先用 `numOr` 把 NaN / Infinity 兜成 0，再夹掉负数，
+> **与构造函数的 `numOr(opts.window, …)` 保持同一口径。**
+
+**注释声称同口径，实际兜底值一个是 0.15、一个是 0。**
+
+### 为什么 0 是错的
+
+我在远端 main 上用只读脚本实测过 `window = 0` 的实际语义（`input/InputBuffer.ts:181` 是 `now - t <= this._window`）：
+
+```
+window=0, 同一时刻      peek = true   consume = true
+window=0, 过了 1 毫秒   peek = false  consume = false     ← 缓冲已死
+window=0.15 同时刻      peek = true   （对照）
+```
+
+即 **`window = 0` 意味着输入缓冲除"同一时间戳"外全部失效**——
+对于"按下后下一帧再消费"这个主力用法，它是死的。
+
+所以修复前后对比是：
+
+| | 修复前 | 修复后 |
+|---|---|---|
+| `ib.window = NaN` | 存 NaN → `now-t <= NaN` 恒 false → **死** | 存 0 → 除同一时刻外恒 false → **还是死** |
+
+修完之后 `window` 变成了可观测的有限数（这是他们明写的目标，达到了），
+但**缓冲依然不工作**。而构造函数那条路径（NaN → 0.15）是对的——
+同一个类的两个入口给出了两种命运。
+
+### 这为什么必须返工，而不是"小问题"
+
+三条理由：
+
+1. **它自己就在修这类 bug**。W5-B 在 P1-1 里写了一段很漂亮的注释批评
+   accessibility 的"构造传 5 生效、setter 却夹到 1——行为随调用路径变化"，
+   然后在 P2-4 里把同一个毛病又犯了一次。
+2. **测试把这个错值钉死了**。`run_phase10_w5b.ts` 里
+   `test('⚠️ setter 传 NaN 不得再存 NaN')` 断言的是 `eq(ib.window, 0)`。
+   将来谁想改成 0.15，这条会变红——测试成了错误兜底的护栏。
+3. **它踩的是全库已知的那个坑**。"时间窗字段兜底到 0"我这边（W5-A / skill-queue）
+   也踩过一次：原注释同样论证"0 = 不过期，与 `Math.max(0, …)` 语义一致"，
+   实测 `waited <= 0` 只有入队那一帧成立，等于立即过期。
+   我在 `audit/result_W5-A.md` §二 里专门写过这条，可以直接对照。
+
+### 建议修法（三选一，我倾向第二个）
+
+- **A**：setter 也回落 `0.15` —— 与构造函数完全一致，最省心；
+- **B**：非法值**保持旧值**（`numOr(v, this._window)`）——与我在 skill-queue 的修法一致，
+  适合"窗口允许运行时热更新"的场景，一次热更传 NaN 不会把手感清空；
+- **C**：非法值拒绝赋值并抛错。
+
+无论选哪个，请**同步改掉 `eq(ib.window, 0)` 这条断言**，
+并补一条"setter 传 NaN 之后 press → 隔一帧 consume 仍能拿到"的行为级断言——
+只断言字段值不等于 0 是数值断言，断言"缓冲还能用"才是行为断言。
+
+---
+
+## ✅ 亮点（值得别的窗口照抄）
+
+1. **反向验证做得比我扎实**。他们把测试原样放到未修改的原始仓库上跑，拿到 26/27。
+   我核对了账：53 项 = 36 条回归 + 16 条对照 + 1 条其它；
+   27 = 36 条回归里真正会因修复而翻转的那部分；26 = 16 对照 + 1 其它 + 9 条
+   "记录真实行为"的回归用例（popup 恒定、load progress 恒 0、fillFromPool 等价改写等）。
+   **数字自洽**，且他们在报告里主动说明了"这 9 条通过是因为它们记录的是真实行为"。
+2. **P2-3 的 `popup` 处理**：文档说"进度"、实现是"强度"——他们既不改实现（breaking），
+   也不放着不管，而是改文档 + 写测试把"恒定"这个真实行为钉住。
+   这正是任务书 §4 模式 F 的正确用法。
+3. **主动更正原报告**：P1-2 里原报告写"精确值 2"，他们实测是 2.5 并指出原报告会误导；
+   P1-6 里原报告说"全错"，他们实测只有涉及 NaN 项的比较才错。
+   **没有照抄上游结论**。
+4. **P1-1 保留了 `fontScale = 0` 抛错**的既有契约，只把判定从 `<= 0` 改成 `!(v > 0)`，
+   并在对照用例里显式说明"为什么保留抛错而不是改成 clamp"——
+   没有把设计当 bug 修。
+
+---
+
+## ⚠️ 两条建议（非阻塞）
+
+### 建议 1 · P1-2 `variance` 的 `shift` 取第一个样本
+
+`Stats` 新增了可选字段 `shift`，`record*` 写入"移位后"的 sum/sumSq，`mean` 再还原量级。
+方案本身正确（方差平移不变），两点想请对方确认：
+
+- **跨批合并**：`shift` 取的是**第一批的第一个样本**。如果调用方把两个
+  不同时期、不同量级的 `Stats` 手工合并（存档合并、A/B 两组相加），
+  两个 `shift` 不一致会让结果失去意义。建议在 JSDoc 里写明
+  "**不要手工合并 Stats，请用 record* 逐条喂**"。
+- **外部构造的字面量**：文档说"不带 shift 等价于 shift=0，退化为修复前写法"，
+  那么测试里那种 `const bad = { n: 10, conversions: NaN, sum: NaN, sumSq: NaN }`
+  是安全的；但一个**外部构造的、量级很大的** Stats（如 `{sum: 1e16, sumSq: 1e32}`）
+  仍会退化到灾难性消去。这属于"无法两全"，建议 README 里点一句边界。
+
+### 建议 2 · P2-5 `fillFromPool` 的算法改写
+
+从"遍历 + 取最小差"改成"先按差值排序 + 取第一个通过校验的"。
+我核过等价性：原算法取"合法候选中 d 最小者"，新算法按 d 升序取"第一个合法的"，
+在 ES2019+ 稳定排序下两者对并列差值的选取也一致 —— **行为等价，性能更好**。
+
+但严格说这超出了"修 NaN 传染"的必要范围。既然改了，建议在报告里
+把"这是性能改写、已证明与原算法等价"写得更醒目一点（现在埋在注释里），
+免得总审按标准 4 判成顺手重构。
+
+---
+
+## 附：全库校验结果（远端 main @ ef2d264 完整副本）
+
+```bash
+bash build.sh                       # TSC OK（产物校验通过：226 个 .js）
+node .build/tests/run_phase10_w5b.js  # W5-B 独立跑：通过 53 项，失败 0 项 ✓
+node .build/tests/run.js            # 通过 3696 项，失败 1 项
+                                    #   ✗ 第九批 › BinarySerializer › ⚠️ float 会 clamp 而不是溢出回绕
+                                    #   ← W8-B 修 P1-5（越界从 clamp 改抛错）后漏改旧测试，
+                                    #     W2-A 的提交信息里已定位并认领，与 W5-B 无关
+node scripts/check-links.js         # [OK] 内部链接 42 条，断链 0 处 ✓（W3-B 那条已被修掉）
+python3 scripts/scan-dt-guard.py    # 146 个文件，命中 0 处 ✓
+python3 scripts/scan-num-guard.py   # 0 处命中 ✓
+python3 scripts/check-random-source.py  # [OK] 未发现自建随机源 ✓
+python3 scripts/check-dup-exports.py    # [OK] 无待处理冲突 ✓
+node scripts/check-deps.js          # ⚠️ 有 1 项需要处理（见下）
+```
+
+### check-deps 的 9 条未登记（与 W5-B 无关，报给总审）
+
+当前 main 上 `check-deps.js` 报 9 条"import 了但没登记"，清单里有
+**`turn → _core`** —— 这一条我在 W5-A 提交（`8521b0c`）里已经用官方
+`check-deps.js --fix` 登记过了，**现在又没了**，说明有窗口在此之后推送了
+一份基于旧 base 的 `_kitmeta.json`，把我的登记覆盖掉了。
+
+`turn` 之外的 8 条（含 `blessing` / `curse` / `i18n` 等）属于别的窗口，
+按并行纪律我不代改。请总审统一用 `--fix` 跑一次，并提醒各窗口
+**推送 `_kitmeta.json` 前先基于最新 main**，否则会互相覆盖。
+
+> 已确认：我 W5-A 的 9 个单元源码改动在 ef2d264 上**全部完好**
+> （`fixSeconds` / `_nextId` / `QUEST_STATUSES` / turn 的 `rng` / fsm 的 `_started` /
+> skill-queue 的 `numOr` / steering 的 rand 必填 / telemetry 的 `destroy` 均在），
+> 只有 `_kitmeta.json` 这一处元数据被覆盖。
