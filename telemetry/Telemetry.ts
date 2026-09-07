@@ -143,7 +143,19 @@ export class Telemetry {
     this._commonProps = opts.commonProps ?? {};
     this._sampleRate = clamp01(opts.sampleRate ?? DEFAULTS.sampleRate);
     this._eventSampleRates = opts.eventSampleRates ?? {};
-    this._maxRetries = opts.maxRetries ?? DEFAULTS.maxRetries;
+    /**
+     * 【⚠️ 必须用 clampNum 而不是 `??`】
+     *
+     * `??` 只挡 null/undefined，**挡不住 NaN**。
+     * `maxRetries` 为 NaN 时，判断重试的地方 `this._retries <= this._maxRetries`
+     * 变成 `0 <= NaN` → 恒为 false → **第一次发送失败就永久丢数据**。
+     *
+     * 这与 JSDoc 的承诺（"发送失败重试次数（超过则丢弃）"）正好相反：
+     * 配成 NaN 后重试机制彻底失效，且因为"看起来配置过了"而极难发现。
+     *
+     * 上界 100 是防"配成极大值导致失败后无限重试、请求打满"。
+     */
+    this._maxRetries = clampNum(opts.maxRetries, 0, 100, DEFAULTS.maxRetries);
     this._maxBuffer = clampNum(opts.maxBuffer, 1, 1e7, DEFAULTS.maxBuffer);
     this._sessionId = opts.sessionId ?? randomId();
     this._lastFlushAt = this._now();
