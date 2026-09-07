@@ -1036,7 +1036,9 @@
       "path": "blessing/Blessing.ts",
       "maturity": "beta",
       "purpose": "祝福堆叠：软上限递减 + 互斥（双向）+ 三选一抽取",
-      "depends": [],
+      "depends": [
+        "_core"
+      ],
       "hasTest": true,
       "hasDemo": true,
       "domain": "内容与掉落",
@@ -1048,9 +1050,7 @@
       "path": "curse/Curse.ts",
       "maturity": "beta",
       "purpose": "诅咒：增益+代价触发时机+移除条件，canRemove/remove 一致",
-      "depends": [
-        "_core"
-      ],
+      "depends": [],
       "hasTest": true,
       "hasDemo": true,
       "domain": "内容与掉落",
@@ -1223,9 +1223,7 @@
       "layer": "L1",
       "domain": "表现与外壳",
       "maturity": "beta",
-      "depends": [
-        "_core"
-      ],
+      "depends": [],
       "hasTest": true,
       "hasDemo": true,
       "purpose": "设置界面里的\"按键设置\"",

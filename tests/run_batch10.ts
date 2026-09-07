@@ -743,12 +743,24 @@ export async function runBatch10Tests(): Promise<void> {
       }
     });
 
-    test('⚠️ float 会 clamp 而不是溢出回绕', () => {
+    test('⚠️ float 越界抛错，绝不静默截断 / 溢出回绕', () => {
       const s = schema<{ x: number }>({ x: float(-10, 10, 0.1) });
-      eq(s.decode(s.encode({ x: 999 })).x <= 10, true, '超上限应被 clamp');
-      eq(s.decode(s.encode({ x: -999 })).x >= -10, true, '低于下限应被 clamp');
-      // 回绕的话会变成 -10 附近，这里确保不是
-      assert(s.decode(s.encode({ x: 999 })).x > 0, '不能回绕成负数');
+      /**
+       * 【为什么从"会 clamp"改成"抛错"】
+       * 这条用例原本要防的是**回绕**（写 999 读回负数）——抛错同样能防住。
+       * 但它顺手把"静默 clamp"也锁成了契约：写 999 读回 10，不报错。
+       * 这与 README §6③「越界值绝不静默截断」直接冲突，
+       * 也是 W8-B 的 P1-5（float 是承载坐标/血量最可能的类型）。
+       * 现在默认抛错；确实需要截断的调用方显式传 `clamp: true`（见下）。
+       */
+      throws(() => s.encode({ x: 999 }), '越界');
+      throws(() => s.encode({ x: -999 }), '越界');
+
+      // 显式开启 clamp 时才截断，且仍然不回绕
+      const c = schema<{ x: number }>({ x: float(-10, 10, 0.1, 0, { clamp: true }) });
+      eq(c.decode(c.encode({ x: 999 })).x <= 10, true, '显式 clamp：超上限应被截断到边界');
+      eq(c.decode(c.encode({ x: -999 })).x >= -10, true, '显式 clamp：低于下限应被截断到边界');
+      assert(c.decode(c.encode({ x: 999 })).x > 0, '不能回绕成负数');
     });
 
     test('float 拒绝 NaN / Infinity', () => {
