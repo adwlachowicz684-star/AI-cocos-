@@ -36,7 +36,7 @@
  * 由调用方拿去渲染。这样它可以被完整测试。
  */
 
-import { normalizeAngleRad, clamp } from '../_core/math';
+import { normalizeAngleRad, clamp, numOr } from '../_core/math';
 
 // ==================== 类型 ====================
 
@@ -170,6 +170,13 @@ export interface MinimapIcon {
 
 // ==================== 实现 ====================
 
+/**
+ * scale 的下界
+ *
+ * 见下方 `Minimap` 构造函数的注释：0 会让 `minimapToWorld` 除零产出 NaN。
+ */
+const MIN_SCALE = 1e-6;
+
 /** 把角度规范到 (-π, π] */
 export function normalizeAngle(a: number): number {
   /**
@@ -204,7 +211,28 @@ export class Minimap {
       edgePadding: cfg.edgePadding ?? 4,
     };
 
-    this._scale = cfg.scale ?? this._autoScale();
+    /**
+     * 【⚠️ 曾经的 bug：scale = 0 时 minimapToWorld 除零，返回 NaN 坐标】
+     *
+     * `scale: 0` 在语义上是"不缩放"，是**合法的配置输入**
+     * （`_autoScale` 在 follow 模式下返回硬编码 1，所以只有显式传 0 才触发）。
+     * 构造期没有任何校验，于是 `(m.x - viewSize.x/2) / this._scale`
+     * 直接产出 NaN。
+     *
+     * 实测（修复前）：
+     *   `new Minimap({... mode:'follow', scale: 0}).minimapToWorld({x:10,y:10},{x:0,y:0})`
+     *   → `{x: NaN, y: NaN}`
+     *
+     * 后果：小地图"点哪走哪"返回 NaN 坐标，角色瞬移到 NaN 或原地不动，
+     * 且**不报错**——NaN 会一路传到寻路、再传到渲染层才以别的形式暴露出来。
+     *
+     * 【为什么用极小正数而不是拒绝 0】
+     * 拒绝（抛错）会让"我传了个 0 想看看会怎样"变成启动崩溃；
+     * 而极小正数让"不缩放"退化成"缩到几乎无穷大"，
+     * 至少不会产生 NaN 这种会污染整条数据链的值。
+     */
+    const raw = cfg.scale ?? this._autoScale();
+    this._scale = numOr(raw, 1) > MIN_SCALE ? numOr(raw, 1) : MIN_SCALE;
   }
 
   private _autoScale(): number {
@@ -507,8 +535,22 @@ export class FogMap {
   private readonly _cells: Uint8Array;
 
   constructor(worldSize: Vec2, resolution: number) {
-    this._worldSize = worldSize;
-    this._res = Math.max(1, resolution);
+    /**
+     * 【⚠️ 世界尺寸必须收口到正数】
+     *
+     * `reveal()` 里要用 `worldSize.x / res` 算格子尺寸。
+     * 世界尺寸为 0（配置漏填、JSON 里 `"height": 0`）时格子尺寸为 0，
+     * 于是"要扩多少格"算出来是 Infinity——那个 for 循环不会报错，
+     * 它会**一直跑到进程被杀**。
+     *
+     * 这是一个"配置写错 → 游戏卡死且没有任何线索"的入口，
+     * 所以在这里就把它钳住。
+     */
+    this._worldSize = {
+      x: numOr(worldSize?.x, 1) > 0 ? numOr(worldSize?.x, 1) : 1,
+      y: numOr(worldSize?.y, 1) > 0 ? numOr(worldSize?.y, 1) : 1,
+    };
+    this._res = Math.max(1, Math.floor(numOr(resolution, 1)));
     this._cells = new Uint8Array(this._res * this._res);
   }
 
@@ -531,15 +573,54 @@ export class FogMap {
       if (i >= 0) this._cells[i] = 1;
       return;
     }
-    const step = (radius / this._worldSize.x) * this._res;
-    const cells = Math.max(1, Math.ceil(step));
+    /**
+     * 【⚠️ 曾经的 bug：用 X 轴的格子密度去换算 Y 轴的跨度】
+     *
+     * 原实现：
+     * ```ts
+     * const step = (radius / this._worldSize.x) * this._res;
+     * const cells = Math.max(1, Math.ceil(step));   // X、Y 共用这一个跨度
+     * ```
+     *
+     * 格子的"世界单位/格"在两个方向上是不同的
+     * （cellW = worldSize.x / res，cellH = worldSize.y / res）。
+     * 世界是 1000×100、分辨率 100 时，每格是 10×1——
+     * Y 方向一格只代表 1 个世界单位，却按 X 方向（一格 10 单位）去算要扩几格。
+     *
+     * 实测（修复前）：世界 1000×100、res 100、`reveal({x:500,y:50}, 100)`
+     *   → 半径 100 世界单位本应覆盖 Y 方向全部 100 格（100 ≥ 世界高度 100）
+     *   → 实际只揭开 **21 格**（step = 100/1000*100 = 10 格，2×10+1）
+     *
+     * 【为什么正方形地图自测完全测不出来】
+     * 世界 100×100 时 cellW === cellH，两个数相等，
+     * "用 X 换算 Y"恰好是对的——对照组通过纯属巧合。
+     * 而**横版/长条关卡几乎全是非正方形**，这正是最常见的形态。
+     *
+     * 后果：玩家走过的路在小地图上仍是黑的，
+     * `coverage` 统计也偏小，连带"探索度 X%"这类进度显示一起错。
+     * 全程静默，没有任何报错。
+     *
+     * 修法：两个方向分别算跨度，并按真实圆形判定（而不是方形包围盒）。
+     */
+    const cellW = this._worldSize.x / this._res;
+    const cellH = this._worldSize.y / this._res;
     const cx = Math.floor((world.x / this._worldSize.x) * this._res);
     const cy = Math.floor((world.y / this._worldSize.y) * this._res);
-    for (let dy = -cells; dy <= cells; dy++) {
-      for (let dx = -cells; dx <= cells; dx++) {
+
+    // 各方向需要覆盖的格数（+1 是为了覆盖圆心所在格到边缘的余数）
+    const spanX = Math.ceil(radius / cellW) + 1;
+    const spanY = Math.ceil(radius / cellH) + 1;
+    const r2 = radius * radius;
+
+    for (let dy = -spanY; dy <= spanY; dy++) {
+      for (let dx = -spanX; dx <= spanX; dx++) {
         const gx = cx + dx;
         const gy = cy + dy;
         if (gx < 0 || gy < 0 || gx >= this._res || gy >= this._res) continue;
+        // 真实圆形判定：格子中心到圆心的世界距离
+        const wx = (gx + 0.5) * cellW - world.x;
+        const wy = (gy + 0.5) * cellH - world.y;
+        if (wx * wx + wy * wy > r2) continue;
         this._cells[gy * this._res + gx] = 1;
       }
     }

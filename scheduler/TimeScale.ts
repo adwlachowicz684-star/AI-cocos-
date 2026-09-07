@@ -61,17 +61,30 @@ export interface TimeScaleOptions {
    * **需要真暂停（scale 严格为 0）时，用 `pause()` 显式调用。**
    */
   readonly minScale?: number;
+  /**
+   * 时间源（默认 `Date.now`）
+   *
+   * 【为什么要注入（rule2）】
+   * `add(..., now = Date.now())` 让模块内部主动去"找"墙钟时间：
+   *   - 单测里想表达"过了 100ms"只能真的 sleep 或改全局 Date
+   *   - 回放 / 确定性模拟无法控制时间推进
+   *
+   * 保持默认值为 `Date.now`，所以既有调用方一行都不用改。
+   */
+  readonly nowProvider?: () => number;
 }
 
 export class TimeScale {
   private readonly _layers = new Map<string, ScaleLayer>();
   private readonly _minScale: number;
+  private readonly _now: () => number;
 
   /** 显式暂停（优先级最高，独立于 layer 机制） */
   private _paused = false;
 
   constructor(opts: TimeScaleOptions = {}) {
     this._minScale = opts.minScale ?? 0;
+    this._now = opts.nowProvider ?? (() => Date.now());
   }
 
   /**
@@ -89,9 +102,36 @@ export class TimeScale {
    * 所以层的到期判定走真实时间线（`unscaledTime`），
    * 只有"游戏内"的计时才受缩放影响。
    */
-  add(id: string, scale: number, durationSeconds?: number, now = Date.now()): void {
+  add(id: string, scale: number, durationSeconds?: number, now = this._now()): void {
     if (!Number.isFinite(scale) || scale < 0) {
       throw new Error(`[TimeScale] 非法的 scale: ${scale}`);
+    }
+    /**
+     * 【⚠️ 曾经的 bug：durationSeconds 不做校验，顿帧/慢动作被静默丢弃】
+     *
+     * `expiresAt = now + durationSeconds * 1000`。
+     * 传 `0` 或负数时 expiresAt 落在**过去**，
+     * 下一次 `update()` 立刻把它当过期层删掉——
+     * 于是 `hitStop(-1)` / `slowMotion(0.5, -5)` 之后 `layerCount` 直接是 0，
+     * 顿帧像没发生过一样，而且**一个字都不报**。
+     *
+     * 实测（修复前）：`ts.add('hitstop', 0.05, -1)` → update 后 layerCount = 0。
+     *
+     * 表现为"打击感没了"/"慢动作没生效"，
+     * 排查时第一反应是数值配得不对，很难想到是 duration 的符号。
+     *
+     * 【为什么是抛错而不是静默改成永久层】
+     * 改成永久层更糟：一个本该 80ms 消失的顿帧变成永久 0.05 倍速，
+     * 游戏从此一直慢放。传错的 duration 是**调用方的编程错误**，
+     * 早炸早发现——这与本方法对非法 `scale` 的处理口径一致。
+     */
+    if (durationSeconds !== undefined && !Number.isFinite(durationSeconds)) {
+      throw new Error(`[TimeScale] 非法的 durationSeconds: ${durationSeconds}`);
+    }
+    if (durationSeconds !== undefined && durationSeconds <= 0) {
+      throw new Error(
+        `[TimeScale] durationSeconds 必须为正，收到 ${durationSeconds}（传 undefined 表示永久层）`
+      );
     }
     this._layers.set(id, {
       id,
@@ -145,7 +185,7 @@ export class TimeScale {
    * @param now 真实时间戳（毫秒）。由外部传入而非内部取 Date.now()，
    *            是为了可测试性——单测里能精确控制"时间"。
    */
-  update(now = Date.now()): void {
+  update(now = this._now()): void {
     for (const [id, l] of this._layers) {
       if (l.expiresAt !== null && now >= l.expiresAt) {
         this._layers.delete(id);

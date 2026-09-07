@@ -135,12 +135,52 @@ export class ConfigLoader {
   }
 
   private async _loadTable(name: string): Promise<void> {
+    /**
+     * 【⚠️ 曾经的 bug：`_issues` 只增不减】
+     *
+     * `reload()` 里有 `filter((i) => i.table !== tableName)`，
+     * 但 `load()` / `loadAll()` 没有——于是同一张表重复 load，
+     * 旧的问题永远留在数组里：
+     *
+     *   同一张表 load 三次 → issues 从 1 累积到 3
+     *
+     * 长期热重载（改一次配置重载一次）会让这个数组缓慢增长，
+     * 表现为"配置面板里的错误越来越多，但配置其实早改对了"。
+     *
+     * 修法：进入本方法就先丢掉**这张表**的旧问题，
+     * 与 `reload()` 的口径统一（而不是只保留 reload 的那一行）。
+     */
+    this._issues = this._issues.filter((i) => i.table !== name);
+
     // ① 取原始数据
     let rows: readonly unknown[];
     try {
       rows = await this._source.load(name);
     } catch (e) {
       const msg = `加载失败: ${e instanceof Error ? e.message : String(e)}`;
+      this._issues.push({ table: name, index: -1, rowId: '?', field: '', message: msg });
+      if (this._throwOnError) throw new Error(`[ConfigLoader] 表 "${name}" ${msg}`);
+      return;
+    }
+
+    /**
+     * 【⚠️ 曾经的 bug：数据源返回非数组时抛出与配置完全无关的 TypeError】
+     *
+     * 原代码直接进到下面的 `for (const row of rows)`，
+     * 而那行**不在 try 里**，于是 `rows is not iterable` 直接抛出去。
+     *
+     * 后果：`throwOnError: false`（"我想一次看到所有表的问题"）这个语义
+     * 在这类错误上彻底失效——第一张表炸掉，后面 8 张表的问题一条都看不到。
+     * 而且错误信息 `rows is not iterable` 完全不提表名、不提"配置"，
+     * 排查方向会被带到"是不是 for...of 写错了"。
+     *
+     * 修法：当作这张表的一个校验问题，文案指名道姓说清是数据源的返回类型不对。
+     */
+    if (!Array.isArray(rows)) {
+      const typeName = rows === null || rows === undefined
+        ? String(rows)
+        : Object.prototype.toString.call(rows);
+      const msg = `数据源返回的不是数组（实际 ${typeName}）`;
       this._issues.push({ table: name, index: -1, rowId: '?', field: '', message: msg });
       if (this._throwOnError) throw new Error(`[ConfigLoader] 表 "${name}" ${msg}`);
       return;
@@ -156,12 +196,35 @@ export class ConfigLoader {
     }
 
     // ③ 建索引
+    //
+    // 【⚠️ 曾经的 bug：id 撞车时索引静默覆盖】
+    //
+    // `index.set(String(id), row)` 对重复 id 直接覆盖：
+    // 表里有 2 行（count 是对的），索引里只剩 1 条，
+    // `get()` 拿到的永远是后一条，**没有任何报错**。
+    //
+    // 这里为什么值得单独再报一次、而不是只靠 Validator 查重：
+    // 表可以**没有 schema**（`_loadTable` 里 `schema ? validate : []`），
+    // 那条路径下 Validator 根本没跑，索引覆盖是唯一能发现问题的人。
+    // 有 schema 时 Validator 会先报一条"id 重复"，
+    // 这里再报一条索引层面的（指向"按 id 取值会拿到哪一条"），
+    // 两条说的是同一件事的两面，不算噪音。
     const index = new Map<string, unknown>();
     for (const row of rows) {
       if (row && typeof row === 'object') {
         const id = (row as Record<string, unknown>).id;
         if (typeof id === 'string' || typeof id === 'number') {
-          index.set(String(id), row);
+          const key = String(id);
+          if (index.has(key)) {
+            this._issues.push({
+              table: name,
+              index: -1,
+              rowId: key,
+              field: 'id',
+              message: `id "${key}" 重复：索引里后者覆盖了前者，按此 id 取配置只会拿到最后一条`,
+            });
+          }
+          index.set(key, row);
         }
       }
     }
@@ -220,10 +283,27 @@ export class ConfigLoader {
     return this.all<T>(tableName).filter(predicate);
   }
 
-  /** 表中行数 */
+  /**
+   * 表中行数
+   *
+   * 【⚠️ 曾经的 bug：同为查询接口，口径却不一致】
+   *
+   * `all()` / `get()` / `where()` 对未加载的表都抛「表未加载」，
+   * 只有 `count()` 静默返回 0。
+   *
+   * 后果：`if (loader.count('drops') > 0)` 这种"先探一下有没有数据"的写法，
+   * 在表根本没加载时会**安静地走 else 分支**——
+   * 表现为"掉落表是空的"，而真正的原因是表名写错或 loadAll 没跑到它。
+   * 这类 bug 排查方向 100% 会被引到"表里是不是没配数据"。
+   *
+   * 修法：统一走 `_requireTable` 抛错。
+   * 需要"可能没加载"的语义时，用 `loadedTables.includes(name)` 或 `find()`。
+   *
+   * 【⚠️ 这是对外行为的变更】未加载时从返回 0 变成抛错，
+   * 与 `all()` / `get()` 的既有约定对齐（本文件开头就写明"缺失即报错"）。
+   */
   count(tableName: string): number {
-    const table = this._tables.get(tableName);
-    return table ? table.rows.length : 0;
+    return this._requireTable(tableName).rows.length;
   }
 
   has(tableName: string, id: string | number): boolean {
@@ -264,11 +344,41 @@ export class ConfigLoader {
     for (const h of this._reloadHandlers) h(tableName);
   }
 
-  /** 订阅热重载 */
+  /**
+   * 订阅热重载
+   *
+   * 【⚠️ 曾经的 bug：旧的取消函数会误删新注册的同名监听器】
+   *
+   * 原实现把 `fn` 本身推进数组，取消时 `indexOf(fn)`。
+   * 于是这种序列会出问题：
+   *
+   * ```typescript
+   * const off = loader.onReload(refresh);
+   * off();                            // 取消
+   * const off2 = loader.onReload(refresh);   // 又注册了同一个 fn
+   * off();                            // 手滑再调一次旧取消函数
+   * ```
+   *
+   * 第二次 `off()` 的 `indexOf(refresh)` **命中的是刚注册的那个**，
+   * 于是新订阅被删掉，`refresh` 再也不会被调用——
+   * 表现为"重新订阅之后还是收不到刷新通知"。
+   *
+   * 这与已修的「EventBus 旧取消函数误删同名新监听器」是同一个坑：
+   * **用函数值本身当身份，就没有"第几次订阅"这个维度。**
+   *
+   * 修法：包一层带 `alive` 标记的闭包，取消时按闭包自身的身份定位，
+   * 且幂等（重复调用第二次直接 return，不会碰到别人）。
+   */
   onReload(fn: (tableName: string) => void): () => void {
-    this._reloadHandlers.push(fn);
+    let alive = true;
+    const wrapped = (tableName: string): void => {
+      if (alive) fn(tableName);
+    };
+    this._reloadHandlers.push(wrapped);
     return () => {
-      const i = this._reloadHandlers.indexOf(fn);
+      if (!alive) return;
+      alive = false;
+      const i = this._reloadHandlers.indexOf(wrapped);
       if (i >= 0) this._reloadHandlers.splice(i, 1);
     };
   }

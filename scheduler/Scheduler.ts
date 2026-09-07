@@ -48,9 +48,17 @@
 
 import { TimeScale, TimeScaleOptions } from './TimeScale';
 import { IDisposable } from '../_core/types';
+import { clampNum, numOr } from '../_core/math';
 
 /** 回调类型：接收 dt（秒） */
 export type TickCallback = (dt: number) => void;
+
+/**
+ * 小于这个量级的 dt 视为"没有推进"
+ *
+ * 见 `update()` 中关于 `delta === 0` 的注释。
+ */
+const MIN_EFFECTIVE_DT = 1e-12;
 
 /** 内部任务 */
 interface Task {
@@ -81,12 +89,36 @@ export interface SchedulerOptions extends TimeScaleOptions {
    * 宁可"卡顿一下"也不要"物理炸掉"。
    */
   readonly maxDeltaTime?: number;
+  /**
+   * 时间源（默认 `Date.now`）
+   *
+   * 【为什么要注入（rule2）】
+   * 原实现在 `update()` 里直接 `this.timeScale.update(Date.now())`
+   * ——模块内部主动去"找"墙钟时间。
+   * 于是回放 / 确定性测试无法控制时间推进，
+   * "顿帧 80ms 后恢复"这种场景只能靠真的 sleep 来测。
+   */
+  readonly nowProvider?: () => number;
+  /**
+   * `hitStop()` 的默认时长（真实秒）。默认 0.08
+   *
+   * 【为什么要提出来】
+   * 0.08 / 0.05 原本是写在 `hitStop` 签名里的魔法数字。
+   * 打击手感是要按武器类型调的（轻击 60ms、重击 110ms、暴击 140ms），
+   * 每次都靠调用方传参，就等于把"手感基准值"散落到每个调用点。
+   */
+  readonly hitStopDuration?: number;
+  /** `hitStop()` 的默认缩放。默认 0.05 */
+  readonly hitStopScale?: number;
 }
 
 export class Scheduler implements IDisposable {
   readonly timeScale: TimeScale;
 
   private readonly _maxDt: number;
+  private readonly _now: () => number;
+  private readonly _hitStopDuration: number;
+  private readonly _hitStopScale: number;
 
   /** 常规任务 + 延时任务统一放这里，按 id 索引 */
   private readonly _tasks = new Map<number, Task>();
@@ -94,6 +126,24 @@ export class Scheduler implements IDisposable {
 
   /** 本帧待新增的任务（避免在遍历中修改集合） */
   private _pendingAdd: Task[] = [];
+
+  /**
+   * 遍历用的快照缓存
+   *
+   * 【⚠️ 曾经的 bug：每帧 `Array.from(this._tasks.values())`】
+   *
+   * `update()` 在主循环里每帧跑一次，任务集合通常几十到几百个。
+   * 每帧分配一个新数组，在 60fps 下就是每秒 60 次分配——
+   * 这些短命数组会直接推高 GC 频率，表现为**周期性的帧时间尖刺**。
+   *
+   * 修法：只在任务集合真的变了（注册 / 取消 / 完成删除）时才重建快照。
+   * 稳态下（任务既不增也不减）一次分配都不做。
+   *
+   * 【为什么缓存仍然安全】遍历时 `if (task.dead) continue` 已经挡住了
+   * 在回调中被取消的任务——见下方快照遍历处的注释。
+   */
+  private _snapshot: Task[] = [];
+  private _snapshotDirty = true;
 
   /** 累计时间（调试与统计用） */
   private _scaledTime = 0;
@@ -104,8 +154,42 @@ export class Scheduler implements IDisposable {
   private _lastScaledDt = 0;
 
   constructor(opts: SchedulerOptions = {}) {
-    this._maxDt = opts.maxDeltaTime ?? 0.1;
-    this.timeScale = new TimeScale(opts);
+    /**
+     * 【⚠️ 曾经的 bug：maxDeltaTime 完全没做数值收口】
+     *
+     * 原实现 `this._maxDt = opts.maxDeltaTime ?? 0.1` 有两个洞：
+     *
+     *   1. `0`  → 每个 dt 都被 clamp 成 0，`if (delta === 0) continue`
+     *      → **所有回调一次都不执行，游戏完全静止，且不报错**
+     *   2. `-1` → dt 被 clamp 成负数，`task.remaining -= delta`
+     *      把剩余时间**越减越多**，定时器永远不到期
+     *      （同时 `scaledTime` 也在倒着走）
+     *
+     * 实测（修复前）：
+     *   maxDeltaTime=0  → 5 帧后回调次数 = 0，lastRealDt = 0
+     *   maxDeltaTime=-1 → 累计 0.16s 后 delay(1) 到期 = false，lastRealDt = -1
+     *
+     * 触发方式非常普通：配置文件里写错一个符号、或者 JSON 里
+     * `"maxDeltaTime": -1`。而"定时器不工作"是最难查的故障类别——
+     * 没有异常、没有日志，只是"该发生的事没发生"。
+     *
+     * 【影响面】Scheduler 是唯一时间源，
+     * tween / wave-spawner / scheduling 等依赖它的单元会一起停摆。
+     *
+     * 修法：非正值（0 / 负数）**整体回落默认 0.1**，而不是夹到下界。
+     *
+     * 【为什么不用 clampNum(v, 1e-6, 1e6, 0.1)】
+     * 那样 `-1` 会被夹成 **1e-6**——不倒流了，但每帧只推进 1 微秒，
+     * 游戏**几乎完全静止**，"定时器不工作"的故障现象一点没变。
+     * 一个让游戏停摆的值和一个让游戏倒流的值，都是"配错了"，
+     * 都该按"没配"处理。
+     */
+    const rawMaxDt = numOr(opts.maxDeltaTime, 0.1);
+    this._maxDt = rawMaxDt > 0 ? Math.min(rawMaxDt, 1e6) : 0.1;
+    this._now = opts.nowProvider ?? (() => Date.now());
+    this._hitStopDuration = clampNum(opts.hitStopDuration, 1e-6, 10, 0.08);
+    this._hitStopScale = clampNum(opts.hitStopScale, 0, 1, 0.05);
+    this.timeScale = new TimeScale({ ...opts, nowProvider: this._now });
   }
 
   // ==================== 主循环 ====================
@@ -127,7 +211,7 @@ export class Scheduler implements IDisposable {
     this._lastRealDt = dt;
 
     // ② 推进时间缩放（用真实时间清理过期的顿帧/慢动作层）
-    this.timeScale.update(Date.now());
+    this.timeScale.update(this._now());
 
     // ③ 计算缩放后的 dt
     const scaledDt = dt * this.timeScale.value;
@@ -150,12 +234,35 @@ export class Scheduler implements IDisposable {
      * 任务量通常几十个，可以接受。如果确实是热点，可以改成
      * 「标记删除 + 延迟清理」的方式避免分配。
      */
-    const snapshot = Array.from(this._tasks.values());
+    if (this._snapshotDirty) {
+      this._snapshot = Array.from(this._tasks.values());
+      this._snapshotDirty = false;
+    }
+    const snapshot = this._snapshot;
 
     for (const task of snapshot) {
       if (task.dead) continue;
 
       const delta = task.unscaled ? dt : scaledDt;
+
+      /**
+       * 【⚠️ 曾经的 bug：用 `delta === 0` 做浮点相等判断】
+       *
+       * 只有在 dt 恰好被清成 **0** 时才跳过。
+       * 而 `scaledDt = dt * scale`，scale 是个小数——
+       * 只要它非零（哪怕是 1e-300 这种非规格化数），
+       * `delta === 0` 就为 false，回调**照常执行**。
+       *
+       * 后果：本该"完全冻结"的时间源仍在每帧调用每个回调，
+       * 回调拿到的 dt 小到没有任何意义，
+       * 于是"暂停了但 AI 还在动（只是极慢）"这类现象无法用
+       * `delta === 0` 这条路径解释——排查方向会被带到别处。
+       *
+       * 修法：低于一个极小阈值就当作"没推进"。
+       * 阈值取 1e-12 而不是更大的值，
+       * 是为了不误伤合法的极慢动作（scale=1e-6 时 dt 仍有 1.6e-8）。
+       */
+      if (!task.unscaled && !(delta > MIN_EFFECTIVE_DT) && !(delta < -MIN_EFFECTIVE_DT)) continue;
 
       /**
        * 【关键】scale = 0 时，受缩放影响的任务完全不推进。
@@ -165,8 +272,6 @@ export class Scheduler implements IDisposable {
        * 区别在于：dt=0 时回调仍会执行（只是没推进），
        * 而这里直接不调用——这才符合"暂停"的语义。
        */
-      if (delta === 0 && !task.unscaled) continue;
-
       // 延时任务：先扣时间
       if (task.remaining > 0) {
         task.remaining -= delta;
@@ -185,6 +290,7 @@ export class Scheduler implements IDisposable {
           if (task.times <= 0) {
             task.dead = true;
             this._tasks.delete(task.id);
+            this._snapshotDirty = true;
             continue;
           }
         }
@@ -194,6 +300,7 @@ export class Scheduler implements IDisposable {
       } else {
         task.dead = true;
         this._tasks.delete(task.id);
+        this._snapshotDirty = true;
       }
     }
   }
@@ -271,6 +378,7 @@ export class Scheduler implements IDisposable {
     const id = this._nextId++;
     const task: Task = { id, fn, unscaled, remaining, interval, times, dead: false };
     this._pendingAdd.push(task);
+    this._snapshotDirty = true;
 
     let cancelled = false;
     return () => {
@@ -278,6 +386,7 @@ export class Scheduler implements IDisposable {
       cancelled = true;
       task.dead = true;
       this._tasks.delete(id);
+      this._snapshotDirty = true;
       const i = this._pendingAdd.indexOf(task);
       if (i >= 0) this._pendingAdd.splice(i, 1);
     };
@@ -314,7 +423,7 @@ export class Scheduler implements IDisposable {
    * @param durationSeconds 真实秒数
    * @param scale 顿帧期间的缩放（0.05 意味着几乎静止但仍有细微动作，比 0 更自然）
    */
-  hitStop(durationSeconds = 0.08, scale = 0.05): void {
+  hitStop(durationSeconds = this._hitStopDuration, scale = this._hitStopScale): void {
     this.timeScale.add('hitstop', scale, durationSeconds);
   }
 
