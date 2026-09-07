@@ -57,11 +57,85 @@ export const Zones: Readonly<Record<string, Zone>> = {
 /** 一天的毫秒数 */
 export const DAY_MS = 86_400_000;
 
+/**
+ * `Intl.DateTimeFormat` 实例缓存（按 IANA 时区名）
+ *
+ * 【为什么缓存】
+ * 构造一次 `Intl.DateTimeFormat` 要加载并解析时区数据，是微秒到毫秒级的操作；
+ * 而日界判断经常出现在"每次进界面/每次领奖"这类路径上。
+ * 缓存值为 `null` 表示"这个时区名解析失败过"，避免每次都重新抛一遍异常。
+ */
+const _zoneFormatters = new Map<string, Intl.DateTimeFormat | null>();
+
+/**
+ * 取某个时刻在指定时区的**真实** UTC 偏移（分钟）
+ *
+ * 【为什么不能只用常量 `offsetMinutes`】
+ * 欧美时区一年里有半年用夏令时：洛杉矶冬天 PST = UTC-8，夏天 PDT = UTC-7。
+ * 常量只能记其中一个，于是另外半年的日界整体错 1 小时——
+ * 美服玩家在 23:00~24:00 这一小时里的行为会被算到"第二天"（或反过来），
+ * 每日任务 / 赛季结算的边界错乱，而且**只有半年能复现**，极难定位。
+ *
+ * 实测（修复前）：`startOfDay(2024-07-01T05:00Z, US_PACIFIC)` 得到
+ * `2024-06-30T08:00:00Z`，而 2024-07-01 洛杉矶处于 PDT，正确值是 `07:00Z`。
+ *
+ * 【为什么不干脆删掉 `offsetMinutes`】
+ * `Intl` 依赖运行环境的时区数据库（ICU）。宿主引擎裁剪过 ICU，
+ * 或者 `zone.name` 不是合法 IANA 名时，它会抛错或给出错误结果。
+ * 这时必须有一个确定的兜底——`offsetMinutes` 就是那个兜底，不是冗余字段：
+ * 环境支持时用真实偏移，不支持时退回"固定偏移"的旧行为。
+ */
+function zoneOffsetAt(now: number, zone: Zone): number {
+  if (!zone.name) return zone.offsetMinutes;
+
+  let fmt = _zoneFormatters.get(zone.name);
+  if (fmt === undefined) {
+    try {
+      // 'longOffset' 稳定给出 "GMT-07:00" 形式，比 shortOffset 的 "GMT-7" 好解析
+      fmt = new Intl.DateTimeFormat('en-US', {
+        timeZone: zone.name,
+        timeZoneName: 'longOffset',
+      });
+      _zoneFormatters.set(zone.name, fmt);
+    } catch {
+      _zoneFormatters.set(zone.name, null);
+      return zone.offsetMinutes;
+    }
+  }
+  if (fmt === null) return zone.offsetMinutes;
+
+  try {
+    const part = fmt.formatToParts(new Date(now)).find((p) => p.type === 'timeZoneName');
+    if (!part) return zone.offsetMinutes;
+    // "GMT" / "GMT+08:00" / "GMT-07:00"；解析不出来就退回常量，不猜
+    if (part.value === 'GMT') return 0;
+    const m = /^GMT([+-])(\d{1,2})(?::(\d{2}))?$/.exec(part.value);
+    if (!m) return zone.offsetMinutes;
+    const sign = m[1] === '-' ? -1 : 1;
+    return sign * (Number(m[2]) * 60 + (m[3] ? Number(m[3]) : 0));
+  } catch {
+    return zone.offsetMinutes;
+  }
+}
+
 /** 获取某个时区内"今天 00:00"对应的 UTC 时间戳 */
 export function startOfDay(now: number, zone: Zone = Zones.UTC): number {
-  const shifted = now + zone.offsetMinutes * 60_000;
-  const dayStart = Math.floor(shifted / DAY_MS) * DAY_MS;
-  return dayStart - zone.offsetMinutes * 60_000;
+  let off = zoneOffsetAt(now, zone);
+  let dayStart = Math.floor((now + off * 60_000) / DAY_MS) * DAY_MS - off * 60_000;
+
+  /**
+   * 【为什么要按日界时刻再取一次偏移】
+   * 夏令时切换当天，`now` 和"当天 00:00"可能处在**不同**偏移下
+   * （例如凌晨 2 点切到 PDT）。用查询时刻的偏移去定位日界，
+   * 在切换日那 24 小时里仍会偏 1 小时。取日界那一刻的偏移再算一次即可收敛。
+   */
+  const offAtDayStart = zoneOffsetAt(dayStart, zone);
+  if (offAtDayStart !== off) {
+    off = offAtDayStart;
+    dayStart = Math.floor((now + off * 60_000) / DAY_MS) * DAY_MS - off * 60_000;
+  }
+
+  return dayStart;
 }
 
 /** 获取下一天 00:00 的 UTC 时间戳 */
@@ -77,16 +151,64 @@ export function startOfNextDay(now: number, zone: Zone = Zones.UTC): number {
  * 玩家在同一天的不同时刻领，序号相同。
  */
 export function dayIndex(now: number, zone: Zone = Zones.UTC): number {
-  return Math.floor((now + zone.offsetMinutes * 60_000) / DAY_MS);
+  return Math.floor((now + zoneOffsetAt(now, zone) * 60_000) / DAY_MS);
 }
+
+/**
+ * 看起来像毫秒时间戳（而不是日序号）的下界
+ *
+ * 日序号 = 1970 以来的天数，当前约 2 万，几十万年内都不会超过 1 亿；
+ * 而毫秒时间戳当前约 1.7e12。两者量级差 7 个数量级，
+ * 任何大于 1e11（1973 年）的值都只可能是时间戳。
+ */
+const TIMESTAMP_LIKE_MIN = 1e11;
 
 /**
  * 是否是新的一天
  *
- * @param lastSeen 上次记录的日序号（0 = 从未）
+ * @param lastDayIndex 上次记录的**日序号**（`dayIndex()` 的返回值，当前约 2 万）
+ *
+ * 【⚠️ 第二个参数是日序号，不是时间戳】
+ *
+ * 实现是 `dayIndex(now, zone) > lastDayIndex`。如果按"lastSeen = 上次登录时间"
+ * 的直觉传 `Date.now()`（约 1.7e12），比较恒为 false——
+ * **每日任务 / 每日奖励 / 每日商店永不刷新**，而且返回值是 false 而不是报错，
+ * 现象是"第二天上线，任务还是昨天那批"。注释说谎比没注释更糟，
+ * 所以这里把参数名从 `lastSeen` 改成了 `lastDayIndex`。
+ *
+ * 【为什么不改成内部 `dayIndex(lastSeen)` 来兼容两种传法】
+ * 日序号本身也是个毫秒数（约 2 万 ms ≈ 1970-01-01），再取一次 dayIndex 恒为 0，
+ * 于是"传日序号"这种**正确**用法会变成永远 true。两种传法无法无歧义地兼容：
+ * 与其猜，不如对明显的误用直接报错（见下面的阈值守卫）。
+ *
+ * 【仓库里为什么没人发现】
+ * 自带测试传的正是 `dayIndex`（正确用法），所以误用路径从来没被覆盖到。
  */
-export function isNewDay(now: number, lastSeen: number, zone: Zone = Zones.UTC): boolean {
-  return dayIndex(now, zone) > lastSeen;
+export function isNewDay(
+  now: number,
+  lastDayIndex: number,
+  zone: Zone = Zones.UTC
+): boolean {
+  if (!Number.isFinite(lastDayIndex)) {
+    throw new TypeError(
+      `[TimeUtil] isNewDay 的 lastDayIndex 必须是有限数值，实际 ${String(lastDayIndex)}`
+    );
+  }
+  /**
+   * 【误用守卫】传进来的值大过阈值就一定是毫秒时间戳，
+   * 也就是上面那个"永不刷新"的误用。静默返回 false 是最糟的结果
+   * （玩家第二天上线看到昨天的任务，运营查一周查不出原因），所以直接报错，
+   * 并在错误信息里给出正确写法。
+   */
+  if (lastDayIndex > TIMESTAMP_LIKE_MIN) {
+    throw new RangeError(
+      `[TimeUtil] isNewDay 的第二个参数是日序号（dayIndex() 的返回值，当前约 2 万），` +
+        `实际收到 ${lastDayIndex}，看着像毫秒时间戳。` +
+        `传时间戳会让本函数恒返回 false，表现为每日任务/奖励永不刷新。` +
+        `正确写法：isNewDay(now, dayIndex(lastLoginAt, zone), zone)`
+    );
+  }
+  return dayIndex(now, zone) > lastDayIndex;
 }
 
 /** 距离下次日界还有多少毫秒 */
@@ -117,7 +239,20 @@ export function ticksSince(
   periodMs: number,
   maxTicks = Infinity
 ): number {
-  if (periodMs <= 0) throw new Error('[TimeUtil] periodMs 必须为正');
+  /**
+   * 【⚠️ 必须写成肯定式 `!(periodMs > 0)`】
+   *
+   * `periodMs <= 0` 这种否定式**天然漏掉 NaN**：NaN 与任何值比较都是 false，
+   * 于是 `NaN <= 0` 为 false，坏值直接穿透到下面——
+   * `Math.floor((now - since) / NaN) = NaN`，补发体力数量变成 NaN，
+   * 玩家体力显示 NaN 且不报错。配置表里 period 字段缺失正是 NaN 的典型来源。
+   *
+   * 实测（修复前）：`ticksSince(0, 1000, NaN) === NaN`，
+   * 而 `ticksSince(0, 1000, 0)` 正常抛错——同一条守卫对 0 有效、对 NaN 失效。
+   *
+   * `Infinity` 是允许的：周期无限长 → 一个 tick 都没有（返回 0），语义自洽。
+   */
+  if (!(periodMs > 0)) throw new Error('[TimeUtil] periodMs 必须为正');
   if (now < since) return 0;   // 时间倒流（改系统时间）→ 不奖励
   const n = Math.floor((now - since) / periodMs);
   return Math.min(n, maxTicks);
@@ -261,7 +396,18 @@ export function monotonicNow(): number {
 
 // ==================== 倒计时 ====================
 
-export type CountdownState = 'waiting' | 'running' | 'finished';
+/**
+ * 倒计时状态
+ *
+ * 【'paused' 是后加的，属于行为变更】
+ * 原先只有三态，暂停中的倒计时 `state()` 返回 `'running'`——
+ * 调用方没法用 `state()` 区分"在跑"和"暂停中"，只能自己额外记一个标志，
+ * UI 上表现为"暂停后倒计时还在转"。
+ * 加了 `'paused'` 之后，对已有 `switch` 是**穷尽性**上的 breaking：
+ * 写了 `default` 的没事，写死三分支且开了穷尽检查的会编译报错——
+ * 这恰恰是想要的：漏处理暂停态的代码应该在编译期浮出来。
+ */
+export type CountdownState = 'waiting' | 'running' | 'paused' | 'finished';
 
 /**
  * 倒计时
@@ -328,7 +474,17 @@ export class Countdown {
   }
 
   state(now: number): CountdownState {
-    if (this._endAt === null && this._pausedRemain === null) return 'waiting';
+    /**
+     * 【⚠️ 暂停判定必须在最前面】
+     * `_pausedRemain !== null` 是暂停的**唯一**标志（`pause()` 写入、`resume()` 清掉）。
+     * 不先判它，暂停中的倒计时会掉到下面被判成 'running'——
+     * 于是 `remaining()` 明明已经冻结（返回 900），`state()` 却说还在跑，
+     * 两个方法自相矛盾，调用方没法只靠 `state()` 驱动 UI。
+     *
+     * 实测（修复前）：`start(0)` → `pause(100)` → `state(500)` 返回 `'running'`。
+     */
+    if (this._pausedRemain !== null) return 'paused';
+    if (this._endAt === null) return 'waiting';
     return this.isFinished(now) ? 'finished' : 'running';
   }
 
