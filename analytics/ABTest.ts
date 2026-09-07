@@ -481,12 +481,56 @@ export class Experiment {
     let treatment: Stats = emptyStats();
 
     for (const u of this._users.values()) {
-      const converted = u.converted || u.hasValue;
-      const next = recordBinary(
-        u.variant === 'treatment' ? treatment : control,
-        converted
-      );
-      if (u.variant === 'treatment') treatment = next;
+      /**
+       * 【⚠️ 转化只能来自 trackBinary，不能把"有数值指标"当成转化】
+       *
+       * 原实现 `u.converted || u.hasValue`：
+       * `trackValue()` 会把 `hasValue` 置 true，于是**每一个记录了数值指标
+       * 的用户都被算作已转化**。
+       *
+       * 实测（修复前）：只调 `trackValue`（从未 `trackBinary`），
+       * 100 个用户 → `conversions = 100/100`、对照组与实验组转化率都是 1、
+       * `p = 1`（永远不显著）。
+       *
+       * 后果：所有以数值指标（时长、ARPU、关卡进度）为主的实验
+       * 都得不到正确的显著性判定——要么永远不显著，
+       * 要么在真实转化差异被 100% 基线淹没后给出错误结论。
+       * 且数值被塞进 `recordBinary` 后 `sum/sumSq` 记的是 0/1，
+       * 均值类指标（ARPU）也一起错。
+       *
+       * 【正确的两分法】
+       * - 转化（二值）→ `recordBinary(u.converted)`
+       * - 数值（连续）→ `recordValue(u.value)`，仅对 `hasValue` 的用户
+       * 两者互不干扰：`recordValue` 不动 `conversions`。
+       */
+      /**
+       * 【⚠️ 一个用户只能贡献一次 n】
+       *
+       * 第一版我写成"先 recordBinary 再 recordValue"，
+       * 两个函数各自 `n + 1` → 每个用户被计了 **2 次**，
+       * 既有测试 `trackValue × 100 → n === 100` 立刻变红（实际 200）。
+       * 这是把"组合调用"当成"叠加调用"的典型错误。
+       *
+       * 【sum/sumSq 怎么处理两种指标】
+       * `Stats` 把二值与数值共用 `sum/sumSq`（`mean()` 同时服务两者），
+       * 所以这里必须二选一，不能相加：
+       * - 有数值指标 → 记 value（均值 = ARPU / 时长）
+       * - 只有二值 → 记 0/1（均值 = 转化率，与修复前一致）
+       *
+       * 这样纯二值实验的行为完全不变，纯数值实验才得到修正。
+       */
+      const isTreatment = u.variant === 'treatment';
+      const base = isTreatment ? treatment : control;
+      const v = u.hasValue ? u.value : u.converted ? 1 : 0;
+
+      const next: Stats = {
+        n: base.n + 1,
+        conversions: base.conversions + (u.converted ? 1 : 0),
+        sum: base.sum + (Number.isFinite(v) ? v : 0),
+        sumSq: base.sumSq + (Number.isFinite(v) ? v * v : 0),
+      };
+
+      if (isTreatment) treatment = next;
       else control = next;
     }
 
