@@ -184,7 +184,19 @@ export class SpeedChecker {
      * 这两种情况都不是玩家的错，
      * 而且它们**在高频同步的游戏里是必然发生的**，不是理论风险。
      */
-    if (dtSec <= 0) return null;
+    /**
+     * 【⚠️ 为什么写成 `!(dtSec > 0)` 而不是 `dtSec <= 0`】
+     * 否定式 `dtSec <= 0` **拦不住 NaN**——`NaN <= 0` 为 false，继续执行；
+     * 于是 `speed = dist / NaN` = NaN，`exceeded = NaN > threshold` 恒为 false
+     * → 走 else 分支 → **`_strikes` 被清零**。
+     *
+     * 后果是"作弊者只要让时间戳变成 NaN 就能洗掉累计违规"：
+     * 连续超速攒够的 strikes 被一个坏包抹平，检测彻底失效。
+     * 时间戳为 NaN 的现实来源是客户端上报 `undefined` / `null` 的时间。
+     *
+     * 肯定式 `!(dtSec > 0)` 对 NaN 为 true → 正确忽略该样本。
+     */
+    if (!(dtSec > 0)) return null;
 
     const dx = s.x - prev.x;
     const dy = s.y - prev.y;
