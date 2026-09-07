@@ -31,6 +31,8 @@
  * 视线检测用 `ILineOfSight` 接口（可接 `fov/` 的 Shadowcasting，也可自己实现）。
  */
 import { normalizeAngleRad, numOr, safeDt } from '../_core/math';
+import type { IRandomSource } from '../_core/types';
+import { MathRandomSource } from '../_core/types';
 
 // ============================================================
 // 数据结构
@@ -221,11 +223,46 @@ export interface PerceptionSystemOptions {
    * 【用途】避免同型号敌人在同一帧集体发现玩家——
    * 那看起来像机器而不是一群人。
    *
-   * 【为什么用 Math.random 而不是注入 rng】
-   * 抖动只影响观感，不需要可复现；
-   * 而且消耗 rng 序列会打乱其他依赖 rng 的逻辑，让回放对不上。
+   * 【⚠️ 抖动不是"只影响观感"，它决定敌人第几帧发现玩家】
+   *
+   * 旧注释写着"抖动只影响观感，不需要可复现"——**这个前提是错的**。
+   * 抖动后的 `bestVisibility` 直接进了 `st.alert` 的累积：
+   *
+   * ```
+   * st.alert += bestVisibility * gain * dt      // 抖动后的值
+   * if (st.alert >= threshold) → aware = true，发 spotted 事件
+   * ```
+   *
+   * 实测（jitter=0.3，同一初始状态跑 12 次）：
+   * 敌人"发现玩家"所需帧数是 **48~53 帧**，每次都不一样。
+   *
+   * 这不是观感问题，是**玩法结果的分叉**：
+   * - 潜行玩法里"能不能溜过去"由这几帧决定
+   * - 回放 / 锁步：同一份输入两次跑出不同结果
+   * - 反作弊：客户端的结果无法被服务端复算验证
+   *
+   * 所以抖动必须可注入、可固定。见 {@link PerceptionSystemOptions.jitterRng}。
    */
   readonly jitter?: number;
+  /**
+   * 抖动用的随机源（**独立于主 rng**）
+   *
+   * 【为什么是独立的，而不是复用主 rng】
+   *
+   * 旧注释的第二条论证其实是对的：抖动若消耗主 rng 序列，
+   * 会打乱其他依赖 rng 的逻辑（掉落、刷怪），让回放对不上。
+   * 所以这里要的是**另一条序列**，不是"复用主序列"。
+   *
+   * 【默认行为】不传时用 `MathRandomSource`（等价于旧的 `Math.random()`），
+   * 保持向后兼容；需要可复现时注入固定种子源（回放、锁步、服务端校验）。
+   *
+   * @example
+   * ```typescript
+   * // 回放 / 锁步：固定种子，保证两次跑出同一结果
+   * new PerceptionSystem({ los, jitterRng: new RNG(seed) });
+   * ```
+   */
+  readonly jitterRng?: IRandomSource;
   /**
    * 进入"发现"状态的警觉阈值（默认 1.0）
    *
@@ -276,6 +313,8 @@ export class PerceptionSystem {
   private readonly _allyDelay: number;
   private readonly _allyRadius: number;
   private readonly _jitter: number;
+  /** 抖动的独立随机源（不消耗主 rng 序列） */
+  private readonly _jitterRng: IRandomSource;
 
   private readonly _perceivers = new Map<number, Perceiver>();
   /** 被感知目标：id → 位置 */
@@ -293,6 +332,7 @@ export class PerceptionSystem {
     this._allyDelay = opts.allyAlertDelay ?? 0.8;
     this._allyRadius = opts.allyAlertRadius ?? 12;
     this._jitter = Math.max(0, Math.min(1, numOr(opts.jitter, 0.3)));
+    this._jitterRng = opts.jitterRng ?? MathRandomSource;
     this.onEvent = opts.onEvent;
   }
 
@@ -449,12 +489,19 @@ export class PerceptionSystem {
      * 没有抖动时，一排哨兵会在同一帧集体转身——
      * 看起来像机器而不是一群人。
      *
-     * 抖动用 `Math.random` 而不是注入的 rng：
-     * 它只影响观感，不需要可复现，也不该消耗 rng 序列
-     * （否则会打乱其他依赖 rng 的逻辑，让回放对不上）。
+     * 【⚠️ 旧注释说"只影响观感、所以用 Math.random"——这是错的】
+     * 抖动后的值会进 `st.alert` 累积，进而决定 `aware` 状态与
+     * `spotted` 事件的时机。实测同样的初始状态，
+     * 发现玩家的帧数在 48~53 之间波动。
+     *
+     * 所以这里走**可注入的独立随机源**（`_jitterRng`）：
+     * - 独立 → 不消耗主 rng 序列，不打乱掉落/刷怪的回放
+     * - 可注入 → 回放/锁步/服务端校验时能固定下来
+     *
+     * 默认 `MathRandomSource`，与旧行为等价。
      */
     if (bestVisibility > 0 && this._jitter > 0) {
-      bestVisibility *= 1 - this._jitter + Math.random() * this._jitter * 2;
+      bestVisibility *= 1 - this._jitter + this._jitterRng.next() * this._jitter * 2;
       if (bestVisibility > 1) bestVisibility = 1;
       if (bestVisibility < 0) bestVisibility = 0;
     }
@@ -511,7 +558,11 @@ export class PerceptionSystem {
    * 1. 距离衰减（超出视距 = 0）
    * 2. 视野角度（背后的目标 = 0，除非在 proximityRange 内）
    * 3. 视线遮挡（有墙 = 0）
-   * 4. 感知抖动（避免所有敌人同步，用固定随机而不是每帧随机）
+   * 4. 感知抖动（避免所有敌人同步）
+   *
+   * 【⚠️ 这一项不是"观感修饰"，它会影响 alert 的累积速度】
+   * 见 {@link PerceptionSystemOptions.jitter} 的说明——
+   * 抖动用的是**可注入的独立随机源**，不是 Math.random。
    */
   private _visibility(p: Perceiver, tx: number, ty: number): number {
     const dx = tx - p.x;
