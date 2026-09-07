@@ -427,13 +427,42 @@ export class SkillCaster {
     return clamp((this._cd.get(id) ?? 0) / def.cooldown, 0, 1);
   }
 
-  /** 重置冷却（调试 / 特定遗物） */
+  /**
+   * 重置冷却（调试 / 特定遗物）
+   *
+   * 【⚠️ 曾经只清 `_cd`，不动 `_charges`（P1）】
+   *
+   * 实测（`charges: 2`）：施放 2 次 → `chargesLeft === 0` →
+   * `resetCooldown('s')` → `chargesLeft` 仍是 **0**（期望回到 2）→
+   * 再施放一次 → `chargesLeft === -1`。
+   *
+   * 后果是**技能可用性完全错乱**，而不只是"充能没满"：
+   * ① `left <= 0` 恒真 → 每次施放都把冷却重置为完整 CD；
+   * ② `_charges` 继续下降到负数；
+   * ③ 恢复逻辑里 `cur < max` 对负数恒真，会把负数**一路加回来**
+   *    （要加很多次才回到 0），期间技能显示为可用但充能数是负的。
+   *
+   * GM 命令"重置冷却"在带充能的技能上必然踩到——
+   * 而调试期踩到的 bug 往往会一路带到线上。
+   *
+   * 【为什么"重置冷却"要连充能一起重置】
+   * 调用方的语义预期是"这个技能回到刚学会的状态"。
+   * 只清 CD 而充能留在 0，技能依然是**放不出来**的
+   * （`left <= 0` 时 `tryCast` 会再次重置完整 CD，等于没重置）。
+   * 换句话说，只清 `_cd` 的 resetCooldown 对带充能的技能**根本不起作用**。
+   */
   resetCooldown(id?: string): void {
     if (id === undefined) {
-      for (const k of this._cd.keys()) this._cd.set(k, 0);
+      for (const k of this._cd.keys()) {
+        this._cd.set(k, 0);
+        const def = this._skills.get(k);
+        if (def) this._charges.set(k, def.charges ?? 1);
+      }
       return;
     }
     this._cd.set(id, 0);
+    const def = this._skills.get(id);
+    if (def) this._charges.set(id, def.charges ?? 1);
   }
 
   /** 剩余充能 */
@@ -487,8 +516,18 @@ export class SkillCaster {
     // 扣费
     if (def.cost) this._deps.resources?.pay(def.cost);
 
-    // 消耗一层充能
-    const left = (this._charges.get(id) ?? 1) - 1;
+    /**
+     * 消耗一层充能
+     *
+     * 【为什么 `Math.max(0, ...)`】
+     * 充能数是个"状态"，可能被任何一处写坏（存档导入、旧的负数残留、
+     * 或 `def.charges` 在 learn 之后被改小）。
+     * 一旦它变成负数，`left <= 0` 就**恒为真**——
+     * 于是每次施放都会把冷却打回完整 CD，而充能数继续往下掉。
+     * 这里夹到 0 不是为了"修好"那个坏值，而是让**损坏不再放大**：
+     * 表现为"技能进冷却"，符合玩家预期。
+     */
+    const left = Math.max(0, (this._charges.get(id) ?? 1) - 1);
     this._charges.set(id, left);
     if (left <= 0) this._cd.set(id, def.cooldown);
 

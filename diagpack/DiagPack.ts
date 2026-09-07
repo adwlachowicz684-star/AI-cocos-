@@ -29,6 +29,8 @@
  * - 安全序列化（循环引用、BigInt、函数都能处理）
  */
 
+import { numOr } from '../_core/math';
+
 // ==================== 类型 ====================
 
 /** 诊断分区名 */
@@ -129,14 +131,41 @@ export const DEFAULT_REDACTIONS: readonly RedactRule[] = [
  */
 export function safeStringify(
   value: unknown,
-  opts: { readonly maxDepth?: number; readonly indent?: number } = {}
+  opts: {
+    readonly maxDepth?: number;
+    readonly indent?: number;
+    /**
+     * 传给 `JSON.stringify` 的 replacer（一般不需要）
+     *
+     * 【为什么这里原来有一个"恒等 replacer"】
+     * 老代码写死了 `(_key, v) => v` 再传给 `JSON.stringify`——
+     * 这是一个占位没写完的东西：它什么都没做，
+     * 却让人以为"脱敏/过滤可以挂在这里"，进而把逻辑写进去然后发现不生效。
+     * 现在改成由调用方显式传入；不传时行为与恒等 replacer 完全一致。
+     */
+    readonly replacer?: (key: string, value: unknown) => unknown;
+  } = {}
 ): string {
   const maxDepth = opts.maxDepth ?? 8;
+  /**
+   * 【⚠️ seen 必须是"路径栈"，不能是"访问过的集合"】
+   *
+   * 老写法只 `add` 从不 `delete`，于是 `seen` 的语义是"本次序列化**曾经**见过的对象"。
+   * 后果：同一个对象被两个字段引用（游戏中极常见——全局配置表被多个系统持有），
+   * 第二个字段会被判成循环引用：
+   *
+   * ```
+   * safeStringify({ a: shared, b: shared })
+   *   → {"a":{"hp":100},"b":"[Circular]"}     ← b 的数据被静默丢掉
+   * ```
+   *
+   * 诊断包丢的恰恰是最关键的那份上下文，而且看起来像"数据结构有问题"，
+   * 实际是序列化器的问题——排查方向直接被带偏。
+   *
+   * 正确语义是"当前递归路径上是否出现过"：进入时 add，**递归返回时 delete**。
+   * 真正的环（a.b → a）在返回前一定会再次撞上 seen，仍会被拦下。
+   */
   const seen = new WeakSet<object>();
-
-  const replacer = (_key: string, v: unknown): unknown => {
-    return v;
-  };
 
   function walk(v: unknown, depth: number): unknown {
     if (v === null || v === undefined) return null;
@@ -176,22 +205,29 @@ export function safeStringify(
       const o = v as Record<string, unknown>;
       if (seen.has(o)) return '[Circular]';
       seen.add(o);
-
-      if (Array.isArray(v)) {
-        return v.map((x) => walk(x, depth + 1));
+      // 【为什么用 try/finally 而不是在函数末尾 delete】
+      // 下面两个 return 分支（数组 / 对象）以及更深层递归都可能抛错
+      // （getter 抛错、Proxy 拒绝访问）。忘记回溯会让"曾经见过"污染后续分支，
+      // 把一堆无辜的共享对象标成 [Circular]。用 finally 保证任何出口都回溯。
+      try {
+        if (Array.isArray(v)) {
+          return v.map((x) => walk(x, depth + 1));
+        }
+        const out: Record<string, unknown> = {};
+        for (const [k, val] of Object.entries(o)) {
+          out[k] = walk(val, depth + 1);
+        }
+        return out;
+      } finally {
+        seen.delete(o);
       }
-      const out: Record<string, unknown> = {};
-      for (const [k, val] of Object.entries(o)) {
-        out[k] = walk(val, depth + 1);
-      }
-      return out;
     }
 
     return String(v);
   }
 
   try {
-    return JSON.stringify(walk(value, 0), replacer, opts.indent ?? 0);
+    return JSON.stringify(walk(value, 0), opts.replacer, opts.indent ?? 0);
   } catch (e) {
     // 兜底：连安全序列化都失败了，至少返回原因
     return JSON.stringify({
@@ -212,9 +248,124 @@ export function safeStringify(
  * 里的手机号就漏掉了。而 stack 恰好是最容易带敏感信息的地方
  * （比如 `POST /api/user/13800138000`）。
  */
+/** JSON 文本里的空白字符 */
+function isJsonWs(c: string | undefined): boolean {
+  return c === ' ' || c === '\t' || c === '\n' || c === '\r';
+}
+
+/**
+ * 从 `pos` 起跳过一个**完整**的 JSON 值，返回结束后一位的下标
+ *
+ * 【为什么必须"扫"而不是"正则匹配"】
+ * 老实现用 `(?:"[^"]*"|[^,}\]]+)` 去匹配"值"这一段。
+ * 值一旦是对象或数组，这个片段就会在第一个 `,` / `}` 处提前收尾，
+ * 剩下的尾巴留在原地——**脱敏后的文本不再是合法 JSON**：
+ *
+ * ```
+ * redact('{"password": {"a":1},"nested":1}')
+ *   → {"password": "[REDACTED]"},"nested":1}     ← 多出一个 }
+ * ```
+ *
+ * 服务端 `JSON.parse` 直接失败 → 整个诊断包作废。
+ * 更糟的是这条路径**永不抛错**，所以"永不抛错"的承诺保住了，
+ * 上报内容却不可用了——失败被推迟到了看不见的地方。
+ *
+ * 括号/引号配对只有"扫"才数得清（正则不擅数嵌套），所以用状态机：
+ * 字符串内部整体跳过、容器按深度配对、标量吃到分隔符为止。
+ */
+function skipJsonValue(text: string, pos: number): number {
+  let i = pos;
+  while (i < text.length && isJsonWs(text[i])) i++;
+  const c = text[i];
+
+  if (c === '"') {
+    i++;
+    while (i < text.length) {
+      if (text[i] === '\\') {
+        i += 2; // 跳过转义字符（\" 不是字符串结尾）
+        continue;
+      }
+      if (text[i] === '"') return i + 1;
+      i++;
+    }
+    return text.length;
+  }
+
+  if (c === '{' || c === '[') {
+    const close = c === '{' ? '}' : ']';
+    let depth = 0;
+    while (i < text.length) {
+      const ch = text[i];
+      // 【为什么容器里也要跳过字符串】
+      // `{"a":"}"}` 里的 `}` 不是结构字符，按括号计数会被带偏。
+      if (ch === '"') {
+        i = skipJsonValue(text, i);
+        continue;
+      }
+      if (ch === c) depth++;
+      else if (ch === close) {
+        depth--;
+        if (depth === 0) return i + 1;
+      }
+      i++;
+    }
+    return text.length;
+  }
+
+  // 数字 / true / false / null：一直吃到空白或 JSON 分隔符
+  while (i < text.length && !isJsonWs(text[i]) && text[i] !== ',' && text[i] !== '}' && text[i] !== ']') i++;
+  return i;
+}
+
+/**
+ * 把文本中所有"命中 keyPattern 的 key"对应的**完整值**替换掉
+ *
+ * 【为什么不用 `String.replace(re, fn)`】
+ * `replace` 只会删掉**正则匹配到的那一段**（这里是 key 本身），
+ * 回调返回多长的内容都改变不了这一点——值那部分原文会原封不动地接在后面。
+ * 实测：`{"token": [1,2,3],"ok":1}` 用 replace 会得到
+ * `{"token": "[REDACTED]": [1,2,3],"ok":1}`——多出一个冒号和整个原值。
+ *
+ * 所以这里自己走一遍匹配循环，按"上一段末尾 → 本次值结束"切片拼接，
+ * 才能把值真正替换掉。
+ */
+function replaceKeysByPattern(text: string, re: RegExp, replacement: string): string {
+  re.lastIndex = 0;
+  let out = '';
+  let last = 0;
+  let m: RegExpExecArray | null;
+
+  while ((m = re.exec(text)) !== null) {
+    if (m[0].length === 0) {
+      re.lastIndex++; // 防御：空匹配会让 exec 原地打转
+      continue;
+    }
+    const start = m.index;
+    let p = start + m[0].length;
+    while (p < text.length && isJsonWs(text[p])) p++;
+    // 命中 keyPattern 的引号串也可能只是**值**（如 `"note": "my password is x"`），
+    // 后面没有冒号就不是 key——误替换会连正常内容一起吃掉。
+    if (text[p] !== ':') continue;
+    p++; // 吃掉冒号
+    const end = skipJsonValue(text, p);
+    if (end <= p) continue;
+
+    out += text.slice(last, start) + text.slice(start, p) + ' ' + replacement;
+    last = end;
+    // 【为什么要把 lastIndex 推到值结束】
+    // 被替换掉的值不需要再脱敏（它已经是 [REDACTED] 了），
+    // 继续在里面匹配只会白白消耗时间，还可能命中值内部的冒号结构。
+    re.lastIndex = end;
+  }
+
+  out += text.slice(last);
+  return out;
+}
+
 export function redact(
   json: string,
-  rules: readonly RedactRule[] = DEFAULT_REDACTIONS
+  rules: readonly RedactRule[] = DEFAULT_REDACTIONS,
+  opts: { readonly onRuleError?: (rule: RedactRule, error: unknown) => void } = {}
 ): string {
   let out = json;
   for (const r of rules) {
@@ -228,23 +379,58 @@ export function redact(
         out = out.replace(re, rep);
       }
       if (r.keyPattern) {
-        // 匹配 "key": value 形式
         const src = r.keyPattern.source;
-        const re = new RegExp(`"[^"]*(?:${src})[^"]*"\\s*:\\s*(?:"[^"]*"|[^,}\\]]+)`, 'gi');
-        out = out.replace(re, (m) => {
-          const colon = m.indexOf(':');
-          const keyPart = m.slice(0, colon + 1);
-          return `${keyPart} ${rep.startsWith('[') ? `"${rep}"` : rep}`;
-        });
+        // 【为什么只匹配 key，值交给 skipJsonValue 扫】
+        // 见 skipJsonValue 的说明：值的边界只能用扫描确定，正则无法确定。
+        //
+        // 【⚠️ 为什么 key 部分用 `[^":]` 而不是 `[^"]`】
+        // JSON 的 key 里不会出现引号，但 `[^"]*` 会**跨过冒号和逗号**继续吃：
+        // 在 `{"token": [1,2,3],"ok":1}` 上它会一路匹配到 `"token": [1,2,3],`
+        // （在下一个 `"` 前才停），于是整段被当成 key 名，
+        // 后面判断冒号自然失败 → 脱敏不生效，或者更糟：把一段结构当成 key 替换掉。
+        const re = new RegExp(`"[^":]*(?:${src})[^":]*"`, 'gi');
+        out = replaceKeysByPattern(out, re, rep.startsWith('[') ? `"${rep}"` : rep);
       }
-    } catch {
-      // 单条规则失败不影响其他规则
+    } catch (e) {
+      // 【为什么不能空 catch】
+      // 老实现在这里写了 `catch { }`，注释说"单条规则失败不影响其他规则"。
+      // 不中断是对的，但**完全无声**是错的：
+      // 任何一条规则炸了，脱敏就被静默跳过，
+      // 而 README 承诺"序列化后脱敏"——这是一条能把明文密码 / token 报上去的路径。
+      // 敏感信息泄露必须吵，不能静。
+      if (opts.onRuleError) opts.onRuleError(r, e);
+      else console.error(`[diagpack] 脱敏规则「${r.name}」执行失败，该规则已被跳过`, e);
     }
   }
   return out;
 }
 
 // ==================== 收集器 ====================
+
+/** 单分区字符配额默认值 */
+const DEFAULT_MAX_SECTION_CHARS = 20_000;
+/** 全包字符配额默认值 */
+const DEFAULT_MAX_TOTAL_CHARS = 200_000;
+/**
+ * 字符数硬上界（约 100MB 文本）
+ *
+ * 【为什么需要上界】没有上界时 `maxTotalChars: Infinity` 会让配额形同虚设，
+ * 一个持有超大对象的分区能把内存吃干。
+ */
+const MAX_CHARS_HARD_CAP = 100_000_000;
+
+/**
+ * 配额收口：非有限值 / 非正数一律回落到默认值，正常值再夹到硬上界
+ *
+ * 【为什么"非正数"要回落而不是夹到 1】
+ * 夹到 1 等于"每个分区截成 1 个字符"——配置看起来生效了，内容其实是空的，
+ * 这正是本单元要防的那种"静默失效"。非正数没有合理语义，按没配处理更诚实。
+ */
+function positiveCapOr(v: number | undefined, fallback: number, cap: number): number {
+  const n = numOr(v, fallback);
+  // 肯定式写法：NaN 已经在上一步被 numOr 挡掉，这里只处理 0 / 负数
+  return n > 0 ? Math.min(n, cap) : fallback;
+}
 
 export class DiagCollector {
   private readonly _cfg: Required<Omit<DiagPackConfig, 'extraRedactions'>>;
@@ -255,8 +441,21 @@ export class DiagCollector {
     this._cfg = {
       appId: cfg.appId,
       version: cfg.version,
-      maxSectionChars: cfg.maxSectionChars ?? 20_000,
-      maxTotalChars: cfg.maxTotalChars ?? 200_000,
+      /**
+       * 【为什么这两个配额必须收口】
+       * 老写法是 `?? 20_000`：只挡了 undefined，
+       * 于是 `maxSectionChars: 0` → 每个分区被截成 0 字符（内容全丢，还记着 chars=12），
+       * `maxTotalChars: -1` → `total + safe.length > -1` 恒真，
+       * **第一个分区就被判定超配额而丢弃**，整个诊断包是空的。
+       * 两个方向都不报错，运营看到的是"玩家发了诊断包，里面什么都没有"。
+       *
+       * NaN 同理：`x > NaN` 恒为 false → 配额**完全失效**（永不截断，包体无限大）。
+       *
+       * 非正数没有合理语义（"配额为 0"等价于"什么都不收集"），
+       * 所以一律视为没配，回落到默认值；上界用于挡住 `Infinity` 导致的 OOM。
+       */
+      maxSectionChars: positiveCapOr(cfg.maxSectionChars, DEFAULT_MAX_SECTION_CHARS, MAX_CHARS_HARD_CAP),
+      maxTotalChars: positiveCapOr(cfg.maxTotalChars, DEFAULT_MAX_TOTAL_CHARS, MAX_CHARS_HARD_CAP),
       includeTimestamp: cfg.includeTimestamp ?? true,
     };
     this._rules = [...DEFAULT_REDACTIONS, ...(cfg.extraRedactions ?? [])];
@@ -284,6 +483,22 @@ export class DiagCollector {
 
   get sectionNames(): readonly SectionName[] {
     return [...this._providers.keys()];
+  }
+
+  /**
+   * 释放资源
+   *
+   * 【为什么必须有 destroy】
+   * `section(name, provider)` 收进来的 provider 是闭包——
+   * 而它通常捕获了组件 / 场景对象 / 玩家数据（这正是要诊断的东西）。
+   * 这些引用挂在收集器上，收集器又常被做成单例，
+   * 于是一整棵 Cocos 节点树在场景销毁后仍无法回收。
+   *
+   * 本单元没有 install，但持有外部闭包就是持有外部生命周期，
+   * 与"有 install 必须有 uninstall"是同一条规则，所以这里补 destroy。
+   */
+  destroy(): void {
+    this._providers.clear();
   }
 
   /**
@@ -330,7 +545,18 @@ export class DiagCollector {
       // 脱敏（在最终文本上做）
       let safe: string;
       try {
-        safe = redact(json, this._rules);
+        safe = redact(json, this._rules, {
+          // 【为什么把规则失败写进 warnings】
+          // 脱敏失败 = 敏感信息可能原样上报，这是要有人在工单里看见的事，
+          // 不能只留在控制台里。
+          onRuleError: (rule, err) => {
+            warnings.push(
+              `分区 "${name}" 的脱敏规则「${rule.name}」执行失败，该规则已跳过：${
+                err instanceof Error ? err.message : String(err)
+              }`
+            );
+          },
+        });
       } catch (e) {
         safe = json;
         warnings.push(`分区 "${name}" 脱敏失败，已保留原文：${e instanceof Error ? e.message : String(e)}`);
@@ -435,23 +661,42 @@ export class DiagCollector {
  * 直接访问会让这个模块无法在 Node 里测试。
  * 由调用方传进来，测试时传假的即可。
  */
-export function collectEnvironment(env: {
-  readonly platform?: string;
-  readonly os?: string;
-  readonly osVersion?: string;
-  readonly deviceModel?: string;
-  readonly language?: string;
-  readonly screenWidth?: number;
-  readonly screenHeight?: number;
-  readonly pixelRatio?: number;
-  readonly memoryMB?: number;
-  readonly networkType?: string;
-  readonly [k: string]: unknown;
-}): Record<string, unknown> {
+export function collectEnvironment(
+  env: {
+    readonly platform?: string;
+    readonly os?: string;
+    readonly osVersion?: string;
+    readonly deviceModel?: string;
+    readonly language?: string;
+    readonly screenWidth?: number;
+    readonly screenHeight?: number;
+    readonly pixelRatio?: number;
+    readonly memoryMB?: number;
+    readonly networkType?: string;
+    readonly [k: string]: unknown;
+  },
+  /**
+   * 可注入的时间 / 时区（测试用，不传则走真实环境）
+   *
+   * 【为什么要开这个口子】
+   * 原实现在函数内部直连 `new Date()` 与 `Intl`。
+   * 环境采集本身读全局是合理的（不像随机源那样影响可复现性），
+   * 但后果是**这个函数的输出无法被断言**：
+   * 同一份输入在成都和纽约跑出两个结果，测试只能写"字段存在"这种弱断言。
+   * 时区恰好又是"每天 0 点刷新"类问题的核心线索——最需要被精确断言的字段，
+   * 偏偏是不可控的。所以把它变成可注入，默认行为完全不变。
+   */
+  inject: {
+    readonly now?: number;
+    readonly timezone?: string;
+    readonly timezoneOffsetMin?: number;
+  } = {}
+): Record<string, unknown> {
+  const d = new Date(inject.now ?? Date.now());
   return {
     ...env,
-    collectedAt: new Date().toISOString(),
-    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    collectedAt: d.toISOString(),
+    timezone: inject.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone,
     /**
      * 时区偏移（分钟）
      *
@@ -459,6 +704,6 @@ export function collectEnvironment(env: {
      * 玩家的"每天 0 点刷新"问题，八成是时区理解不一致。
      * 有了 offset 就能直接判断是客户端错了还是服务端错了。
      */
-    timezoneOffsetMin: new Date().getTimezoneOffset(),
+    timezoneOffsetMin: inject.timezoneOffsetMin ?? d.getTimezoneOffset(),
   };
 }
