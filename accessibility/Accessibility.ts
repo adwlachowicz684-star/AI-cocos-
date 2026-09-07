@@ -24,6 +24,25 @@
  *
  * 【零业务依赖】
  * 它只维护开关与缩放系数，不认识任何具体表现。
+ *
+ * 【使用示例】
+ * ```typescript
+ * const a11y = new Accessibility();
+ *
+ * // 设置项通常直接来自设置界面
+ * a11y.setReduceMotion(true);          // 关闭镜头震动/闪白
+ * a11y.setColorBlind('deuteranopia');  // 红绿色盲校正
+ * a11y.setFontScale(1.25);             // 字号缩放
+ * a11y.setSubtitles(true);             // 开启字幕
+ *
+ * // 渲染/表现层读当前状态
+ * a11y.reduceMotion;   // true
+ * a11y.fontScale;      // 1.25
+ * ```
+ *
+ * 【为什么要读状态而不是各自存一份】
+ * 多个系统（UI、镜头、战斗表现）都要响应这些开关，
+ * 集中在一处才能避免"改了设置但某个系统没跟着变"。
  */
 
 // ==================== 类型 ====================
