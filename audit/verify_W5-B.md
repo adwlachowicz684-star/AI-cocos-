@@ -167,14 +167,44 @@ window = 1.0，request('s1')，tick(0.1)  → count = 1     （正常）
 
 ---
 
-## 5. 一条给全库的提醒：`check-random-source.py` 漏检
+## 5. 一条给全库的提醒：`check-random-source.py` 覆盖面不足
+
+### 现象
 
 `steering.wander` 的默认参数仍是 `rand: () => number = Math.random`（实测不注入时两次结果不同），
-但 `python3 scripts/scan-random-source.py`（本库实际脚本名为 `check-random-source.py`）输出
-`[OK] 未发现自建随机源`。
+但 `python3 scripts/check-random-source.py` 输出 `[OK] 未发现自建随机源`。
 
-**该脚本没能抓到"默认参数里写 `Math.random`"这种形态**——它看起来只扫了显式的 `Math.random()` 调用点。
-同类隐患可能在别的单元也存在。建议总审单独开一条：让脚本覆盖"默认参数值 / 函数默认值"里的 `Math.random`。
+### 原因（不是脚本 bug，是覆盖面窄）
+
+读 `scripts/check-random-source.py` 的正则，它**只查两种形态**：
+
+1. `class X implements IRandomSource` 且方法体直接 `return Math.random()`
+2. `next()` 方法体直接 `return Math.random()`
+
+它**完全不查**"直接调用 `Math.random()`"和"默认参数值是 `Math.random`"。
+而后者恰恰是本次验收里两条条目的成因。
+
+### 全库实际清单（我逐条读上下文确认，排除注释、tests、examples）
+
+| 位置 | 形态 | 归属 | 判断 |
+|---|---|---|---|
+| `crash/CrashReporter.ts:312` | 直接调用：`Math.random() > this._sampleRate` | **W1-A**（P1 在案） | ⚠️ 应被抓到：采样决定"这条崩溃报不报"，直接影响可复现与可测试 |
+| `steering/Steering.ts:253` | 默认参数：`rand: () => number = Math.random` | **W5-A**（P1 未修） | ⚠️ 应被抓到：不注入就不可复现，回放与单测失效 |
+| `telemetry/Telemetry.ts:339` | 直接调用：`randomId()` 里的 `Math.random` | **W5-A**（P2 在案） | ⚠️ 应被抓到（原报告也把 `telemetry.randomId` 列为同类） |
+| `rng/Seed.ts:75,76` | 直接调用：`random()` 生成可读种子 | 无窗口 | ✅ **合理、不建议改**：种子生成本来就该不可预测，改了反而每次一样 |
+
+另：`perception` 的同类问题（W3-A P1）已修，现注释写明"抖动用的是可注入的独立随机源"——
+这条可以作为"修好了是什么样"的参考样本。
+
+### 建议
+
+给脚本补两条规则（**我没改脚本**——`scripts/` 是共享的，改了会影响其余 15 个窗口，
+且脚本是否该扩大覆盖面属于总审决定）：
+
+1. 生产代码里出现裸 `Math.random()` 调用 → 报错，白名单加 `rng/Seed.ts`（并注明"种子生成属例外"）
+2. 函数/构造的**默认参数值**里出现 `Math.random` → 报错
+
+补上之后，上表前三条会自动浮出来，无需等各窗口自己发现。
 
 （这条已超出 W5-A 的验收范围，记在这里供总审参考，不计入 W5-A 的通过与否。）
 
