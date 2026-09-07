@@ -22,6 +22,31 @@
  * 本模块不画任何东西，只算数字：
  * `mainRatio` / `trailRatio` / `segmentIndex` / `displayValue`。
  * 渲染由你套到引擎的 Sprite / Graphics 上。
+ *
+ * 【使用示例】
+ * ```typescript
+ * const bar = new ProgressBar({ min: 0, max: 100, value: 100, trail: true });
+ *
+ * bar.add(-30);          // 掉血
+ * bar.update(dt);        // 每帧推进（延迟条在这里追赶）
+ * bar.snapshot().ratio;  // 0.7
+ * bar.snapshot().trailRatio;  // 延迟条还在 1.0，会慢慢追下来
+ *
+ * // 分段血条（Boss 多阶段）
+ * const boss = new ProgressBar({ max: 300, segments: 3 });
+ * // ⚠️ 返回的是**占比 0~1**，不是数值区间
+ * boss.segmentBounds(0); // { start: 0, end: 0.3233... }（约 1/3，含段间空隙）
+ * boss.segmentBounds(3); // 抛错：段索引越界
+ * ```
+ *
+ * 【⚠️ segmentBounds 返回占比，不是数值】
+ * 实测 `{ max: 300, segments: 3 }` 下 `segmentBounds(0)` 是 `{start:0, end:0.3233}`，
+ * 不是 `{0, 100}`。它给的是"相对整条"的渲染区间（含段间空隙），
+ * 直接当数值用会得到完全错误的位置。
+ *
+ * 【延迟条为什么单独 update】
+ * "白色残影"效果需要先等待再跟随，它是一个独立的时间状态机，
+ * 不推进就不会动。
  */
 
 import { clamp, clamp01, clampNum, numOr, safeDt, lerp } from '../_core/math';
