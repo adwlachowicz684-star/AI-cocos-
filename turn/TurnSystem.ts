@@ -81,6 +81,23 @@ interface Entry {
   dead: boolean;
   /** 被跳过本回合（眩晕等） */
   skipThisRound: boolean;
+  /**
+   * 额外回合存货（连击 / 再动）
+   *
+   * 【为什么是计数器而不是"插入克隆体"】
+   * 原实现 `grantExtraTurn` 往 `_entries` 里 `{...e}` 插一个**同 id 的克隆对象**。
+   * 于是同一个 id 在数组里有两条记录，而 `_byId` 只认原对象：
+   * - `_doRemove` 用 `findIndex(e => e.id === id)` **只删第一个匹配**
+   *   → 单位被击杀后，克隆体仍留在行动序列里，且它的 `dead` 还是 false
+   * - 结果：**一个已经被杀死的单位会再次获得回合并触发 onUnitStart**
+   *   （表现为"敌人死了还行动了一次"）
+   * - 同时 `unitCount`（按 `_byId.get(e.id) === e` 过滤）与 `_entries.length` 不一致，
+   *   胜负判定会提前或错后
+   *
+   * 改成计数器后，一个 id 永远只对应一条 Entry，
+   * 身份唯一 → 删除、计数、胜负判定全部自洽。
+   */
+  extraTurns: number;
 }
 
 export class TurnSystem {
@@ -115,6 +132,7 @@ export class TurnSystem {
       ap: unit.actionPoints ?? 1,
       dead: false,
       skipThisRound: false,
+      extraTurns: 0,
     };
 
     this._entries.push(e);
@@ -141,20 +159,77 @@ export class TurnSystem {
     const e = this._byId.get(id);
     if (!e || e.dead) return false;
 
+    /**
+     * 【⚠️ 只从行动序列里摘掉，记录仍留在 _byId】
+     *
+     * 原实现在 `_doRemove` 里 `this._byId.delete(id)`，
+     * 而 `reviveUnit` 唯一的入口就是 `_byId.get(id)`——
+     * 于是 `reviveUnit` **永远拿不到对象、永远返回 false**。
+     *
+     * 实测（修复前）：`killUnit('b')` 后 `has('b')` = false，
+     * `reviveUnit('b')` = false，无论何时调用都失败。
+     * README 的 API 表里明写 `killUnit(id) / reviveUnit(id)` 是"死亡 / 复活"，
+     * 任何带复活、召唤、亡语机制的玩法接上后**复活静默失败**——
+     * 它返回 false，但只要调用方没检查返回值（绝大多数不会），
+     * 表现就是"复活术放了，单位没回来"。
+     *
+     * 【记录什么时候真正删除】
+     * 由 `removeUnit(id)` 显式删除，或 `clear()` 清空整场。
+     * 一场战斗的单位数是有界的，死亡记录留到战斗结束没有内存问题。
+     */
     e.dead = true;
     if (this._iterating) {
       this._pendingRemoval.push(id);
     } else {
-      this._doRemove(id);
+      this._removeFromSequence(id);
     }
     return true;
   }
 
-  /** 复活（清除死亡标记） */
+  /** 复活（清除死亡标记，重新加回行动序列） */
   reviveUnit(id: string): boolean {
     const e = this._byId.get(id);
     if (!e || !e.dead) return false;
+
     e.dead = false;
+    e.skipThisRound = false;
+    e.extraTurns = 0;
+    e.ap = e.maxAP;
+
+    /**
+     * 【为什么复活后要重新插入 _entries】
+     * `killUnit` 已经把它从行动序列里摘掉了（否则死人还会轮到行动）。
+     * 复活要让它重新参与回合，就得按先攻插回正确位置——
+     * 直接用 push 会破坏"按先攻降序"这条不变式。
+     */
+    if (!this._entries.includes(e)) {
+      let at = this._entries.length;
+      for (let i = 0; i < this._entries.length; i++) {
+        if (this._entries[i].initiative < e.initiative) {
+          at = i;
+          break;
+        }
+      }
+      this._entries.splice(at, 0, e);
+      // 插在游标之前时，游标要前进，否则当前单位会被跳过一次
+      if (at <= this._cursor) this._cursor++;
+    }
+    return true;
+  }
+
+  /**
+   * 彻底移除一个单位（不再可复活）
+   *
+   * 【为什么单独提供】
+   * `killUnit` 为了让 `reviveUnit` 能工作，会保留 `_byId` 记录。
+   * 确认不需要复活时（比如战斗结算、单位被永久消灭），
+   * 用这个方法把记录一起清掉，避免长期累积。
+   */
+  removeUnit(id: string): boolean {
+    const e = this._byId.get(id);
+    if (!e) return false;
+    this._removeFromSequence(id);
+    this._byId.delete(id);
     return true;
   }
 
@@ -166,13 +241,26 @@ export class TurnSystem {
     return true;
   }
 
-  /** 插入一个"额外回合"（连击、再动） */
+  /** 授予一个"额外回合"（连击、再动）——当前单位结束后立即再动一次 */
   grantExtraTurn(id: string): boolean {
     const e = this._byId.get(id);
     if (!e || e.dead) return false;
-    // 在当前游标后面插一个引用（同一单位连续动两次）
-    const clone: Entry = { ...e, skipThisRound: false };
-    this._entries.splice(this._cursor + 1, 0, clone);
+
+    /**
+     * 【⚠️ 不再插入克隆体，改为累加计数器】
+     *
+     * 原实现往 `_entries` 里插 `{...e}`（同 id 的第二个对象），
+     * 导致 id 与 entry 不再一一对应——详见 `Entry.extraTurns` 的注释。
+     *
+     * 实测（修复前）：a(先攻10) b(先攻5)，`grantExtraTurn('a')` 后
+     * 序列 = [a, a(clone), b]；`killUnit('a')` 之后
+     * 序列残留 = [a(clone)]、`unitCount` = 1，
+     * 而 clone 的 `dead` 仍是 false → **死亡单位继续行动**。
+     *
+     * 计数器方案下 `killUnit` 只需删掉唯一那条 Entry，
+     * 行动序列里不会留下幽灵。
+     */
+    e.extraTurns++;
     return true;
   }
 
@@ -266,6 +354,20 @@ export class TurnSystem {
       let guard = 0;
       const maxGuard = this._entries.length * 2 + 4;
 
+      /**
+       * 【额外回合优先于推进游标】
+       * 当前单位有 extraTurns 存货时，直接让它再动一次，不往下走。
+       * 这样"连击"表现为：a 结束 → a 立即再动 → 才轮到 b。
+       */
+      const curEntry = this._entries[this._cursor];
+      if (curEntry && !curEntry.dead && curEntry.extraTurns > 0) {
+        curEntry.extraTurns--;
+        curEntry.ap = curEntry.maxAP;
+        this._phase = 'unitStart';
+        this._events.onUnitStart?.(curEntry.id, this._round);
+        return;
+      }
+
       for (;;) {
         if (++guard > maxGuard) {
           this._phase = 'idle';
@@ -310,19 +412,32 @@ export class TurnSystem {
       this._iterating = false;
       // 遍历结束，清理延迟删除的
       if (this._pendingRemoval.length > 0) {
-        for (const id of this._pendingRemoval) this._doRemove(id);
+        for (const id of this._pendingRemoval) this._removeFromSequence(id);
         this._pendingRemoval.length = 0;
       }
     }
   }
 
-  private _doRemove(id: string): void {
-    const idx = this._entries.findIndex((e) => e.id === id);
-    if (idx < 0) return;
-    this._entries.splice(idx, 1);
-    // 删的是游标之前的（含游标），游标要回退
-    if (idx <= this._cursor) this._cursor--;
-    this._byId.delete(id);
+  /**
+   * 从行动序列里移除（**不动 _byId**）
+   *
+   * 【为什么不再 delete _byId】
+   * 见 `killUnit` 的注释：删了就无法复活。
+   * 真正删除走 `removeUnit`。
+   *
+   * 【为什么用 while 而不是 findIndex】
+   * 一个 id 现在只对应一条 Entry（改掉克隆体之后），
+   * 这里用 while 全量清理是防御性的：万一历史存档或外部代码
+   * 造出了重复 id，也不会留下幽灵条目。
+   */
+  private _removeFromSequence(id: string): void {
+    for (let i = 0; i < this._entries.length; i++) {
+      if (this._entries[i].id !== id) continue;
+      this._entries.splice(i, 1);
+      // 删的是游标之前的（含游标），游标要回退
+      if (i <= this._cursor) this._cursor--;
+      i--;
+    }
   }
 
   // ==================== 行动点 ====================
