@@ -222,10 +222,10 @@ subtitle tutorial wave-spawner  （各 1）
 tsc -p tsconfig.json --outDir .build     ✓ 211 个 .js，产物校验通过
 node .build/tests/run.js                 ✓ 通过 3695 项，失败 0 项
 node scripts/check-deps.js               ✓ 全部通过
-node scripts/check-links.js              ✓ 44 条内部链接，0 处真断链（报出的 1 处是脚本误报，见下）
+node scripts/check-links.js              ✓ 0 处真断链（报出的 1 处在**本报告自己**文件里，是脚本误报，见下）
 python3 scripts/scan-dt-guard.py         ✓ 命中 0 处
 python3 scripts/scan-num-guard.py        ✓ 命中 0 处
-python3 scripts/check-random-source.py   ✓ 未发现自建随机源
+python3 scripts/check-random-source.py   △ 报 [OK]，但**是假通过**（脚本有覆盖缺口，见下）
 python3 scripts/check-dup-exports.py     ✓ 无待处理冲突
 ```
 
@@ -254,7 +254,88 @@ python3 scripts/check-dup-exports.py     ✓ 无待处理冲突
 这类误报会持续污染所有窗口的自检输出（每个窗口都会看到"断链 1 处"然后去查一个不存在的链接）。
 按并行纪律，我不改 `scripts/`。
 
-### 另一处：纠正 `verify_W3-A.md` 的一个误判
+#### 一个"自证"：现在报的是我自己的文件
+
+有意思的是，这一版 `check-links.js` 报的 1 处**已经不在 `handoff_W3-B.md`**，
+而在**本报告自己**（`audit/result_W1-B.md:239-248`）——
+因为我把上面那段"被误判的源码"原样引用了进来做说明。
+
+也就是说：**描述这个问题的文字，本身就会触发这个问题。**
+
+我特意保留了这个引用而没有改写规避。它比抽象描述更有说服力地说明——
+`](` 这个模式在记录代码缺陷的文档里相当常见，
+只要有一份文档贴了含数组索引调用的代码片段，脚本就会报一次假断链。
+
+（若总审觉得碍眼，把 239-248 行那段示例代码改成不带 `](` 的写法即可，
+但那只是掩盖症状，脚本本身仍建议修。）
+
+### 另一处：`check-random-source.py` 报的 [OK] 也是假通过
+
+上一版我只写了"crash:312 的裸 `Math.random` 没被扫到"，没说清**缺口在哪、还有几处漏网**。
+这次把脚本读完了，给总审一份可以直接照着改的结论。
+
+**缺口的根因**：`check-random-source.py` 只匹配两种形态——
+
+```python
+PAT_NEXT  = r'next\s*\(\s*\)\s*(?::\s*number\s*)?\{[^}]{0,200}?return\s+Math\.random\s*\(   # 只认名为 next 的方法
+PAT_CLASS = r'class\s+\w+[^{]*\bimplements\b[^{]*\bIRandomSource\b[^{]*\{'                 # 只认 implements IRandomSource
+```
+
+它**从不检查裸的 `Math.random()` 调用**。只要不在 `next()` 方法体内，一律漏报。
+
+我按"剥注释后仍出现 `Math.random(`"重扫全库（`/data/workspace/scan_raw_mathrandom.py`，未入库），
+共 **4 处**漏网，逐处定性如下：
+
+| 位置 | 用途 | 我的判定 |
+|---|---|---|
+| `crash/CrashReporter.ts:312`<br>`if (Math.random() > this._sampleRate) return false;` | 崩溃上报的采样 | **建议改为注入**。采样率决定"哪些崩溃被上报"，不可复现时无法在测试里稳定断言"这条崩溃一定会上报" |
+| `rng/Seed.ts:75-76`<br>生成助记词/校验位 | **生成随机种子本身** | **可接受**。种子的起点需要真随机，否则每次生成同一种子。`ALLOW_FILES` 目前只放行了 `rng/RNG.ts`，建议把 `Seed.ts` 也加进去 |
+| `telemetry/Telemetry.ts:339`<br>生成 trace id | 非游戏逻辑的唯一 ID | **可接受**。与游戏状态无关，不要求可复现 |
+
+**给总审的两条改法（二选一，都需要改 `scripts/`，故我不自行改）**：
+
+- **A（严）**：脚本加一条 `PAT_RAW = r'Math\.random\s*\('`，命中即报错；
+  再把 `rng/Seed.ts`、`telemetry/Telemetry.ts` 加进 `ALLOW_FILES` 白名单。
+  → 以后任何新增裸调用都会被拦，但要人工维护白名单。
+- **B（宽）**：保持现状，只在脚本输出里加一句提示
+  "本脚本只检查 `next()` 与 `implements IRandomSource` 两种形态，裸调用不在检查范围内"。
+  → 零维护成本，但"假通过"的误导仍在。
+
+我倾向 **A**：`rng/RNG.ts` 自己写的铁律是"任何地方都不能偷偷用 `Math.random()`"，
+那扫描脚本就该覆盖"任何地方"，白名单是有限的例外。
+
+⚠️ 这 4 处**都不在我的 7 个单元内**（crash 属 W1-A，rng / telemetry 属其它窗口），
+按并行纪律我只报不改。
+
+### 已核查：我的改动不影响 `_kitmeta.json` 的依赖声明
+
+观察到 W2-B / W4-B / W5-B / W8-B 等窗口都顺带改了 `_kitmeta.json` 的 `depends` 字段
+（改了 import 就要同步声明）。我核了一遍自己这 7 个单元。
+
+写了个比对脚本（`/data/workspace/check_depends.py`，未入库），
+比对"`_kitmeta.json` 声明的 depends"与"源码实际 import 的顶层模块"。
+
+**结果：7 个单元全部一致，无需改动 `_kitmeta.json`。**
+
+| 单元 | 声明 | 实际 import |
+|---|---|---|
+| anticheat（在 kitmeta 里 name 是 `anti-cheat`） | `_core` | `_core` |
+| audio / buff / collision / skill-player | `_core` | `_core` |
+| condition / spatial | （空） | （空） |
+
+两个踩坑点，写下来省得后面的人再查：
+
+1. **kitmeta 的 `name` 不一定等于目录名**。`anticheat/` 这个单元在 kitmeta 里叫
+   `anti-cheat`，要按 `dir` 字段（`anticheat`）去匹配源码目录，
+   按 `name` 匹配会查不到、误判成"没有 import"。
+2. **同单元内部 import 不算依赖**。`skill-player/SkillPlayer.ts` 里的
+   `import { Track } from './Track'` 是单元内部引用，
+   第一版脚本把它算成了"依赖 skill-player"，属于误报。
+
+顺带一提：用修正后的脚本扫全库，**119 个插件的 depends 声明零不一致**——
+说明各窗口的同步做得挺干净。
+
+### 再一处：纠正 `verify_W3-A.md` 的一个误判
 
 `verify_W3-A.md` 称"`scripts/check-dup-exports.js` 在仓库中不存在，
 导致六项校验有一项无法执行，疑似漏传"。
