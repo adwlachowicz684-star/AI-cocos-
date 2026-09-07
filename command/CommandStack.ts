@@ -159,13 +159,40 @@ export class CommandStack {
    *          失败的命令不该留下撤销记录
    */
   do(cmd: ICommand): void {
+    /**
+     * 【⚠️ 事务中必须先入缓冲区，再 execute】
+     *
+     * 老实现是"先 execute，成功后再 push 进 buffer"。
+     * 如果 `execute()` **执行到一半抛错**（先改了外部状态、再 throw），
+     * 这条命令根本没进 buffer，
+     * 于是 `rollback()` 逆序 undo 时不会撤销它——**副作用残留**。
+     *
+     * 实测（修复前）：
+     * ```
+     * transact('tx', () => { stack.do(ok); stack.do(bad); })
+     * // bad.execute 里先 outside += 100 然后 throw
+     * // 抛出后 outside === 100（应为 0），undoDepth === 0
+     * ```
+     * ok 被正确回滚，但 bad 的 undo **从未被调用**。
+     *
+     * 后果正是事务要解决的问题本身：一次批量操作失败后，
+     * 界面停在"部分已改、部分未改"的中间态，而 `undo` 已经帮不上忙
+     * （失败的命令不在栈里）。用户看到"操作失败了，但有些东西已经变了"。
+     *
+     * 【要求 undo 容忍"部分执行"】
+     * 先入 buffer 意味着 `rollback()` 会对一条"execute 未成功完成"的命令调 undo。
+     * 命令的 `undo()` 必须能处理这种状态（通常是幂等地把状态改回去）。
+     * 这是命令模式的标准要求，也是这里选择先入 buffer 的原因：
+     * 宁可多调一次 undo，也不能让已发生的副作用无人负责。
+     */
+    const inTx = this._txDepth > 0 && this._txBuffer !== null;
+    if (inTx) this._txBuffer!.push(cmd);
+
+    // 异常自然向上冒泡（`transact` 的 catch 会接住并 rollback）。
+    // 这里**不要** try/catch 吞掉它——吞了 rollback 就不会触发。
     cmd.execute();
 
-    // 事务中：只进缓冲区
-    if (this._txDepth > 0 && this._txBuffer) {
-      this._txBuffer.push(cmd);
-      return;
-    }
+    if (inTx) return;
 
     this._pushUndo(cmd);
     this._redoStack.length = 0;
