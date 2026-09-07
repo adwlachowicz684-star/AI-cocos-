@@ -65,6 +65,7 @@ import { runPhase1Tests } from './run_phase1';
 import { runPhase2Tests } from './run_phase2';
 import { runPhase3Tests } from './run_phase3';
 import { runPhase4Tests } from './run_phase4';
+import { runPhase5Tests } from './run_phase5';
 
 async function main(): Promise<void> {
   setSuite('第一批：核心插件（EventBus / Pool / RNG / Damage / Skill / Joystick）');
@@ -172,6 +173,9 @@ async function main(): Promise<void> {
 
   setSuite('精审修复回归 · 第四批（单独项：key 碰撞 / NaN 入统计 / 操作数校验 / 加权分母）');
   runPhase4Tests();
+
+  setSuite('精审修复回归 · 第五批（B3-01：感知抖动可复现性 + 注释误导）');
+  runPhase5Tests();
 
   summary();
 }
