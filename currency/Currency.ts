@@ -162,6 +162,8 @@ export class Wallet {
   private readonly _defs = new Map<string, CurrencyDef>();
   private readonly _balances = new Map<string, number>();
   private readonly _log: CurrencyEntry[] = [];
+  /** 净变化累加器：独立于 `_log`，不受 logLimit 裁剪影响（见 netChange 注释） */
+  private readonly _net = new Map<string, number>();
   private readonly _logLimit: number;
   private readonly _now: () => number;
   private readonly _onChange?: WalletOptions['onChange'];
@@ -477,20 +479,71 @@ export class Wallet {
     return this._log;
   }
 
-  /** 某一种货币的流水 */
+  /**
+   * 某一种货币的流水（取最后 n 条）
+   *
+   * 【⚠️ 为什么 `n > 0` 而不是 `Number.isFinite(n)`】
+   *
+   * `-0` 与 `0` 是同一个值，而 `Array.prototype.slice(-0)` 等价于 `slice(0)`，
+   * 语义是"从 0 切到末尾" = **返回整个数组**，而不是"取最后 0 条" = 空数组。
+   *
+   * 实测（修复前）：
+   * ```js
+   * logOf('gold', 0).length  → 5   （期望 0）
+   * logOf('gold', 2).length  → 2   （正确）
+   * ```
+   *
+   * 后果：`n` 由外部配置/筛选条件驱动时，行为在 0 处**突变**——
+   * "刚清空筛选条件"那一帧会渲染整份流水，而不是空列表。
+   * 只判 `Number.isFinite(0)` 为真，正好漏掉这个唯一会出错的输入。
+   *
+   * 【为什么非有限值（NaN / ±Infinity）仍返回全部】
+   * 默认值就是 `Infinity`（"不限制条数"），NaN 沿用同一分支是既有行为，
+   * 本次只修 0 这一处，不做额外变更。
+   */
   logOf(id: string, n = Infinity): CurrencyEntry[] {
     const out = this._log.filter((e) => e.currencyId === id);
-    return Number.isFinite(n) ? out.slice(-n) : out;
+    if (!Number.isFinite(n)) return out;
+    return n > 0 ? out.slice(-n) : [];
   }
 
-  /** 净变化（对账用） */
+  /**
+   * 净变化（本局盈亏，对账用）
+   *
+   * 【⚠️ 为什么不再基于 `_log` 求和】
+   *
+   * `_log` 受 `logLimit`（默认 200）裁剪，老流水会被 `splice` 掉。
+   * 于是 `netChange` 的真实语义是"**日志里还剩下的**净变化"，与字面意思不符：
+   *
+   * 实测（修复前），`logLimit: 5` 下连续 20 次 `add(gold, 10)`：
+   * ```
+   * 余额 = 200    netChange = 50     ← 差 4 倍
+   * ```
+   *
+   * 后果比"返回错误的数"更麻烦：数字**看起来完全合理**（只是偏小），
+   * UI 把它当"本局赚了多少"显示，运营按它做对账，没人会想到是日志裁剪导致的。
+   * 而且 `logLimit` 一旦被调小，偏差方向系统性偏低。
+   *
+   * 改为独立的累加计数器后不受裁剪影响；`clearLog()` 会一并归零，
+   * 保持"流水与盈亏同步清零"的直觉。
+   *
+   * 【保持的既有语义】`trackLog === false` 的货币不记账，净变化仍为 0。
+   */
   netChange(id: string): number {
     this._require(id);
-    return this._log.reduce((s, e) => (e.currencyId === id ? s + e.delta : s), 0);
+    return this._net.get(id) ?? 0;
   }
 
+  /**
+   * 清空流水
+   *
+   * 【为什么连净变化一起清】
+   * 净变化原本就是从流水里算出来的，调用方对两者的生命周期认知是一致的。
+   * 若只清流水而留着累计值，会出现"流水空了但盈亏还有数"的矛盾状态。
+   */
   clearLog(): void {
     this._log.length = 0;
+    this._net.clear();
   }
 
   // ==================== 存档 ====================
@@ -565,6 +618,9 @@ export class Wallet {
   private _record(id: string, delta: number, balance: number, reason: string): void {
     const def = this._defs.get(id)!;
     if (def.trackLog === false) return;
+
+    // 净变化在这里累加：早于日志裁剪，因此 logLimit 调小也不会让盈亏偏低
+    this._net.set(id, (this._net.get(id) ?? 0) + delta);
 
     this._log.push({ currencyId: id, delta, balance, reason, at: this._now() });
     if (this._log.length > this._logLimit) {

@@ -463,7 +463,13 @@ export class WaveSpawner {
 
     // ⑥ 波次超时兜底
     const wave = this._waves[this._waveIndex];
-    const mode = wave.nextOn ?? 'cleared';
+    /**
+     * 【`wave.nextOn` 不再参与超时判定】
+     * 修复前它在这里被用来分出两个分支，导致 cleared 模式忽略波次自带的
+     * `timeout`（详见下面 `waveTimeout` 的注释）。
+     * 现在三种模式共用同一条超时规则，"清完才进 / 到点就进"的差异
+     * 由下面的 `_finishWave` 与 `_fireFallback` 各自表达。
+     */
     /**
      * 【⚠️ waveTimeout 必须 > 0 才生效，否则传 0 语义会反转】
      *
@@ -475,13 +481,36 @@ export class WaveSpawner {
      * 调用方传 0 的意图通常是「关闭超时」，
      * 结果波次被瞬间推进/清空。实测一次 tick 就跳波。
      */
+    /**
+     * 【⚠️ 为什么两个分支合并，且 cleared 模式也用 `waveTimeout`】
+     *
+     * 老代码是两个互斥分支：
+     * - 非 cleared 模式用 `waveTimeout`（波次自带 `timeout` 优先，回退全局）
+     * - cleared 模式用 **`this._waveTimeout`（只认全局值）**
+     *
+     * 于是波次自带的 `timeout` 在 `nextOn: 'cleared'` 下**完全失效**：
+     *
+     * 实测（修复前）：
+     * ```
+     * wave.timeout = 5，全局 waveTimeout = 60，nextOn = 'cleared'
+     *   跑 20 秒后是否触发兜底 = false    state = fighting
+     * 同一配置改成 nextOn = 'timeout' → 兜底类型 = wave-timeout（正常）
+     * ```
+     *
+     * 后果：README 明确写 `cleared` = "全灭才进（**最常见**，配合 `timeout` 兜底）"，
+     * 且本文件 §131 也写"cleared 模式也有 waveTimeout 兜底"。
+     * 实际却只有全局值生效——波次卡住时要等 **60 秒**（默认值）才推进，
+     * 玩家表现为"打完怪但门不开"，而这恰恰是本单元要根除的问题。
+     * `cleared` 是最常用模式，所以影响面最大。
+     *
+     * 【为什么合并成一个条件而不是改 L484 那一行】
+     * 两个分支的条件在修复后完全一致（`waveTimeout > 0 && _waveTime >= waveTimeout`），
+     * 分成两只会让"到底哪个生效"再次变成一个需要推理的问题。
+     * `mode` 在兜底判定里已经不再有区分作用——
+     * 区分"清完才进 / 到点就进"的是下面的 `_finishWave` 逻辑，不是超时。
+     */
     const waveTimeout = wave.timeout ?? this._waveTimeout;
-    if (mode !== 'cleared' && waveTimeout > 0 && this._waveTime >= waveTimeout) {
-      this._fireFallback('wave-timeout');
-      return;
-    }
-    // cleared 模式也要有兜底，否则怪卡住就永远过不去
-    if (mode === 'cleared' && this._waveTimeout > 0 && this._waveTime >= this._waveTimeout) {
+    if (waveTimeout > 0 && this._waveTime >= waveTimeout) {
       this._fireFallback('wave-timeout');
       return;
     }
@@ -568,7 +597,25 @@ export class WaveSpawner {
         // 直接丢弃，不进入存活表。
         if (h.alive !== false) this._alive.set(h.id, h);
       }
-      // 返回 null 也要计数，否则"生成失败"会让 _spawnDone 永远不成立
+      /**
+       * 【⚠️ 为什么"生成失败也计数"是对的，但老注释的**理由**是错的】
+       *
+       * 老注释写："返回 null 也要计数，否则生成失败会让 `_spawnDone` 永远不成立"。
+       *
+       * 这个因果不成立：`_spawnDone` 的判定是 `this._pending.length === 0`
+       * （见下面 ⑥ 之后的分支），走的是 pending 队列，**从不读 `_spawnedCount`**。
+       * 把计数去掉，`_spawnDone` 照样会正常置位。
+       *
+       * 所以"必须计数"这个结论**不能靠那条理由支撑**——
+       * 这正是本库反复强调的"注释前提是假的"：结论对，归因错。
+       * 下次有人看到 `_spawnedCount` 与 `_plannedCount` 对不上
+       * （生成失败时前者偏大）而"顺手修正"它，就会把一个无害的计数器
+       * 改成一个**语义混乱的计数器**。
+       *
+       * 真正的口径：`_spawnedCount` 记的是"已**处理**的 pending 数"
+       * （含生成失败），`_plannedCount` 记的是"计划生成的总数"。
+       * 两者之差 = 生成失败的数量，这本身就是有意义的信息。
+       */
       this._spawnedCount++;
     }
 

@@ -1,4 +1,5 @@
 import { clampNum } from '../_core/math';
+import { needFinite } from '../_core/guard';
 /**
  * DailyChallenge —— 每日挑战与固定种子
  *
@@ -207,7 +208,25 @@ export class DailyChallenge {
 
     const pool = this._modifiers.slice();
     const out: DailyModifier[] = [];
+    /**
+     * 【⚠️ 为什么 seed === 0 要换一个常量（2026 精审 P2-D5 修复）】
+     *
+     * 下面用的是 xorshift32：`0` 是它的**不动点**——
+     * `0 ^ 0 << 13` 还是 0，三轮下来状态永远是 0。
+     * 于是 `r` 恒为 0，加权抽取退化为"每次都取池子里的第 0 个"，
+     * 生成的 modifiers 永远是同一组前缀，所谓"随机"完全失效。
+     *
+     * 触发概率是 1/2³²（seed 恰好为 0），看起来可以忽略——
+     * 但 seed 来自 `hashDateKey(text)`，而**玩家可以从分享文本倒推输入**，
+     * 也就是说这是一条**可被人为构造**的路径，不是纯理论风险。
+     *
+     * 【为什么只改 0 这一条路径，而不是给所有 seed 加盐】
+     * 加盐会改变**所有现有日期**的 modifiers 抽取结果——
+     * 玩家上周打过的每日挑战会突然变成另一套，属于不可接受的 breaking。
+     * 只把"本来就是坏的"0 换掉，其余 seed 的行为逐位不变。
+     */
     let s = seed >>> 0;
+    if (s === 0) s = 0x9e3779b9;
 
     for (let k = 0; k < this._modifierCount; k++) {
       if (pool.length === 0) break;
@@ -263,8 +282,28 @@ export class DailyChallenge {
    * 如果按提交时刻算，成绩会记到新的一天（而那天的挑战他根本没打）。
    *
    * 所以成绩**必须绑定到开始时的日期**，由调用方传入 `date`。
+   *
+   * 【⚠️ score 必须是有限数（2026 精审 P2-D3 修复）】
+   *
+   * 老实现靠 `score > prev.score` 决定写不写记录，
+   * 而 NaN 与任何值比较都为 false：
+   *
+   * ```
+   * 首次提交（无 prev）    → shouldWrite = true  → 记录里存进 NaN 成绩
+   * 已有 prev，best 模式   → NaN > prev 为 false → 静默不写，返回 false
+   * ```
+   *
+   * 后一种的表现是"成绩丢了，但没有任何提示"——调用方拿到 `false`
+   * 只会当成"这次分不够高"。而前一种更糟：一条 `score: NaN` 的记录
+   * 会一直留在排行榜数据里（NaN 与任何后续成绩比较都为 false，
+   * 于是这条记录**永远不会被更好的成绩覆盖**）。
+   *
+   * 成绩来自内部结算，NaN 意味着上游算错了，属于必须立刻暴露的错误，
+   * 所以这里抛错而不是静默丢弃（与 `stats.record` / `currency.add` 一致）。
    */
   submit(date: DateKey, score: number, cleared: boolean, now: number = Date.now()): boolean {
+    needFinite(score, `DailyChallenge.submit(${date}).score`);
+
     this._attempts.set(date, (this._attempts.get(date) ?? 0) + 1);
 
     const prev = this._records.get(date);
@@ -320,14 +359,62 @@ export class DailyChallenge {
     };
   }
 
+  /**
+   * 导入存档
+   *
+   * 【⚠️ 为什么必须逐条校验（2026 精审 P2-D4 修复）】
+   *
+   * 老实现是无条件 `set()`：`for (const r of s.records) this._records.set(r.date, r)`。
+   * 损坏的存档（改过的本地文件、跨版本残留、服务端脏数据）会**原样进入内部状态**：
+   *
+   * ```
+   * score: NaN      → 这条记录永远不会被更好的成绩覆盖（NaN 比较恒 false）
+   * attempts: -3    → UI 上的"今日次数"显示为 -3
+   * date: '' / 乱码 → 生成一条无法被 prune 清理的孤儿记录（字典序比较失效）
+   * ```
+   *
+   * 三种都不会报错，只表现为"排行榜/打卡 UI 上出现怪数字"。
+   *
+   * 【为什么是"跳过"而不是"抛错"】
+   * 存档导入是**容错路径**：一条坏记录不该让整个存档加载失败
+   * （玩家会直接丢失全部历史）。所以跳过坏数据、保留能用的部分，
+   * 并把跳过的条数返回，让调用方能记日志。
+   *
+   * @returns 被跳过的坏数据条数（0 = 全部导入成功）
+   */
   importState(s: {
     records?: readonly DailyRecord[];
     attempts?: ReadonlyArray<readonly [DateKey, number]>;
-  }): void {
+  }): number {
     this._records.clear();
     this._attempts.clear();
-    for (const r of s.records ?? []) this._records.set(r.date, r);
-    for (const [k, v] of s.attempts ?? []) this._attempts.set(k, v);
+
+    let skipped = 0;
+
+    for (const r of s.records ?? []) {
+      if (!isDateKey(r?.date) || !Number.isFinite(r?.score)) {
+        skipped++;
+        continue;
+      }
+      // attempts / cleared 来自同一条存档，坏了就补默认值而不是丢整条记录
+      this._records.set(r.date, {
+        date: r.date,
+        score: r.score,
+        at: Number.isFinite(r.at) ? r.at : 0,
+        cleared: r.cleared === true,
+        attempts: Math.max(0, Math.floor(Number.isFinite(r.attempts) ? r.attempts : 1)),
+      });
+    }
+
+    for (const [k, v] of s.attempts ?? []) {
+      if (!isDateKey(k) || !Number.isFinite(v) || v < 0) {
+        skipped++;
+        continue;
+      }
+      this._attempts.set(k, Math.floor(v));
+    }
+
+    return skipped;
   }
 
 
@@ -376,6 +463,23 @@ export function dateKeyOf(ms: number, tz: 'utc' | 'local' | number): DateKey {
 }
 
 /**
+ * 是否为合法的 `YYYY-MM-DD` 日期键
+ *
+ * 【为什么 `importState` 需要它】
+ * DateKey 参与两件关键的事——按**字典序**比较（`prune`）和按字符串哈希
+ * （`hashDateKey`）。一条 `''`、`'2024-1-1'` 或乱码的键，
+ * 字典序比较会失效（该被清理的清不掉），哈希出来的种子也毫无意义。
+ * 这类脏数据不会报错，只会变成"永远清不掉的孤儿记录"。
+ *
+ * 只校验**形状**，不校验日历合法性（2 月 30 日也放行）：
+ * 存档里的日期来自 `dateKeyOf`，形状错了说明数据损坏，
+ * 而"2 月 30 日"更可能是时区/日历系统差异，不该被当成坏数据丢掉。
+ */
+function isDateKey(v: unknown): v is DateKey {
+  return typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v);
+}
+
+/**
  * 日期字符串 → 32 位种子（雪崩混合）
  *
  * 【为什么需要】
@@ -414,11 +518,41 @@ const SEED_WORDS_B = [
  * 【为什么要两个词 + 数字】
  * 玩家在群里说"我这个种子是 3748291045"，没人会去试。
  * 说"IRON-WOLF-42"，辨识度高、不易抄错。
+ *
+ * 【⚠️ 为什么数字段不再固定两位（2026 精审 P1 修复）】
+ *
+ * 老写法是 `n = (seed >>> 16) % 100`，输出空间只有
+ * `16 × 16 × 100 = 25600` 种。而 `entryFor` 是
+ * `date → seedToText(hash(date)) → hash(text)`，
+ * 文本空间直接决定了"不同日期能拿到多少种不同挑战"。
+ *
+ * 实测（修复前）：**第 156 天就撞车**——
+ * `2026-06-06` 与 `2026-05-18` 共用种子文本 `ASH-ECHO-61`，
+ * 两天的挑战完全一致。（生日悖论下 25600 桶约 188 天 50% 碰撞，量级吻合。）
+ *
+ * 后果：玩家半年内会遇到"今天和 19 天前一模一样"，
+ * 社区只会报"每日挑战不刷新"——日期键对、文本对，只有内容重复，
+ * 排查时没人会想到是**文本空间太小**。
+ *
+ * 【为什么不能按审查建议直接改用 `hash(date)` 当种子】
+ * 那会破坏本文件最重要的保证：`fromText(entryFor(d).seedText).seed === entryFor(d).seed`
+ * （README §4「分享回填：文本必须是种子的真身」+ 既有回归用例）。
+ * 一旦种子不再由文本派生，分享出去的码就还原不出同一张图。
+ *
+ * 【修法：让文本无损覆盖 32 位种子】
+ * 4 bit（词 A）+ 4 bit（词 B）+ 24 bit（数字段）= 32 bit，
+ * `seedToText` 因此是**单射**：不同的 32 位种子必然得到不同文本。
+ * 于是"两个日期撞车"只可能来自 `hashDateKey` 自身的 32 位碰撞
+ * （约 180 年一次，属已知全局议题），不再有 25600 这个额外瓶颈。
+ *
+ * 【兼容性】数字段改成 2~8 位，两位及以上的旧码**依然合法且映射到同一种子**
+ * ——因为种子是 `hash(text)`，文本字符串本身才是种子的来源，与编码规则无关。
  */
 export function seedToText(seed: number): string {
-  const a = SEED_WORDS_A[seed % SEED_WORDS_A.length];
-  const b = SEED_WORDS_B[(seed >>> 8) % SEED_WORDS_B.length];
-  const n = (seed >>> 16) % 100;
+  const s = seed >>> 0;
+  const a = SEED_WORDS_A[s & 15];
+  const b = SEED_WORDS_B[(s >>> 4) & 15];
+  const n = s >>> 8;
   return `${a}-${b}-${String(n).padStart(2, '0')}`;
 }
 
@@ -430,11 +564,16 @@ export function seedToText(seed: number): string {
  * 这里只做格式校验，真正的转换在 `DailyChallenge.fromText()` 里。
  *
  * 反解路径（把文本拆回数字）是行不通的：
- * "IRON-WOLF-42" 三个部分最多编码 4+4+2 = 10 bit 之外的信息量不足，
- * 无法还原 32 位种子。强行反解只会得到一个"看起来对但实际不同"的种子。
+ * 种子是 `hash(text)` 的结果，文本是种子的**唯一来源**，
+ * 不能从文本反推出"当初生成它的那个日期"。强行反解只会得到一个
+ * "看起来对但实际不同"的种子。
+ *
+ * 【数字段为什么是 2~8 位】
+ * 见 `seedToText` 的注释：数字段承载种子的高 24 位，最长 8 位。
+ * 仍要求**至少两位**——一位数字是抄写错误的最常见形态，必须拒绝。
  */
 export function isValidSeedText(text: string): boolean {
-  const m = /^([A-Z]+)-([A-Z]+)-(\d{2})$/.exec(text.trim().toUpperCase());
+  const m = /^([A-Z]+)-([A-Z]+)-(\d{2,8})$/.exec(text.trim().toUpperCase());
   if (!m) return false;
   return (
     SEED_WORDS_A.includes(m[1]) &&
