@@ -324,7 +324,21 @@ export class MetaProgression {
 
     const cost = costAt(n.cost, lv);
     const cur = n.currency ?? this._soleCurrency();
-    if (this.currency(cur) < cost) {
+
+    /**
+     * 【⚠️ 必须用肯定式判定 `!(have >= cost)`，不能写 `have < cost`】
+     *
+     * NaN 参与任何 `<` 比较都返回 false。
+     * 若余额被污染成 NaN，`have < cost` 恒为 false →
+     * "余额不足"分支永不进入 → **零成本解锁任何节点**。
+     *
+     * 写成 `!(have >= cost)` 后，NaN 会让 `>=` 为 false、取反为 true，
+     * 于是走到拒绝分支——**NaN 天然被拒**，不需要额外判断。
+     *
+     * 【同样的理由】`cost` 本身若非法也走拒绝分支，
+     * 而不是像 `<` 那样放行。
+     */
+    if (!(this.currency(cur) >= cost)) {
       return { ok: false, reason: 'insufficient-currency', cost };
     }
     return { ok: true, cost };
@@ -346,6 +360,28 @@ export class MetaProgression {
       // 静默丢弃会导致"打了怪没给钱"这种查不出来的 bug。
       throw new Error(`[MetaProgression] 未知货币：${id}（已注册：${this._currencies.join(', ')}）`);
     }
+
+    /**
+     * 【⚠️ 非有限金额必须在入口挡掉，不能只靠 Math.max(0, ...)】
+     *
+     * `Math.max(0, NaN)` 的结果是 **NaN** 而不是 0——
+     * 于是 `addCurrency(NaN)` 会把余额整条毒化成 NaN。
+     *
+     * 而余额一旦是 NaN，`canUnlock` 里的 `currency < cost` 恒为 false，
+     * **"余额不足"判定彻底失效 → 可以零成本解锁任何节点**。
+     * 这是能白嫖整棵局外成长树的漏洞，属于财产类问题。
+     *
+     * 【为什么抛错而不是静默忽略】
+     * 奖励计算里出现 NaN 说明上游有除零或字段缺失，
+     * 静默忽略会让"玩家该拿 100 实际拿 0"，反而更难查。
+     * 这里的问题严重度值得响亮失败。
+     */
+    if (!Number.isFinite(amount)) {
+      throw new Error(
+        `[MetaProgression] addCurrency 的金额必须是有限数字，收到 ${amount}`
+      );
+    }
+
     const v = Math.max(0, (this._currency.get(id) ?? 0) + amount);
     this._currency.set(id, v);
     return v;
