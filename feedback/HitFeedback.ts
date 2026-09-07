@@ -42,6 +42,34 @@
  * - **不产生任何副作用**：它不碰相机、不改 timeScale、不生成飘字
  *
  * 副作用由你按输出执行，所以本模块能在 Node 里完整测试。
+ *
+ * 【使用示例】
+ * ```typescript
+ * const fb = new HitFeedback({ maxIntensity: 1.5 });
+ *
+ * // 击中时：强度按伤害量给，payload 会原样透传给飘字
+ * fb.play('heavy', 0.8, { damage: 120, x: 100, y: 200 });
+ * fb.play('crit', 1.4, { damage: 480, x: 100, y: 200 });
+ *
+ * // 每帧推进（用真实 dt，不要用缩放后的 dt）
+ * const out = fb.update(realDt);
+ * out.shake;        // 震屏强度 0~1
+ * out.flash;        // 闪白强度 0~1
+ * out.timeScale;    // 顿帧期间的时间缩放（1 = 无顿帧）
+ * out.inHitstop;    // 是否正在顿帧
+ *
+ * // 取出待渲染的飘字负载（取走即清空）
+ * for (const p of fb.takePopupPayloads()) spawnPopup(p);
+ * ```
+ *
+ * 【⚠️ kind 取值固定】
+ * `light` / `heavy` / `crit` / `block` / `parry` / `kill` / `hurt` / `custom`，
+ * 传其他字符串会**抛错**（不是静默忽略）——
+ * 预设表里没有的类型请显式传 `profiles` 扩展，别指望默认值兜底。
+ *
+ * 【⚠️ update 必须用 realDt】
+ * 顿帧期间逻辑 dt 会被压成 0，若用缩放后的 dt 喂给 update，
+ * 顿帧将永远结束不了——表现是"游戏卡住不动"。
  */
 
 import { clamp01, clampNum } from '../_core/math';
@@ -198,6 +226,23 @@ interface Instance {
   hasHitstop: boolean;
   /** 供宿主读取的附加数据 */
   readonly payload: Readonly<Record<string, unknown>> | null;
+  /**
+   * 飘字 payload 是否已被 `takePopupPayloads()` 取走
+   *
+   * 【为什么用标志而不是时间窗口】
+   * 原实现判定 `inst.elapsed - delay < 1 / 30`——窗口只有 33ms。
+   * 帧间隔一旦大于 33ms，整个窗口会被**跳过**
+   * （上一帧 elapsed 还没到、下一帧已经超），飘字永远不被取出。
+   *
+   * 实测（修复前）：60fps → 1 条；**30fps → 0 条；20fps → 0 条**。
+   * 中低端手机、复杂战斗、录屏时的常态帧率正是 20~30fps，
+   * 于是这些设备上伤害飘字 **100% 不显示**，且完全静默——
+   * 开发在 60fps 的机器上永远复现不了。
+   *
+   * 同时 `1/30` 是裸魔法数字，违反 rule4（配置驱动）。
+   * 改成"到点就置标志、由 take 消费"后，与帧率彻底无关。
+   */
+  popupTaken: boolean;
 }
 
 const DEFAULT_MAX_INTENSITY = 1.5;
@@ -303,6 +348,7 @@ export class HitFeedback {
       elapsed: 0,
       hasHitstop,
       payload,
+      popupTaken: false,
     });
 
     this._lastKnockback = (profile.knockback ?? 0) * eff;
@@ -371,17 +417,27 @@ export class HitFeedback {
     this._lastKnockback = 0;
   }
 
-  /** 取出所有刚进入 popup 层的 payload（宿主用来生成飘字） */
+  /**
+   * 取出所有已到点但尚未取走的飘字 payload（宿主用来生成飘字）
+   *
+   * 【为什么按标志取，而不是按时间窗口捞】
+   * 见 `Instance.popupTaken` 的注释：时间窗口在低于 30fps 时会被整帧跳过。
+   *
+   * 【为什么不在 update 里自动清空】
+   * 飘字的时机由宿主决定（可能要等对象池腾出位置）。
+   * 这里只负责"通知一次"，取走后标志置位，不会重复给同一条 payload。
+   */
   takePopupPayloads(): Readonly<Record<string, unknown>>[] {
     const out: Readonly<Record<string, unknown>>[] = [];
     for (const inst of this._instances) {
       const p = inst.profile.popup;
       if (!p) continue;
-      const delay = p.delay ?? 0;
-      // 落在"本帧刚跨过 delay"的窗口内
-      if (inst.elapsed >= delay && inst.elapsed - delay < 1 / 30 && inst.payload) {
-        out.push(inst.payload);
-      }
+      if (!inst.payload) continue;
+      if (inst.popupTaken) continue;
+      if (inst.elapsed < (p.delay ?? 0)) continue;
+
+      inst.popupTaken = true;
+      out.push(inst.payload);
     }
     return out;
   }
