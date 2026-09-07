@@ -30,7 +30,7 @@
  * 它不知道什么是"战斗"，只知道"状态 A 下这些层的目标音量是这些"。
  */
 
-import { clamp, numOr } from '../_core/math';
+import { clamp, numOr, safeDt } from '../_core/math';
 import { hasOwn } from '../_core/guard';
 
 // ==================== 类型 ====================
@@ -274,6 +274,34 @@ export class BgmStack {
    * 但暂停（timeScale=0）时，如果希望音乐继续，也要用真实时间。
    */
   update(dtMs: number): void {
+    /**
+     * 【⚠️ 入口必须挡掉非法 dt，否则 BGM 永久静音且卡死在过渡态】
+     *
+     * `_elapsed` 一旦变成 NaN：
+     * - `_elapsed >= this._transitionMs` 恒为 false
+     *   → `_inTransition` 永远为 true
+     * - 层音量停在 `crossfadeVolume(from, target, NaN, ...)` 的结果上
+     * - **后续无论再 update 多少次都出不来**——NaN 无法被累加修复
+     *
+     * 实测（修复前）：`setState('battle')` 后 `update(NaN)`
+     * → `layerVolume('drum') === 0`、`inTransition === true`，
+     * 之后再 update 也回不来。
+     *
+     * 一帧 NaN dt（顿帧统计、暂停恢复、`performance.now()` 差值异常）
+     * 就让 BGM 永久静音，且任何"等过渡结束再做某事"的逻辑全部挂起。
+     * 表现为"打着打着背景音乐没了，再也不回来"，重启场景才恢复。
+     *
+     * 【为什么用 safeDt 而不是 dt > 0】
+     * `Infinity > 0` 为 true，会把 `_elapsed` 直接推到 Infinity；
+     * 而 `NaN > 0` 为 false 但 `!Number.isFinite(NaN)` 为 true——
+     * 两者都要挡。
+     */
+    if (!safeDt(dtMs)) {
+      // 非法 dt 时仍同步 playing，保证"该停的层会停"，只是不推进过渡
+      this._syncPlaying();
+      return;
+    }
+
     if (!this._inTransition) {
       this._syncPlaying();
       return;
