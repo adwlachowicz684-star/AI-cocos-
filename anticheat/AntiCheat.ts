@@ -420,9 +420,67 @@ const CAPS = {
  * （服务器回滚、网络重传、某个技能的机制）。
  * 要求多证据交叉，误判率会下降一个数量级。
  */
+/**
+ * 取证据字段：缺失（undefined）视为 0，坏数据（NaN/Infinity）抛错
+ *
+ * 【为什么"缺失"和"坏数据"要分开处理】
+ * - 缺失 = 这个证据没有采集到 → 记 0 分，其余证据照常
+ * - 坏数据 = 采集到了但是 NaN → 说明上游算错了，
+ *   若当成 0 就等于"违规 10 次"和"违规 0 次"同分，作弊者被放过
+ */
+function numOrStrict(v: number | undefined, name: string): number {
+  if (v === undefined) return 0;
+  if (!Number.isFinite(v)) {
+    throw new Error(
+      `[AntiCheat] suspicionScore 的 ${name} 是坏数据：${v}。` +
+      `安全链路不允许静默兜底——请检查上游采集逻辑。`
+    );
+  }
+  return v;
+}
+
 export function suspicionScore(e: CheatEvidence): SuspicionResult {
+  /**
+   * 【⚠️ 每个证据字段都必须先做有限性收口，再参与加权】
+   *
+   * 老实现直接把字段喂给 `clamp`：而 `clamp` 的实现是
+   * `v < min ? min : v > max ? max : v`——**NaN 两个比较都为 false，
+   * 于是原样穿透**。任何一个字段是 NaN，`raw` 就被污染成 NaN，
+   * `score = Math.round(clamp(NaN,0,100)) = NaN`。
+   *
+   * 更糟的是 `actionFor(NaN)` 里三个 `>=` 全为 false，
+   * 返回 `'none'` —— **作弊者被直接放过**。
+   *
+   * 实测（修复前）：一个"速度违规 10 次 + 命中率 z=6"的账号
+   * （本应 `ban`，score=100），只要 `intervalCv` 是 NaN，
+   * 实际返回 `action:'none'`，且不抛错、不打日志。
+   *
+   * `intervalCv` 由 `intervalRegularity(intervals)` 产出，
+   * 只要 intervals 里混入一个 NaN（时间戳缺失/除零）就是 NaN——
+   * 这是**真实会发生**的输入，不是理论可能。
+   *
+   * 【为什么是抛错而不是兜底成 0】
+   * 这是安全链路。兜底成 0 意味着"证据不足→放行"，
+   * 与"被 NaN 污染后放行"的结果**完全一样**——等于没修。
+   * 安全链路宁可响亮失败（让运维介入），也不能静默放行。
+   */
+  /**
+   * 【⚠️ 不能用 `numOr(e.x, 0)` 一刀切——它会把 NaN 也转成 0】
+   *
+   * 第一版我就写成了 `numOr(e.speedViolations, 0)`，
+   * 结果"核心证据是 NaN"被静默当成"没有违规"——
+   * 与原本的失败模式（放行）**结果完全一样**，等于没修。
+   *
+   * 必须区分两种缺失：
+   * - `undefined`（字段没传）→ 视为 0，合理
+   * - `NaN`（传了但是坏数据）→ **抛错**，否则作弊者靠制造 NaN 就能免检
+   */
+  const speedViolations = numOrStrict(e.speedViolations, 'speedViolations');
+  const accuracyZ = numOrStrict(e.accuracyZ, 'accuracyZ');
+  const reportScore = numOrStrict(e.reportScore, 'reportScore');
+
   // 速度：每次 8 分，封顶 40
-  const speed = Math.min(8 * Math.max(0, e.speedViolations ?? 0), CAPS.speed);
+  const speed = Math.min(8 * Math.max(0, speedViolations), CAPS.speed);
 
   /**
    * 命中率：Z 分数减去 2 才开始计分
@@ -433,22 +491,44 @@ export function suspicionScore(e: CheatEvidence): SuspicionResult {
    * ⚠️ 负值必须夹到 0，否则"低于平均水平"会变成负分，
    * 抵消掉其他证据——那等于奖励菜鸡作弊。
    */
-  const accuracy = clamp((Math.max(0, (e.accuracyZ ?? 0) - 2) * 8), 0, CAPS.accuracy);
+  const accuracy = clamp((Math.max(0, accuracyZ - 2) * 8), 0, CAPS.accuracy);
 
   /**
    * 间隔规律性：CV 低于 0.05 才开始计分
    * CV = 0（完美精确）→ 25 分；CV = 0.05 → 0 分
+   *
+   * 【⚠️ cv 为 NaN 时按"无信息"处理（不计分），不是放行整份评分】
+   * 这与上面的"抛错"不矛盾：cv 来自 `intervalRegularity()`，
+   * 它可能因为数据不足（而非数据损坏）返回 NaN，
+   * 属于"这条证据缺失"而非"证据被污染"。
+   * 缺失的证据不计分，其余证据照常生效——
+   * 上例（10 次违规 + z=6）仍会得到 speed=40 + accuracy=30 = 70 分，
+   * 足以触发处置，不会因为 cv 缺失就被放过。
    */
-  const cv = e.intervalCv;
+  const cvRaw = e.intervalCv;
+  const cv = cvRaw !== undefined && Number.isFinite(cvRaw) ? cvRaw : undefined;
   const interval =
     cv === undefined ? 0 : clamp((0.05 - cv) * 500, 0, CAPS.interval);
 
   // 举报：每条 3 分，封顶 15（举报本身可信度有限）
-  const report = Math.min(3 * Math.max(0, e.reportScore ?? 0), CAPS.report);
+  const report = Math.min(3 * Math.max(0, reportScore), CAPS.report);
 
   const account = e.isNewAccount ? CAPS.account : 0;
 
   const raw = speed + accuracy + interval + report + account;
+
+  /**
+   * 【最后一道闸】非有限分数直接抛错，绝不放行
+   * 前面已逐字段收口，这里理论上不会触发；
+   * 但安全链路值得双保险——宁可响亮失败，也不能返回 NaN 让 action 退化成 none。
+   */
+  if (!Number.isFinite(raw)) {
+    throw new Error(
+      `[AntiCheat] suspicionScore 计算出非有限分数：${raw}` +
+      `（speed=${speed}, accuracy=${accuracy}, interval=${interval}, report=${report}）`
+    );
+  }
+
   const score = Math.round(clamp(raw, 0, 100));
 
   return { score, action: actionFor(score), breakdown: { speed, accuracy, interval, report, account } };
