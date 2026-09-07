@@ -121,7 +121,50 @@
 
 ---
 
-## 5. 附：全库校验结果（改动后）
+## 5. 推送后复核（在远程最新代码上重跑）
+
+推送完成后的 `main` 上还有其它窗口（W3-B、W4-B 等）新合入的改动。
+为确认本窗口的改动在**合入后的真实仓库**里仍然成立，我从远程 `main`
+重新拉了一份干净快照（`/tmp/verify`，含其它窗口最新代码），重跑全部校验：
+
+```
+$ bash build.sh
+TSC OK（产物校验通过：218 个 .js）      # 213 → 218，其它窗口新增的文件
+
+$ node .build/tests/run.js
+通过 3696 项，失败 0 项                # 开工基线 3695，+1 来自其它窗口，只增不减
+全部通过 ✓
+
+$ node -e "...runPhase10W2BTests()"    # 本窗口 80 项独立运行
+通过 80 项，失败 0 项
+全部通过 ✓
+
+$ node .build/examples/subtitle-usage.js
+通过 22 项，失败 0 项
+全部通过 ✓
+
+$ python3 scripts/scan-dt-guard.py        扫描 146 个文件，命中 0 处 ✓
+$ python3 scripts/scan-num-guard.py       扫描 0 处命中 ✓
+$ python3 scripts/check-random-source.py  [OK] 未发现自建随机源 ✓
+$ python3 scripts/check-dup-exports.py    [OK] 无待处理的冲突 ✓
+
+$ node scripts/check-links.js
+[✗] 断链 1 处：audit/handoff_W3-B.md（非本窗口文件，见 §4.3）
+
+$ node scripts/check-deps.js
+[✗] import 了但没登记 3 条：i18n / achievement / gameflow → _core
+```
+
+⚠️ **最后这 3 条不是本窗口引入的**：这三个单元属于 W3-A / W4-A 的验收范围，
+是它们自己新 import 了 `_core` 但没登记。按 `review_B.md`「验收方不直接改对方代码」，
+我没有 `--fix`（否则会把三个窗口的登记混进我这次提交）。
+**请对应窗口或总审执行 `node scripts/check-deps.js --fix`。**
+本窗口自己的 `curse → _core` 已登记，且我推送时是以远程最新 `_kitmeta.json`
+为基底合并的（保留了 W4-B 对 `rebind` 的登记，净改动只有 `curse` 一条）。
+
+---
+
+## 6. 附：全库校验结果（改动后）
 
 ```
 $ node .build/tests/run.js
