@@ -2,7 +2,7 @@
 
 > 单元（7 个）：`anticheat` `audio` `buff` `collision` `condition` `skill-player` `spatial`
 > 条目 20（P1 13 / P2 7），来源批次 batch3、batch4
-> 测试：`tests/run_phase10_w1b.ts`，导出 `runPhase10W1BTests()`（**53 项，未并入 `tests/run.ts`，由总审合并**）
+> 测试：`tests/run_phase10_w1b.ts`，导出 `runPhase10W1BTests()`（**55 项，未并入 `tests/run.ts`，由总审合并**）
 > 基线：构建通过、**3695 项测试全绿**、6 项校验脚本全过（未改动 `run.ts`、未碰 `_core/`）
 
 ## 结论
@@ -14,8 +14,8 @@
 | 不成立（附证据） | 1 |
 | 需总审裁决 | 1 |
 
-**新增测试 53 项，全部在修复前确实失败**——验证方式见下方"如何验证'修复前会失败'"。
-全量回归仍是 **3695 项全绿**（我自己的 53 项尚未注册，注册后应为 3748）。
+**新增测试 55 项，全部在修复前确实失败**——验证方式见下方"如何验证'修复前会失败'"。
+全量回归仍是 **3695 项全绿**（我自己的 55 项尚未注册，注册后应为 3750）。
 
 ---
 
@@ -26,8 +26,8 @@
 
 1. 从 `repo.tgz`（本次拉取的原始 main 快照）解出**未修改**的 7 个单元源码，
    覆盖进工作区 → `tsc` 编译 → 跑同一份 `run_phase10_w1b.ts`；
-2. 结果：**通过 33 项，失败 20 项**（20 条失败精确对应下表中 19 条"已修"条目 + 1 条 P2）；
-3. 还原修复后的源码 → 重新编译 → **53 项全绿**。
+2. 结果：**通过 35 项，失败 20 项**（20 条失败精确对应下表中 19 条"已修"条目 + 1 条 P2）；
+3. 还原修复后的源码 → 重新编译 → **55 项全绿**。
 
 失败清单（修复前真实输出）摘录：
 
@@ -72,7 +72,7 @@
 | P2-1 | anticheat | P2 | **已修（附说明）** | `SpeedChecker.destroy` 不存在（无外部资源） | 补 `destroy()`（等价 `reset()`，只为统一收尾入口）；`_window.shift()` 保持不动（窗口极小，且改了会影响既有窗口语义） | anticheat · P1 destroy |
 | P2-2 | audio | P2 | **不成立（附证据）** | 复现输出：`"活跃 1/8  待播 0\n分类 [sfx:1]\n被拒 0…"` —— **已有 `\n` 分隔** | 未改代码；补一条测试锁住"不得出现 `待播 0分类`" | audio · P1 describe |
 | P2-3 | buff | P2 | 已修 | 注册 A、B 两个监听器 → A 触发 **0** 次、B 触发 1 次；`clear()` 只发 `clear`，`remove` 收到 **0** 条 | 改监听器数组 + `indexOf` 精确删除；`clear()` 逐个发 `remove` 再发一次 `clear` | buff · P2 onChange 多播 |
-| P2-4 | collision | P2 | **已修（附说明）** | 拿到 `satOverlap` 返回值后写 `r.overlap = true` → 之后所有不相交调用都返回 `overlap: true` | `Object.freeze` 共享常量；另 3 项（`_key` 回绕、`insert` 复杂度、`query` 不可重入）按建议**只加注释**，不改结构 | collision · P2 satOverlap |
+| P2-4 | collision | P2 | **已修（附说明）** | 拿到 `satOverlap` 返回值后写 `r.overlap = true` → 之后所有不相交调用都返回 `overlap: true`；`CollisionGrid.destroy` 不存在 | `Object.freeze` 共享常量；补 `CollisionGrid.destroy()`（清 `_buckets` + `_scratchSeen`，不重置 `_nextId`）；另 3 项（`_key` 回绕、`insert` 复杂度、`query` 不可重入）按建议**只加注释**，不改结构 | collision · P2 satOverlap / P2 CollisionGrid |
 | P2-5 | condition | P2 | 已修 | 注册两个 `onComplete` → 第一个触发 **0** 次，且其取消函数形同失效 | 改监听器数组 + 精确删除 | condition · P2 onComplete |
 | P2-6 | skill-player | P2 | **已修（附说明）** | `tick(NaN)` → `step = 0`，静默吞一帧（不污染 `_time`） | 按建议"无需改代码，补文档"：源码加注释 + README 坑清单；补测试锁住 `_time` 不被污染 | skill-player · P2 非法 dt |
 | P2-7 | spatial | P2 | 已修 | `update('e1',0,0)` 不传 item → `get('e1')` 返回类型合法、运行时为 `undefined` | 保留强转（改了会让"每帧只更新坐标"的调用方全都要多传参），在源码注释写明约定；`destroy()` 已存在，补测试 | spatial · P1/P2 capacity |
@@ -178,7 +178,7 @@ python3 scripts/check-dup-exports.py     ✓ 无待处理冲突
 anticheat/AntiCheat.ts       dist 有限性守卫 + 基线不被非法样本顶掉 + destroy()
 audio/AudioManager.ts        masterVolume 收口（clampNum）
 buff/BuffSystem.ts           import 校验/重建 _independent、onChange 多播、clear 逐个发 remove
-collision/Collision.ts       raycastAabb 起点在内部返回穿出点、_satEmpty 冻结、3 处注释
+collision/Collision.ts       raycastAabb 起点在内部返回穿出点、_satEmpty 冻结、CollisionGrid.destroy()、3 处注释
 condition/ConditionEngine.ts addStat 有限性、evaluate NaN 收口、onComplete 多播
 skill-player/SkillPlayer.ts  循环回卷补发 t=0、cancel 归属校验、currentHandle、注释
 spatial/SpatialHash.ts       capacity 与 update 强转的注释（未改行为）

@@ -21,7 +21,7 @@ import { SpeedChecker } from '../anticheat/AntiCheat';
 import { AudioManager } from '../audio/AudioManager';
 import { BgmStack } from '../audio/BGMStack';
 import { BuffSystem } from '../buff/BuffSystem';
-import { raycastAabb, raycastCircle, satOverlap } from '../collision/Collision';
+import { CollisionGrid, makeCollider, raycastAabb, raycastCircle, satOverlap } from '../collision/Collision';
 import { ConditionEngine } from '../condition/ConditionEngine';
 import { SkillPlayer } from '../skill-player/SkillPlayer';
 import { Track } from '../skill-player/Track';
@@ -356,6 +356,29 @@ export function runPhase10W1BTests(): void {
     test('⚠️ 对照：射不中时仍返回 miss', () => {
       const r = raycastAabb(-100, 0, 1, 0, { kind: 'aabb', x: 0, y: 100, hw: 5, hh: 5 });
       eq(r.hit, false, '完全错开的射线不得因为放宽守卫而误判命中');
+    });
+  });
+
+  describe('collision · P2 CollisionGrid 的可卸载（铁律 5）', () => {
+    test('⚠️ destroy() 必须清空桶与 scratch（否则碰撞体被 Map 吊住无法回收）', () => {
+      const g = new CollisionGrid(64);
+      g.insert(makeCollider(1, { kind: 'circle', x: 0, y: 0, r: 10 }));
+      g.insert(makeCollider(2, { kind: 'circle', x: 100, y: 0, r: 10 }));
+      assert(g.bucketCount > 0, '先确认桶里有东西');
+      // 修复前：CollisionGrid 没有 destroy → 换场景时 _buckets 强引用着碰撞体
+      (g as unknown as { destroy(): void }).destroy();
+      eq(g.bucketCount, 0, 'destroy 后必须清空，否则换场景内存不降');
+      const out = g.query(0, 0, 1000);
+      eq(out.length, 0, '清空后查不到任何东西');
+    });
+
+    test('⚠️ 对照：clear() 只清桶，两者不互相替代（防止矫枉过正）', () => {
+      const g = new CollisionGrid(64);
+      g.insert(makeCollider(1, { kind: 'circle', x: 0, y: 0, r: 10 }));
+      g.clear();
+      eq(g.bucketCount, 0, 'clear 之后桶为空');
+      g.insert(makeCollider(2, { kind: 'circle', x: 0, y: 0, r: 10 }));
+      assert(g.bucketCount > 0, 'clear 之后仍可继续使用（不是销毁）');
     });
   });
 

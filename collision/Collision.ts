@@ -799,6 +799,28 @@ export class CollisionGrid {
   get bucketCount(): number {
     return this._buckets.size;
   }
+
+  /**
+   * 【铁律 5】可卸载
+   *
+   * `CollisionGrid` 持有的 `_buckets` 是**对碰撞体的强引用**：
+   * 不 clear 的话，即使外部已经丢弃了所有碰撞体，
+   * 它们也会被这个 Map 一直吊着，整批无法回收。
+   * 换场景时"销毁了实体但内存没降"往往就是这个原因。
+   *
+   * `clear()` 只清 `_buckets`，这里额外清 `_scratchSeen`——
+   * 那个 Set 里存的是历史 id，同样会占内存。
+   *
+   * 【为什么不重置 `_nextId`】
+   * 调用方可能还在别处缓存着旧的碰撞体 id（比如用它索引自己的数组）。
+   * 重置会让新插入的碰撞体拿到与旧对象相同的 id，
+   * 那种"同一个 id 指向两个不同对象"的错误极难定位。
+   * id 单调递增的代价只是一个计数器，很划算。
+   */
+  destroy(): void {
+    this._buckets.clear();
+    this._scratchSeen.clear();
+  }
 }
 
 // ==================== 移动解算 ====================
