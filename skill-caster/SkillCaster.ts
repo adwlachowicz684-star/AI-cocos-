@@ -324,6 +324,16 @@ export interface ActiveCast {
   resolved: boolean;
   /** 已命中的目标 id（本窗口内去重） */
   hitIds: Set<string>;
+  /**
+   * 本次施法是否已生成过弹道
+   *
+   * 【为什么需要单独一个标志，不能复用 resolved】
+   * `resolved` 在**首次判定的那一帧**就置 true，之后窗口期内每帧仍会
+   * 走"持续检测命中"分支（持续型技能的设计意图，如旋风斩）。
+   * 所以 `resolved` 表达的是"已经命中过一次"，
+   * 而弹道需要的是"整个施法只发射一次"——两者语义不同。
+   */
+  spawned: boolean;
 
   source?: unknown;
   data?: unknown;
@@ -524,6 +534,7 @@ export class SkillCaster {
       casterY: ctx.y,
       resolved: false,
       hitIds: new Set(),
+      spawned: false,
       source: ctx.source,
       data: ctx.data,
     };
@@ -709,7 +720,17 @@ export class SkillCaster {
     //
     // 【发射点始终是施法者，不是判定中心】
     // origin='aim' 时 c.x/c.y 是落点，从落点往外射就反了。
-    if (def.projectile && this._deps.projectiles) {
+    //
+    // 【⚠️ 每次施法只发射一次】
+    // 本方法在 `hitWindow > 0` 时会被**每帧**调用（持续检测命中）。
+    // 直接判定那段有 `hitIds` 去重，弹道这段原本没有任何"只做一次"的标志
+    // → 实测：hitWindow=0.5、60fps 下 spawn 被调用 **30 次**（期望 1 次）。
+    //
+    // 60fps 下 0.5 秒窗口 = 30 枚弹道叠加，
+    // 表现为"技能瞬间打出成百上千伤害"或"弹幕刷屏 + 性能雪崩"。
+    // 因为每枚弹道都是合法生成的，日志和监控都显示正常，极难归因。
+    if (def.projectile && this._deps.projectiles && !c.spawned) {
+      c.spawned = true;
       const r = (c.facingDeg * Math.PI) / 180;
       this._deps.projectiles.spawn({
         x: c.casterX,
