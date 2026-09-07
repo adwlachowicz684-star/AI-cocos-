@@ -26,6 +26,26 @@
  *
  * 【零业务依赖】
  * 它不知道"音量"是什么，只知道有一堆带类型和范围的键值。
+ *
+ * 【使用示例】
+ * ```typescript
+ * const s = new Settings({
+ *   defs: [
+ *     { key: 'bgm', kind: 'number', default: 80, min: 0, max: 100 },
+ *     { key: 'lang', kind: 'enum', default: 'zh', options: ['zh', 'en'] },
+ *   ],
+ *   onChange: (k, v, old) => saveToDisk(k, v),
+ * });
+ *
+ * s.num('bgm');            // 80
+ * s.set('bgm', 120);        // 返回错误文案（超 max），值不变
+ * s.set('bgm', 50);         // 返回 null（成功）
+ * s.str('lang');            // 'zh'
+ * ```
+ *
+ * 【为什么不抛错而是返回错误文案】
+ * 设置值来自存档和玩家输入，非法值是常态而非异常。
+ * 返回文案可以直接显示在设置界面上；抛错则会让读档失败整个崩掉。
  */
 
 // ==================== 类型 ====================
