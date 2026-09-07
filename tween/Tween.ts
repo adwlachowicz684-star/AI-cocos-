@@ -47,7 +47,8 @@
  * 【无引擎依赖】
  */
 
-import { clamp01, safeDt, EasingName, Easing } from '../_core/math';
+import { clamp01, numOr, safeDt, EasingName, Easing } from '../_core/math';
+import { hasOwn } from '../_core/guard';
 
 export type LoopMode = 'none' | 'repeat' | 'pingpong';
 
@@ -93,18 +94,26 @@ export class Tween {
    * linear / inQuad / outQuad / inOutQuad / inCubic / outCubic /
    * inOutCubic / outQuart / inOutQuart / outExpo / outBack /
    * outElastic / outBounce ……
+   *
+   * 【⚠️ 查表必须先看是不是**自有**属性】
+   * 缓动名来自配置表/存档，拼错成 `toString` / `valueOf` / `constructor` 时，
+   * `Easing['toString']` 拿到的是 `Object.prototype.toString`——truthy，
+   * 于是 `if (!fn)` 的守卫被绕过去，进度 p 变成**字符串** `"[object Object]"`。
+   * 实测：`new Tween(0.5).ease('toString')` **不抛错**，
+   * `onUpdate` 收到 `"[object Object]"`（typeof === 'string'）；
+   * 调用方拿它做算术立刻得到 NaN，NaN 一路污染到坐标，
+   * 表现为"物体瞬间消失/卡死"，且全程无报错。
    */
   ease(name: EasingName | string | ((t: number) => number)): this {
     if (typeof name === 'function') {
       this._ease = name;
       return this;
     }
-    const fn = Easing[name as EasingName];
-    if (!fn) {
+    if (!hasOwn(Easing, name)) {
       const valid = Object.keys(Easing).join(', ');
-      throw new Error(`[Tween] 未知的缓动名 "${name}"。可用：${valid}`);
+      throw new Error(`[Tween] 未知的缓动名 "${String(name)}"。可用：${valid}`);
     }
-    this._ease = fn;
+    this._ease = Easing[name as EasingName];
     return this;
   }
 
@@ -229,6 +238,20 @@ export class Tween {
 }
 
 /**
+ * `delay()` 用的最短时长（秒）
+ *
+ * 【为什么不能再小】Tween 构造要求 `duration > 0`；
+ * 太小会在 `dt` 极小时被浮点误差吞掉。1e-4 远小于一帧（1/60≈0.0167），
+ * 语义上等价于"延时一到就触发"。
+ */
+const DEFAULT_MIN_DURATION = 1e-4;
+
+export interface TweenRunnerOptions {
+  /** 覆盖 `delay()` 内部使用的最短时长（秒）。默认 `1e-4` */
+  readonly minDuration?: number;
+}
+
+/**
  * TweenRunner —— 管理多个 Tween
  *
  * 【为什么需要它】
@@ -244,6 +267,28 @@ export class TweenRunner {
   private _tweens: Tween[] = [];
   private _pending: Tween[] = [];
 
+  /**
+   * `delay()` 用的最短时长（秒）
+   *
+   * 【为什么不是直接写 0.0001】
+   * `Tween` 的构造要求 `duration > 0`，而"延时执行"这个需求
+   * 本身不需要任何时长，于是旧代码硬写了一个魔法数字 `0.0001`。
+   * 问题在于：它同时决定了"delay 到期后 onComplete 的触发精度"——
+   * 每帧推进 1/60 秒时，0.0001 的时长意味着**第一帧就结束**，
+   * 也就是说 delay 实际是"延迟 N 秒后的第一帧触发"。
+   * 这个值一旦被误改成 0.5，所有延时回调会集体晚半秒。
+   * 放进配置项，改它的人至少能看到自己在改什么。
+   */
+  private readonly _minDuration: number;
+
+  /**
+   * 最短时长（秒），默认 `1e-4`。见字段注释。
+   */
+  constructor(opts: TweenRunnerOptions = {}) {
+    // numOr 挡 NaN，Math.max 保证 > 0（否则 new Tween() 会抛"时长必须为正"）
+    this._minDuration = Math.max(1e-9, numOr(opts.minDuration, DEFAULT_MIN_DURATION));
+  }
+
   /** 添加一个 Tween（返回它，便于链式） */
   add<T extends Tween>(t: T): T {
     this._pending.push(t);
@@ -258,7 +303,7 @@ export class TweenRunner {
 
   /** 延时执行 */
   delay(seconds: number, fn: () => void): Tween {
-    return this.add(new Tween(0.0001).delay(seconds).onComplete(fn));
+    return this.add(new Tween(this._minDuration).delay(seconds).onComplete(fn));
   }
 
   update(dt: number): void {
@@ -269,9 +314,23 @@ export class TweenRunner {
 
     if (this._tweens.length === 0) return;
 
-    const snapshot = this._tweens.slice();
-    for (const t of snapshot) {
-      t.update(dt);
+    /**
+     * 【为什么不再每帧 slice()】
+     * 旧写法每帧都复制一份数组——UI 动画这条热路径上，
+     * 60fps × 一个空数组也是 60 次分配/秒，纯粹喂 GC。
+     *
+     * 直接遍历是安全的，因为遍历期间没有任何代码会 **splice** `_tweens`：
+     * - `add()` 写入 `_pending`（下一帧才并入）
+     * - `kill()` 只置标记
+     * - `complete()` 只置标记
+     * 清理统一放在遍历之后做。
+     *
+     * 唯一的行为差异：回调里调 `killAll()` 会把 `_tweens` 清空，
+     * 此时循环提前结束——而那些 tween 的 `_killed` 已经置位，
+     * 就算继续 `update` 也只会立刻 return，结果相同。
+     */
+    for (let i = 0; i < this._tweens.length; i++) {
+      this._tweens[i].update(dt);
     }
 
     // 清理已完成/已终止的
@@ -292,11 +351,30 @@ export class TweenRunner {
     this._pending.length = 0;
   }
 
-  /** 全部立即完成（跳过动画） */
+  /**
+   * 全部立即完成（跳过动画）
+   *
+   * 【⚠️ 旧实现会丢掉刚 add 的 tween】
+   * `_pending` 里的 tween 要等下一次 `update()` 才并入 `_tweens`，
+   * 而旧代码 `for (const t of this._tweens) t.complete();` 之后
+   * **直接把 `_pending` 清空了**——这些 tween 既没跑完，
+   * `onComplete` 也不会被调用。
+   *
+   * 实测：`runner.add(new Tween(0.5).onComplete(fn)); runner.completeAll();`
+   * → `fn` **不会**执行（函数名承诺"全部完成"，实际是"丢掉一部分"）。
+   * 这是最坑的一类：名字听起来是安全的收尾操作，
+   * 于是过场动画跳过、切场景清场都会静默漏掉回调。
+   *
+   * 现在 `_pending` 里的也一并 complete（它们的 delay 视为已到期）。
+   */
   completeAll(): void {
+    // 顺序：先并进来再统一 complete，保证"后 add 的晚一点完成"
+    if (this._pending.length > 0) {
+      for (const t of this._pending) this._tweens.push(t);
+      this._pending.length = 0;
+    }
     for (const t of this._tweens) t.complete();
     this._tweens.length = 0;
-    this._pending.length = 0;
   }
 
   destroy(): void {
