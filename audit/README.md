@@ -64,12 +64,28 @@
 
 ---
 
-## 待总审裁决的全局议题（收集完五批报告后统一处理）
+## 全局议题裁决（**已全部结案**）
 
-- [ ] **矩形坐标系口径**：`IRect` vs `IRectSized` 注释矛盾（"左下" vs "左上"），
-      `camera`（y 向上）与 `dungeon`（y 向下）混用 → 需定统一口径
-- [ ] **相切语义**：`ds.rectsOverlap`（`<`）vs `_core.rectOverlaps`（`<=`）
-- [ ] **平行实现合并**：`pathfind` vs `pathfinding`、`spatial` vs `ds.SpatialHash`
+- [x] ~~**矩形坐标系口径**~~ **已裁决（第六批）**：注释原文自相矛盾——
+      `IRect` 写"左下+右上"，`IRectSized` 写"左上角+宽高"，
+      而 `toCorners` 把 `IRectSized.y` 直接当 `minY`。
+      两句话放一起必然有一个坐标系下是错的（y 向上时"左上角"的 y 应是 maxY）。
+      **统一口径**：`min/max` 是轴无关的数值大小；`IRectSized` 的 x/y 是 **min 角**；
+      `toCorners` **假设 y 向下**。已更正 `_core/types.ts` 注释，
+      并用 `tests/run_phase6.ts` 固化行为（改了会失败）。
+- [x] ~~**相切语义**~~ **已裁决（第六批）：两者都保留，不统一**。
+      实测 `ds.rectsOverlap` 相切→false（`<`），`_core.rectOverlaps` 相切→true（`<=`）。
+      这不是笔误：半开/不含相切是**空间索引**的正确语义
+      （避免边界物体被两个节点重复命中）；闭区间/含相切是**通用 AABB** 的常规约定。
+      强行选一个，必然有另一个场景出 bug。
+      已给两侧补注释说明适用场景，并用测试**给"差异本身"上锁**——
+      有人想对齐风格改成一致时，`run_phase6.ts` 会失败。
+      同理 `ds.pointInRect`（半开）vs `_core.rectContains`（闭区间）也保留差异。
+- [x] ~~**平行实现合并**~~ **已裁决：保留两套，文档已说明选型**。
+      `pathfinding/README.md`、`spatial/README.md` 各自开头都有"与 XX 怎么选"对照表。
+      `spatial` 明确记录：保留两个是因为 API 差异大，
+      强行合并会破坏 `examples/batch3-usage.ts` 的依赖。
+      既然选型文档已就位且测试都通过，合并的收益低于破坏成本 → 维持现状。
 - [x] ~~**`Seed.daily()` 桶数不足**（3200 个桶装 365 天，碰撞率高）~~
       **已更正（第 0 批窗口指出）**：`daily()` 返回 32 位 FNV-1a，无桶数问题；
       `CAPACITY=3200` 只约束 `encode()` 的分享码。原台账归因错误，议题关闭。
