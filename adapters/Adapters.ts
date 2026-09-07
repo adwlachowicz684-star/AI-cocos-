@@ -46,6 +46,23 @@
  * 反例（不该进来）：
  *   ✗ "把我的 Enemy 类转成 CasterHit" —— 那是业务代码
  *   ✗ "骨王关卡的地牢配置" —— 那是内容
+ *
+ * 【使用示例】
+ * ```typescript
+ * // ① 地牢的一维数组 → 视野/寻路要的二维数组
+ * const grid = toGrid2D({ width: 64, height: 64, tileAt: (x, y) => map[y * 64 + x] });
+ * const isWall = wallTestFrom2D(grid);
+ *
+ * // ② hitbox 的命中结果数组 → skill-caster 要的结构（默认按距离排序）
+ * const hits = toCasterHits(rawHitResults);
+ *
+ * // ③ LootTable 的掉落 → Inventory 的物品（默认合并同 id）
+ * const items = flattenDrops(drops);
+ * ```
+ *
+ * 【为什么单独成目录】
+ * 这三个转换每次接新项目都要重写一遍，集中在这里才能只写一次。
+ * 具体签名见各函数的注释——适配的字段对应关系写在那里。
  */
 
 // ==================== ① 地牢 → 二维数组 ====================
