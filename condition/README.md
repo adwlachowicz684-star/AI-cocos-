@@ -65,13 +65,13 @@ engine.list();                     // 全部定义 + 进度（成就列表界面
 | 成员 | 说明 |
 |---|---|
 | `register(def)` | 注册定义 |
-| `setStat(name, v)` / `addStat(name, d)` | 设置 / 累加统计项（**两者都校验有限性**） |
+| `setStat(name, v)` / `addStat(name, d)` | 设置 / 累加统计项 |
 | `check()` | 检查全部，**返回新完成的 id 数组** |
 | `evaluate(id)` | 检查单个，返回 `{progress, completed}` |
 | `progress(id)` | 进度 0–1（UI 用） |
 | `list()` | 全部定义 + 进度 |
 | `isCompleted(id)` | 是否已完成 |
-| `onComplete(fn)` | 完成回调（**多播**，返回取消函数） |
+| `onComplete(fn)` | 完成回调 |
 | `export()` / `import()` | 存档 |
 
 **未在上面列出的**：
@@ -87,24 +87,6 @@ engine.list();                     // 全部定义 + 进度（成就列表界面
 > ⚠️ **`register()` 返回 `this`，可以链式调用。**
 > 这不算 bug，但别拿它当"是否注册成功"的判断——
 > 重复注册同一个 id 也返回 `this`（覆盖旧定义）。
-
-> ⚠️ **`addStat()` 与 `setStat()` 一样会拒绝 NaN / Infinity（抛异常）。**
-> 早期只有 `setStat` 校验，`addStat` 不校验：
-> `addStat('x', NaN)` 会让 NaN 静默入库，
-> 此后 `NaN >= v` 恒为 false，凡涉及该 stat 的条件**永远完不成**，
-> 表现为"这个成就死活解不开"。同一份契约必须两个 setter 一起守。
-
-> ⚠️ **`onComplete` 是多播：注册多个监听器互不影响。**
-> 早期实现是 `this._onComplete = fn` 直接覆盖，第二次注册静默顶掉第一次，
-> 且第一次拿到的取消函数此后形同失效。
-> 成就系统和任务系统同时监听时，先注册的那个会彻底失联。
-
-> ⚠️ **配置里 `value` 为 NaN / 缺失时，进度按 `0` 处理。**
-> 配置表漏了 `value` 字段 → `undefined` → `actual / undefined = NaN`，
-> 而 `Math.min(1, Math.max(0, NaN))` 仍是 **NaN**——
-> 夹取区间对 NaN 无效（每次比较都是 false）。
-> 以前进度条会直接渲染出 `NaN%`，而条件本身看起来"正常地没完成"。
-> 现在收口成 0：该条件判定未完成、进度为 0，不扩散到 UI。
 
 > ⚠️ **`getStat()` 对不存在的项返回 `0` 而不是抛错。**
 > 好处是条件不会崩；代价是**统计项名拼错时静默失败**——
