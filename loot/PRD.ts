@@ -62,17 +62,8 @@ export class PRD {
       throw new Error(`[PRD] 名义概率必须在 (0,1) 区间，实际 ${chance}`);
     }
 
-    /**
-     * 【缓存命中要"提到队尾"】
-     * Map 的迭代顺序就是插入顺序，删掉再 set 等于把这条挪到最新，
-     * 这是 LRU 的标准写法：淘汰时从迭代器头部取，拿到的一定是最久没用的。
-     */
     const cached = PRD._cache.get(chance);
-    if (cached !== undefined) {
-      PRD._cache.delete(chance);
-      PRD._cache.set(chance, cached);
-      return new PRD(cached);
-    }
+    if (cached !== undefined) return new PRD(cached);
 
     // 二分搜索：C 越大，实际频率越高
     let lo = 0;
@@ -85,30 +76,6 @@ export class PRD {
     }
 
     const c = (lo + hi) / 2;
-    /**
-     * 【⚠️ 静态缓存必须有上限，否则它是个只增不减的泄漏点】
-     *
-     * `_cache` 是 `static readonly`，挂在类上而不是实例上，
-     * 进程生命周期内**永不释放**。
-     *
-     * 概率来自配置的场景（写死 0.25 / 0.05）条目数有限，看不出问题；
-     * 但概率**动态计算**时——难度曲线每局微调、按玩家等级插值、
-     * 装备词条随机 roll 出的小数——每个不同的浮点数都占一个条目。
-     * 实测喂 5000 个不同概率，缓存从 0 涨到 5000；
-     * 长线运营的游戏跑几小时就是几万条。
-     *
-     * 单条目很小，问题不在占用而在**没有释放路径**。
-     *
-     * 【为什么是 LRU 而不是"按量化概率做 key"】
-     * 量化（比如保留 4 位小数）会让 0.25001 和 0.25002 共用缓存，
-     * 但它同时**改变了求解结果的精度**——两者算出的 C 本就不同，
-     * 量化等于悄悄引入误差，属于改行为。
-     * LRU 只淘汰"最近没用过的"，不改变任何一次的返回值，是纯内存优化。
-     */
-    if (PRD._cache.size >= PRD.MAX_CACHE) {
-      const oldest = PRD._cache.keys().next();
-      if (!oldest.done) PRD._cache.delete(oldest.value);
-    }
     PRD._cache.set(chance, c);
     return new PRD(c);
   }
@@ -169,17 +136,6 @@ export class PRD {
   setFailCount(n: number): void {
     this._fails = Math.max(0, Math.floor(n));
   }
-
-  /**
-   * 概率 → C 常数 的求解缓存上限
-   *
-   * 【为什么是 512】
-   * 一个项目的暴击率 / 掉落率配置项通常是几十个量级，
-   * 512 留了 10 倍余量：**正常情况下永远不会触发淘汰**，
-   * 缓存命中率不受影响；只有在概率被动态计算、条目无限增长时，
-   * 它才作为兜底把内存钉在一个常数上。
-   */
-  static readonly MAX_CACHE = 512;
 
   private static readonly _cache = new Map<number, number>();
 }
