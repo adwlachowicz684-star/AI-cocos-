@@ -73,11 +73,8 @@ s.keysOfGroup('audio');   // 面板分页
 | 成员 | 说明 |
 |---|---|
 | `exportState()` | 导出全部值 |
-| `importState(s)` | 导入，返回**被忽略的键**列表；非法值见 `rejected` |
-| `rejected` | 最近一次导入里**值非法**的项（`{ key, value, reason }`） |
-| `markRestartApplied()` | 标记当前值已生效（重启后调用，清掉 `pendingRestart`） |
+| `importState(s)` | 导入，返回**被忽略的键**列表 |
 | `snapshot()` | 含 `pendingRestart` 的快照 |
-| `destroy()` | 卸载：摘掉 `onChange` / `onReject` 回调 |
 
 > ⚠️ **`set()` 返回 `null` 是成功，返回字符串才是失败原因。**
 > 当布尔用的话 `if (s.set(...))` 逻辑完全反了——
@@ -86,16 +83,6 @@ s.keysOfGroup('audio');   // 面板分页
 > ⚠️ **`importState()` 返回的是被忽略的键，不是成功与否。**
 > 空数组 = 全部导入成功。
 > 不看返回值的话，老存档里那些已经删掉的设置项会被**无声丢弃**。
-
-> ⚠️ **返回值里没有"值非法"这一项，要看 `rejected`。**
-> `importState({ volume: 9999 })` 返回 `[]`（没发生未知键），
-> 但 `volume` 其实被拒了——玩家改的音量被悄悄还原成默认，
-> 表现为"设置存不住"，排查方向却会被引向存档系统。
-> 被拒的值会回退到 `default`，并同时进 `rejected` 和 `onReject` 回调。
-
-> ⚠️ **`importState()` 会触发 `onChange`。**
-> 读档等于批量改值，音频/渲染子系统必须收到通知，
-> 否则就是"值对了但没生效"。
 
 > ⚠️ **`reset(key)` 返回的是"是否真的改了"**，不是布尔式的成功标记。
 > 值本来就是默认值时返回 `false`——
@@ -165,9 +152,6 @@ interface SettingsSnapshot {
 >
 > 这是本模块"设置项是否 `requiresRestart`"的直接产物，
 > 别自己维护这个列表，从 `snapshot()` 里读。
->
-> 只列**当前值与已生效值不同**的项：
-> 什么都没改过时它是空的。重启/应用之后调 `markRestartApplied()` 清空。
 
 ## 测试
 
