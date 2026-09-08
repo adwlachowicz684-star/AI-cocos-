@@ -2,7 +2,8 @@
 
 > 单元：6 个（`bullet-pattern` `difficulty` `entity` `gameflow` `i18n` `matchmaking`）
 > 条目：15（P1 9 / P2 6）
-> 测试：`tests/run_phase10_w4a.ts` → `runPhase10W4ATests()`（**71 项，独立运行全绿**）
+> 测试：`tests/run_phase10_w4a.ts` → `runPhase10W4ATests()`（**72 项**，独立运行全绿）
+> 对家验收：`audit/verify_W4-B.md` 结论「通过」；已按其意见收尾，见第六节
 > 基线：`bash build.sh` 通过、`node .build/tests/run.js` **3695 项全绿**（与开工前一致，只增不减）
 
 ⚠️ **`tests/run.ts` 未改动**——按分工由总审统一注册 `runPhase10W4ATests()`。
@@ -145,7 +146,7 @@ count=0         → 产出 1 个角度
 | `matchmaking/TeamBalancer.ts` | 贪心 `best` 初值改 `-1`，无解抛错；`fixRoles`/`packResult` 移除未使用参数并同步调用点 |
 | `matchmaking/Lobby.ts` | 新增 `destroy()` |
 | `bullet-pattern/README.md` `gameflow/README.md` `i18n/README.md` `entity/README.md` `difficulty/README.md` `matchmaking/README.md` | 同步文档（新增字段、语义变更、实测结论） |
-| `tests/run_phase10_w4a.ts` | **新增**，71 项 |
+| `tests/run_phase10_w4a.ts` | **新增**，72 项（对家验收后 +1：固化 `coverage` 可替代 `has` 旧用法） |
 
 **未动**：`_core/`（禁令）、`tests/run.ts`（总审统一注册）、根 `README.md`（测试总数）。
 
@@ -154,20 +155,107 @@ count=0         → 产出 1 个角度
 ## 五、提交前自检
 
 ```
-bash build.sh                        → TSC OK（产物校验通过：211 个 .js）
-node .build/tests/run.js             → 通过 3695 项，失败 0 项   ← 与基线一致
-node -e "…runPhase10W4ATests()…"     → 通过 71 项，失败 0 项
+bash build.sh                        → TSC OK（产物校验通过：228 个 .js）
+node .build/tests/run.js             → 通过 3696 项，失败 1 项   ← 见下方说明
+node -e "…runPhase10W4ATests()…"     → 通过 72 项，失败 0 项
 node scripts/check-deps.js           → 全部通过 ✓
 node scripts/check-links.js          → ✗ 见下方说明
 python3 scripts/scan-dt-guard.py     → 扫描 146 个文件，命中 0 处 ✓
 python3 scripts/scan-num-guard.py    → 扫描 0 处命中 ✓
 python3 scripts/check-random-source.py → [OK] 未发现自建随机源 ✓
 python3 scripts/check-dup-exports.py → [OK] 无待处理的冲突 ✓
+node scripts/check-links.js          → [OK] 断链 0 处 ✓（W3-B 已修脚本误判）
 ```
 
-⚠️ **一处既有失败，与本窗口无关**：`check-links.js` 报 `audit/handoff_W3-B.md` 有一处断链。
+⚠️ 全量回归的 1 项失败**不属于本窗口**：
+
+```
+✗ 第九批 › BinarySerializer · 位级序列化 › ⚠️ float 会 clamp 而不是溢出回绕
+   [Binary] float 越界：999（范围 -10..10）
+```
+
+这是 `binary` 单元（**W8-B 窗口**）与第九批老测试的冲突：老测试期望越界静默 clamp，
+W8-B 改成了抛错。本窗口意见：W8-B 的方向对——`binary/README.md` §6③ 明确写了
+"越界值绝不静默截断"，该改的是老测试。已交总审裁定。
+
+✅ **已闭环**：`check-links.js` 那处断链是我推送时的遗留项，
 根因是该文档第 268 行代码块里写了形如 `this._derived[id](省略号)` 的调用，
-校验脚本把代码里的 `](` 误判成 markdown 链接，是**误报**。
-该文件为 W3-B 窗口所有（mtime 与拉取时一致，本窗口未触碰）。
-已交总审：建议让 `check-links.js` 跳过反引号内的内容，
-否则 16 个窗口交付时它会一直红着，反而掩盖真正的断链。
+校验脚本把代码里的 `](` 误判成 markdown 链接——**这个"误报"的判断是对的**。
+W3-B 在 `87b2a889` 修掉了脚本对行内代码的误判，现在全库断链归零：
+
+```
+node scripts/check-links.js   → [OK] 内部链接 42 条，断链 0 处（扫描 178 个 .md 文件）
+```
+
+---
+
+## 六、对家验收的回应（W4-B 验收 W4-A · 结论「通过」）
+
+W4-B 的 `audit/verify_W4-B.md` 给出结论**通过**，15 条全部达标、无标红，
+另有 1 处命名小问题、1 处需总审留意的语义变更、1 处全库级并发问题。
+逐条回应如下（本窗口已按意见改完的标 ✅）。
+
+### ✅ 已修 · 小问题 1：一条"对照"用例修复前会失败
+
+`W4A-02` 组最后一条原名「对照：interval = 0 / 负数 / 非数字都仍被拒」，
+但实测它在开工前基线上**会失败**（`interval='x'` 字符串在旧代码里 `'x' <= 0` 为 false，不抛错）。
+它拦的是真实加固项，性质是回归，标"对照"会误导。
+
+已改名为 `⚠️` 并补注释说明：`0` / `-1` 两项修复前后都抛错（真对照），
+`'x'` 是新增的加固，三者放一起是为了说明"守卫改肯定式后覆盖面变宽"。
+
+### ✅ 已修（对方未指出，我复核时自己发现的同类问题）
+
+复核 41/30 那组数字时发现，**"对照"命名但修复前失败的用例其实有 2 条**，
+不只对方指出的 1 条：
+
+| 用例 | 修复前失败原因 | 形态 |
+|---|---|---|
+| `interval = 0 / 负数 / 非数字` | `interval='x'` 旧代码不抛错 | 形态一：断言内容就是新行为（加固项） |
+| `destroy() 不动难度档配置` | `d.destroy is not a function` | 形态二：断言的是旧行为，但**入口是新加的 API** |
+
+形态二更容易被忽略：这类用例"语义上确实是对照"，
+但因为必须先调用新增方法，在旧代码上必然抛 TypeError。
+已在用例内补注释区分这两种形态，免得下一个人复核 41/30 时再困惑一次。
+
+### ✅ 已处理 · 需留意 1：`has()` 语义变更的替代入口
+
+对方指出：`has()` 改成与 `t()` 同口径后，不再能回答"**当前语言包**缺不缺这一条"
+（有 fallback 时恒 true），本地化验收的"这份 en-US 还差几条"会失效。
+这个代价是真实的。
+
+**结论是不需要新增 API**——`coverage(locale).missing` 已能完整回答。实测：
+
+```
+zh 有 3 条、en 只翻 1 条时：
+  has('ui.quit')            → true（回落中文，查不出 en 缺什么）
+  coverage('en').missing    → ['ui.quit', 'item']    ← 正确
+```
+
+已在 `i18n/README.md` 补上交叉引用与改写示例（`if (!has(key))` → `coverage().missing`），
+并**新增一条测试**（W4-A 现为 72 项）把"coverage 能承担这个职责"固化下来。
+刻意不新增 `hasInLocale()` 之类的变体：两个长得像但口径不同的查询并存，
+比一个口径明确的查询更容易用错。
+
+### 同意（无需本窗口动作）
+
+- **说明 1**（`W4A-13` 删死代码只有对照用例）：判断正确。行为不变的清理
+  按定义不可能有"修复前失败"的断言，标准 2 应记 N/A。
+- **说明 2**（移除 `packResult` / `fixRoles` 未使用参数不是 breaking）：
+  已确认两者都是 `TeamBalancer.ts` 内未导出函数，对下游无影响。
+- **第四节全库并发问题**：`_kitmeta.json` 的 `depends` 被各窗口互相覆盖，
+  未登记数从 1 条涨到 6 条。**本窗口同样不执行 `--fix`**——
+  理由与 W4-B 一致：各自 fix 会被下一次提交冲掉，只能由总审统一跑一次。
+  （其中 `i18n` / `gameflow` 两项来自本窗口，已确认是真实 import。）
+
+### 复核结论：对家的验证数据属实
+
+我用自己那份开工前基线独立重跑了他的验证：
+
+```
+把 run_phase10_w4a.ts 拷进开工前基线、编译到独立目录
+  → 通过 41 项，失败 30 项          ← 与对方报告完全一致
+```
+
+他的方法也合规：编译到 `/tmp/w4a_bb` 独立目录，没有碰 `.build/`
+（`review_A.md` 第 2 节明令禁止破坏性验证）。

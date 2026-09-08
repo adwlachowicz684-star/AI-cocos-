@@ -163,7 +163,20 @@ export function runPhase10W4ATests(): void {
       assert(p.isEmitterDone('ok'), '有限次发射器应标记 done');
     });
 
-    test('对照：interval = 0 / 负数 / 非数字都仍被拒（不是只挡了 NaN）', () => {
+    test('⚠️ interval = 0 / 负数 / 非数字都仍被拒（不是只挡了 NaN）', () => {
+      /**
+       * 【为什么这条标 ⚠️ 而不标"对照"】
+       * W4-B 验收时指出：它原名"对照"，但修复前会失败——
+       * 实测 `interval='x'`（字符串）在原代码里 `'x' <= 0` 为 false → 不抛错，
+       * 改 `!(v > 0)` 才拦得住。
+       *
+       * 所以它拦的是一个**真实加固项**（非数字类型穿透），
+       * 性质上属于回归用例，标"对照"会误导读者以为它修复前后都该通过。
+       * 已按验收意见改名并补此注释。
+       *
+       * `0` 与 `-1` 两项修复前后都抛错（真对照），`'x'` 是新增的加固。
+       * 三者放一起是为了说明"守卫从否定式改肯定式后，覆盖面是变宽的"。
+       */
       for (const v of [0, -1, 'x' as unknown as number]) {
         const p = new BulletPattern(rng());
         throws(
@@ -538,6 +551,35 @@ export function runPhase10W4ATests(): void {
       assert(i18n.has('item', { n: 3 }), 'has() 必须认复数变体：');
     });
 
+    test('⚠️ 语义变更的替代入口：coverage().missing 能查"本语言缺什么"', () => {
+      /**
+       * 【为什么补这条】
+       * W4-B 验收时提出：`has()` 改成与 `t()` 同口径后，
+       * 就**不再能回答"当前语言包缺不缺这一条"**（有 fallback 时恒 true），
+       * 本地化验收的"这份 en-US 还差几条"会失效。
+       *
+       * 这个代价是真实的。但结论是**不需要新增 API**：
+       * `coverage(locale).missing` 已经能完整回答这个问题，
+       * 本条把它固化下来，避免将来有人再提一个"只查当前语言的 has"。
+       *
+       * 两个长得像、口径却不同的查询并存（has / hasInLocale），
+       * 比一个口径明确的查询更容易用错——这也是不加新 API 的理由。
+       */
+      const i18n = new I18N({ fallback: 'zh' });
+      i18n.addLocale('zh', { 'ui.start': '开始', 'ui.quit': '退出' });
+      i18n.addLocale('en', { 'ui.start': 'Start' });   // en 只翻了一条
+      i18n.setLocale('en');
+
+      // 新口径下 has 恒 true（回落中文），查不出 en 缺什么
+      assert(i18n.has('ui.quit'), '有回退时 has 为 true（这是新口径的代价）');
+
+      // 替代入口：按语言查缺失
+      const c = i18n.coverage('en');
+      eq(c.missing.join(','), 'ui.quit', 'coverage 应正确列出 en 缺的条：');
+      eq(c.translated, 1, 'en 只翻了 1 条：');
+      eq(c.total, 2, '总数是回退语言的 key 数：');
+    });
+
     test('对照：真的没有的 key 仍然是 false', () => {
       const i18n = mk();
       assert(!i18n.has('nope.not.exists'), '不存在的 key 应为 false');
@@ -763,6 +805,21 @@ export function runPhase10W4ATests(): void {
     });
 
     test('对照：destroy() 不动难度档配置，查询仍可用', () => {
+      /**
+       * 【⚠️ 这条虽标"对照"，修复前也会失败——但原因与加固项无关】
+       *
+       * 实测（开工前基线）：`d.destroy is not a function`。
+       * 它要验证的是"正常配置不被 destroy 误伤"，性质上是对照；
+       * 但它必须**先调用新增的 `destroy()`**，而该方法在修复前不存在，
+       * 于是整条用例在旧代码上必然抛 TypeError。
+       *
+       * 这是"对照用例在修复前失败"的**第二种形态**：
+       * - 形态一（加固项）：断言的内容本身就是新行为（见 P1-2 那组最后一条）
+       * - 形态二（依赖新增 API）：断言的是旧行为，但入口是新加的
+       *
+       * 两种都不是"测试无效"，但都不该被理解成"修复前后都该通过"。
+       * 记在这里，免得下一个人复核 41/30 那组数字时又困惑一次。
+       */
       const d = new DifficultySystem({ defaultTier: 'hard' });
       d.destroy();
       eq(d.currentTierId, 'hard', '档位应保留：');
