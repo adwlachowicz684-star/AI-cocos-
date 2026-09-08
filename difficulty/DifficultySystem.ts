@@ -365,26 +365,6 @@ export class DifficultySystem {
   }
 
   /**
-   * 卸载（rule5：有 install 就要有对应的 destroy）
-   *
-   * 【为什么必须清 onAdjust】
-   * `onAdjust` 是外部传进来的回调，典型写法是捕获了 UI 组件或统计上报器的闭包。
-   * 难度系统通常是**全局单例**（挂在主流程上，生命周期跟应用一样长），
-   * 于是它持有的这个闭包也活到应用结束——
-   * 换场景时想卸载 UI 组件，会发现它"还活着"，因为难度系统还引用着它。
-   *
-   * 【为什么不动 _tiers】
-   * 难度档是**构造配置**，不是运行时状态。
-   * 清掉它会让 destroy 之后再查 `tiers()` 拿到空数组，
-   * 而调用方没有理由预期"卸载"会顺手删掉配置——
-   * 真要重建就直接 new 一个。
-   */
-  destroy(): void {
-    this.onAdjust = undefined;
-    this.resetDDA();
-  }
-
-  /**
    * 安全读取倍率（未命中返回 1）
    *
    * 统一走这里，保证 `multiplier` / `baseMultiplier` 两处口径一致——
@@ -402,26 +382,6 @@ export class DifficultySystem {
  * 对玩家有利的倍率键
  *
  * 这些键在 DDA 为正（变难）时应该**减小**。
- *
- * 【⚠️ 存疑 · 已上报总审裁决，本窗口未改动行为】
- *
- * `CURRENCY_GAIN`（金币收益）在这个集合里，意味着：
- *
- * ```
- * 玩家表现好 → ddaValue 为正（判定为"该变难了"）→ currencyGain 下降
- * ```
- *
- * 也就是"打得越好，金币收益越低"。这是**惩罚性 DDA**，
- * 与"DDA 是帮玩家通关"的直觉相反，也与本文件开头
- * "目的 = 让水平不同的玩家都能通关"的表述有张力。
- *
- * 【两种读法，本窗口无法自行判断】
- * - 若是有意为之（防刷：强玩家刷金币效率本就高，再加成会破坏经济）→ 应补这条注释；
- * - 若是误放（照抄 playerDamage / healRate 时顺手加的）→ 应移出本集合。
- *
- * 在裁决之前**不改**：任何一个方向都会改变线上经济曲线，
- * 而经济数值的调整不该由一个"顺手修 P1"的窗口拍板。
- * 下游若要临时规避，读 `baseMultiplier('currencyGain')` 即可绕过 DDA。
  */
 const PLAYER_FAVORING = new Set<string>([
   MultiplierKeys.PLAYER_DAMAGE,
