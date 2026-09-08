@@ -115,8 +115,7 @@ shake.punch({ amplitude: 0.3, duration: 0.22, dirX: dx, dirY: dy });
 | `punch(p)` | 打一拳（**方向性**：传 `dirX`/`dirY` 则定向，否则全向随机） |
 | `addTrauma(amount)` | 按创伤值累加（**0~1，会平方**，更接近"越猛越夸张"） |
 | `tick(dt)` | 推进（**用未缩放的 dt**，见上文） |
-| `offsetX` / `offsetY` | 本帧平移偏移量（单位同相机坐标），直接加到相机位置上 |
-| `offsetRotation` | 本帧旋转偏移量（**度**），加到相机 rotation 上。上限见 `maxRotation` |
+| `offsetX` / `offsetY` / `offsetRotation` | 本帧偏移量，直接加到相机位置上 |
 | `active` | 是否还在震 |
 | `sourceCount` | 当前叠加了几个震源 |
 | `strengthScale` | 全局强度倍率（**可读写**）——接无障碍的 `shakeScale` |
@@ -169,14 +168,11 @@ type ShakePresetName = keyof typeof SHAKE_PRESETS;
 
 | 字段 | 说明 |
 |---|---|
-| `strengthScale` | 全局强度倍率（`0` = 关闭）。**接设置面板的震屏滑块**。构造与 setter 都收口到 `0~1` |
+| `strengthScale` | 全局强度倍率（`0` = 关闭）。**接设置面板的震屏滑块** |
 | `noise` | 噪声类型 |
 | `frequency` | 默认频率 |
 | `decay` | 衰减方式：`'exp'`（自然）/ `'linear'`（机械） |
 | `maxOffset` | **必须有**，见上文 |
-| `maxSources` | 震源数量上限（默认 `32`）。超限时**丢最老的** |
-| `rotationScale` | 旋转强度：每 1 单位振幅对应多少度（默认 `6`） |
-| `maxRotation` | 旋转偏移上限（度，默认 `3`） |
 
 > ⚠️ **`strengthScale` 是"全局"的，`punch` 的 `amplitude` 是"单次"的。**
 > 两者相乘才是实际强度。
