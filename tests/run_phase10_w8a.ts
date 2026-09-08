@@ -755,6 +755,46 @@ export function runPhase10W8ATests(): void {
       assert(seen.has('z'), '重洗后新加入的 z 应能出现');
     });
 
+    test('⚠️ add 之后的新一轮内，每个元素仍然恰好一次（回应 W8-B 的观察）', () => {
+      /**
+       * 【为什么要专门测这一条】
+       * W8-B 在验收 W8-A 时实测到：
+       * ```
+       * add x,y → draw → add z → draw,draw
+       *   → {"first":"y","second":"z","third":"y"}
+       * ```
+       * 它据此判断"y 在一轮内出现了两次，违反 README 承诺的
+       * '一轮之内每个元素恰好出现一次'"。
+       *
+       * 我复跑了这个构造（随机序列不同，得到 first=x / second=z / third=x），
+       * 现象形态一致——**但归因不是"违反承诺"**：
+       *
+       * ```
+       * add 后 remaining = 0、capacity = 3
+       * add 之后连抽 3 次 = ["z","x","y"]，去重数量 = 3  ← 新一轮内仍然恰好一次
+       * ```
+       *
+       * `add()` **就是轮次边界**。first 属于旧轮，second/third 属于新轮；
+       * 跨过这条边界看到重复是正常的，README 的承诺说的是"一轮之内"，
+       * 而 add 之后已经换了一轮。
+       *
+       * 所以本条判"README 未说明"而非"README 被违反"。
+       * 这里把"新一轮内仍然恰好一次"固化下来，防止有人按 W8-B 的
+       * 归因去"修"这个根本没坏的性质。
+       */
+      const bag = new ShuffleBag<string>();
+      bag.add('x', 1);
+      bag.add('y', 1);
+      bag.draw(rng());          // 抽走一个，旧轮进行到一半
+      bag.add('z', 1);          // 触发重洗，开启新一轮
+      eq(bag.remaining, 0, 'add 后袋子清空');
+      eq(bag.capacity, 3, '新元素已计入容量');
+
+      const round: string[] = [];
+      for (let i = 0; i < 3; i++) round.push(bag.draw(rng())!);
+      eq(new Set(round).size, 3, 'add 之后的新一轮内，三个元素仍各出现一次');
+    });
+
     test('⚠️ 一轮之内每个元素恰好出现一次（防止矫枉过正）', () => {
       const bag = new ShuffleBag<string>();
       bag.add('a', 1);
