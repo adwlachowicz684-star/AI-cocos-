@@ -45,23 +45,7 @@
 export interface SpatialHashOptions {
   /** 格子边长（世界单位） */
   readonly cellSize: number;
-  /**
-   * 初始容量提示
-   *
-   * 【⚠️ 当前**未实现**：传了不会有任何效果】
-   *
-   * 全文检索确认 `capacity` 只在接口定义处出现，
-   * 构造函数与所有方法都没有读取它（README 也从未提及）。
-   *
-   * 这比"没有这个配置"更糟——调用方以为传了 `capacity` 就有了容量保护，
-   * 实际上 `update()` 会无上限地往里塞，内存只增不减。
-   * 在**这里明确写出来**，避免有人靠这个字段做内存预算。
-   *
-   * 【去留待总审裁决】两种改法都会改变对外契约：
-   *   A. 实现为硬上限（满了拒绝或淘汰最旧）→ 改变 `update()` 的行为；
-   *   B. 从接口删除 → 传过 `capacity` 的调用方编译报错。
-   * 本窗口不自行拍板，详见 `audit/result_W1-B.md`。
-   */
+  /** 初始容量提示 */
   readonly capacity?: number;
 }
 
@@ -122,18 +106,6 @@ export class SpatialHash<T> {
       this._removeFromCell(existing.key, id);
     }
 
-    /**
-     * 【⚠️ 首次 update 不传 item 时，`item` 字段会是 undefined】
-     *
-     * 这里的 `as T` 是**类型层面的谎言**：
-     * `update('e1', 0, 0)` 不传 item，`entry.item` 运行时就是 `undefined`，
-     * 但类型上仍是 `T`。之后 `get('e1')` 返回的是类型合法、值为 undefined 的结果
-     * ——调用方的 `T` 方法调用会在运行时炸，而编译期毫无提示。
-     *
-     * 保留这个强转是因为：`update()` 的常用形态是"每帧只更新坐标"，
-     * 强制要求带 item 会让所有调用方多传一个参数。
-     * 【约定】首次登记请用 `insert(id, item, x, y)` 或带上 item 参数。
-     */
     const entry = existing ?? ({ item: item as T } as SpatialEntry<T>);
     entry.x = x;
     entry.y = y;
