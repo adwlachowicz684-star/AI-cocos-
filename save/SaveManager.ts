@@ -121,19 +121,6 @@ export interface SaveManagerOptions {
   readonly version: number;
   /** 槽位前缀 */
   readonly prefix?: string;
-  /**
-   * 错误上报回调
-   *
-   * 【为什么需要】
-   * 存档失败的默认处理是 `console.error` + `return false`。
-   * 调用方几乎一定会忽略那个 `false`——于是"存档失败"这件事
-   * **对玩家完全不可见**：游戏继续跑，玩家以为存上了，
-   * 直到下次打开游戏发现进度没了。
-   *
-   * 给了这个回调，宿主就能弹一个"保存失败，请检查存储空间"的提示。
-   * 【副作用】注入后库内不再打 console.error，避免污染宿主日志。
-   */
-  readonly onError?: (message: string) => void;
 }
 
 export type MigrationFn = (data: Record<string, unknown>) => Record<string, unknown>;
@@ -144,40 +131,12 @@ export class SaveManager {
   private readonly _version: number;
   private readonly _prefix: string;
   private readonly _migrations = new Map<string, MigrationFn>();
-  private readonly _onError?: (message: string) => void;
-
-  /** 最近一次失败的原因（成功写入后清空） */
-  private _lastError: string | null = null;
 
   constructor(storage: IStorage, opts: SaveManagerOptions) {
     this._storage = storage;
     this._gameId = opts.gameId;
     this._version = opts.version;
     this._prefix = opts.prefix ?? 'save_';
-    this._onError = opts.onError;
-  }
-
-  /**
-   * 统一错误出口
-   *
-   * 【为什么三件事一起做】
-   * 只 return false → 调用方忽略；
-   * 只 console.error → 玩家看不到、宿主日志被污染；
-   * 只回调 → 不传 onError 的调用方什么线索都没有。
-   *
-   * 所以：① 记进 lastError（可事后查询）② 通知 onError（宿主可提示玩家）
-   * ③ 没有 onError 时才退回 console.error（保持既有行为，不静默）。
-   */
-  private _fail(message: string): false {
-    this._lastError = message;
-    if (this._onError) this._onError(message);
-    else console.error(`[SaveManager] ${message}`);
-    return false;
-  }
-
-  /** 最近一次失败原因（null = 没失败过 / 上次已成功） */
-  get lastError(): string | null {
-    return this._lastError;
   }
 
   /** 注册迁移函数 */
@@ -249,14 +208,16 @@ export class SaveManager {
     try {
       json = JSON.stringify(envelope);
     } catch (e) {
-      return this._fail(`存档序列化失败（可能有循环引用）: ${e}`);
+      console.error(`[SaveManager] 存档序列化失败（可能有循环引用）: ${e}`);
+      return false;
     }
 
     try {
       // 二次确认：能序列化不代表能再解析（比如含 undefined / 函数）
       JSON.parse(json);
     } catch {
-      return this._fail('存档内容无法反序列化');
+      console.error('[SaveManager] 存档内容无法反序列化');
+      return false;
     }
 
     try {
@@ -273,10 +234,10 @@ export class SaveManager {
         this._storage.write(key, json);
         this._storage.remove(tmpKey);
       }
-      this._lastError = null;
       return true;
     } catch (e) {
-      return this._fail(`写入失败: ${e}`);
+      console.error(`[SaveManager] 写入失败: ${e}`);
+      return false;
     }
   }
 
@@ -382,57 +343,8 @@ export class SaveManager {
     }
   }
 
-  /**
-   * 清空所有槽位
-   *
-   * 【⚠️ 曾经的 bug：__tmp 备份键永远清不掉】
-   *
-   * `listSlots()` 里显式 `!k.endsWith('__tmp')` 把临时键过滤掉了
-   * （这是对的：槽位列表不该显示备份），
-   * 而 `clearAll()` 又是基于 `listSlots()` 实现的——
-   * 于是**所有临时键都被永久留在存储里**。
-   *
-   * 实测（修复前）：`write('slot1')` → 手动写入 `save_slot1__tmp`
-   * （模拟写入中断留下的备份）→ `clearAll()` → 存储里仍是 `save_slot1__tmp`。
-   *
-   * 后果是三重的：
-   *   1. 每次写入中断（崩溃、进程被杀、配额写满）都会留一个 `__tmp`
-   *   2. `clearAll()` 清不掉它
-   *   3. `listSlots()` 又看不见它
-   * → 存储占用**只增不减**，而开发者用 `listSlots()` 自查时看不到任何异常。
-   *   在 localStorage 配额紧张的环境里，这直接表现为"莫名其妙存不进去了"。
-   *
-   * 与「SpatialHash 空桶不回收」同构：清理由"看得见的列表"驱动，
-   * 而真实的数据集比那个列表大。
-   *
-   * 修法：直接遍历 `keys()`，前缀匹配的一律删除（含 __tmp）。
-   */
   clearAll(): void {
     for (const s of this.listSlots()) this.deleteSlot(s);
-    this.purgeTempKeys();
-  }
-
-  /**
-   * 只清理临时备份键（`${prefix}xxx__tmp`）
-   *
-   * 【什么时候需要单独调它】
-   * 正常写入路径（无论原子还是降级）结束时都会 remove 掉 tmp，
-   * 只有**写入中途进程没了**才会留下孤儿。
-   * 想在不删存档的前提下回收空间时，就调这个。
-   *
-   * @returns 清理掉的键数量
-   */
-  purgeTempKeys(): number {
-    const p = this._prefix;
-    let n = 0;
-    for (const k of this._storage.keys()) {
-      // 只动本管理器前缀下的 __tmp，别人的键一概不碰
-      if (k.startsWith(p) && k.endsWith('__tmp')) {
-        this._storage.remove(k);
-        n++;
-      }
-    }
-    return n;
   }
 
   get version(): number {
