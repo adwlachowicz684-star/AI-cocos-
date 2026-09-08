@@ -285,6 +285,32 @@ export function runPhase10W1ATests(): void {
       assert(!r.unlimited, '有消耗型输入时不该是 unlimited');
       eq(r.maxCount, 2, '7 铁 / 3 每次 = 2 次：');
     });
+
+    test('消耗型输入 count: 0 视为无消耗 —— 钉住这个口径（边界对照）', () => {
+      /**
+       * 【这个边界值得单独钉住】
+       * `count: 0` 的消耗型输入，除法 `Math.floor(have / 0)` 会得到 Infinity，
+       * 于是整条配方被判成"无消耗 → unlimited"。
+       *
+       * 这是**口径变了**：修复前 `Number.isFinite(maxCount) ? : 0` 会把它归成 0。
+       * 现在它跟"不消耗任何东西"等价（`consume: false` 的 `count` 也是被忽略的）。
+       *
+       * `count: 0` 本身是异常配置，但既然两种实现给出相反答案，
+       * 就把它钉住，免得有人改回来又引起分歧。
+       */
+      const c = new CraftSystem();
+      c.define({
+        id: 'nullish', name: '零消耗',
+        inputs: [{ itemId: 'iron', count: 0 }],
+        output: { itemId: 'thing', count: 1 },
+      });
+      const inv = makeInv();
+      inv.add('iron', 5);
+
+      const r = c.canCraft('nullish', inv);
+      assert(r.unlimited, 'count:0 的消耗型输入等价于无消耗');
+      assert(r.maxCount === Infinity, `maxCount 应为 Infinity，实际 ${r.maxCount}`);
+    });
   });
 
   // ============================================================
@@ -402,6 +428,29 @@ export function runPhase10W1ATests(): void {
       const tl2 = new Timeline('t').add('a', 1000).gap(500).with('c', 200);
       const s2 = tl2.build().steps;
       eq(s2[1].start, 1500, '空档之后的 with 应从 1500 开始：');
+    });
+
+    test('add → with → add 的混排：后续 add 接在并行段结束之后', () => {
+      /**
+       * 【为什么补这条】
+       * 修 `with` 的 start 之后，`_cursor` 的推进规则最容易在这里出错：
+       * 并行段结束（cursor 应取 max）之后，再来一个 `add`，
+       * 它得接在**并行段的结束时刻**，而不是接在某一条分支之后。
+       *
+       * 期望：a(0,1000) 与 b(0,3000) 并行 → 段结束于 3000 → c 从 3000 起，
+       *       总时长 3500（不是 1000+3000+500=4500，也不是 1000+500=1500）。
+       */
+      const d = new Timeline('t')
+        .add('a', 1000)
+        .with('b', 3000)
+        .add('c', 500)
+        .build();
+
+      const steps = d.steps;
+      eq(steps[0].start, 0, 'a 从 0：');
+      eq(steps[1].start, 0, 'b 与 a 同时开始：');
+      eq(steps[2].start, 3000, 'c 接在并行段（max=3000）之后：');
+      eq(d.duration, 3500, '总时长 3000 + 500：');
     });
   });
 
@@ -523,35 +572,55 @@ export function runPhase10W1ATests(): void {
   // debug-console
   // ============================================================
 
-  describe('debug-console · execute 把内部异常 rethrow（P1）', () => {
-    test('⚠️ 默认必须吞掉异常并转成一行红字', () => {
-      /**
-       * 【修复前】`catch` 里打印 `✗ 命令内部错误：<堆栈>` 之后又 `throw e`。
-       * 实测：注册 `run: () => { throw new Error('内部炸了') }`，
-       * `dc.execute('boom')` **向外抛出异常**。
-       *
-       * 控制台是"运行时调试"的最后一道防线，本应吞掉一切异常。
-       * 现在它把异常抛回 UI 的输入事件处理器——
-       * 一行打错的命令就能让整个输入系统崩溃，
-       * 而此时错误已经被打印过一次（重复暴露）。
-       */
+  describe('debug-console · execute 的内部异常传播（P1 · 已按裁决改判）', () => {
+    /**
+     * 【⚠️ 这条经过交叉验收后被改判，过程记下来】
+     *
+     * 我最初把"内部异常向上抛"判成 bug，把默认值翻成 `false`（吞掉）。
+     * W1-B 交叉验收指出这是 review 标准 5 的典型形态——**把故意的设计当成缺陷**，
+     * 三条证据：
+     *   1. 源码注释原本就写着「内部错误是真 bug，向上抛以便崩溃上报捕获」
+     *   2. README「错误分级」明确把它列为设计约定，并给了理由
+     *   3. 既有测试 `run_batch10.ts` 固化了该行为
+     *
+     * 真正让我改变判断的是这一点：**翻转默认值是破坏性变更**。
+     * 已经按 README 接入 CrashReporter 的调用方，会在毫不知情的情况下
+     * 静默丢掉全部内部异常——而这正是那条约定要防的事。
+     * 我原本担心的"崩掉输入链路"，调用方显式传 `rethrow: false` 就能规避。
+     * **一个能自己规避的风险，不该用破坏性变更去替所有人规避。**
+     *
+     * 所以最终形态：默认 true（保持历史行为），新增 `rethrow` 开关让调用方自选。
+     * 下面两条用例一条钉默认、一条钉开关。
+     */
+    test('⚠️ 默认向上抛（README「错误分级」的既有约定，不得静默改动）', () => {
       const dc = new DebugConsole({ enabled: true });
+      const out: string[] = [];
+      dc.onOutput((l) => out.push(l));
+      dc.register({ name: 'boom', help: 'x', run: (): void => { throw new Error('内部炸了'); } });
+
+      throws(() => { dc.execute('boom'); }, '内部炸了', '默认应向上传播：');
+      // 抛归抛，红字仍要打印一次（否则上层拿不到上下文）
+      assert(out.some((l) => l.includes('命令内部错误')), '抛出前应先打印红字');
+    });
+
+    test('rethrow: false 时吞掉异常，但仍打印红字（新增开关 · 防止矫枉过正）', () => {
+      const dc = new DebugConsole({ enabled: true, rethrow: false });
       const out: string[] = [];
       dc.onOutput((l) => out.push(l));
       dc.register({ name: 'boom', help: 'x', run: (): void => { throw new Error('内部炸了'); } });
 
       let threw: unknown = null;
       try { dc.execute('boom'); } catch (e) { threw = e; }
-      assert(threw === null, '默认不应向外抛异常');
-      assert(out.length > 0 && out[0].includes('命令内部错误'), '应输出红字提示');
+      assert(threw === null, 'rethrow:false 时不应向外抛异常');
+      assert(out.some((l) => l.includes('命令内部错误')), '仍应输出红字提示');
     });
 
-    test('显式 rethrow:true 时仍可向上抛（防止矫枉过正）', () => {
+    test('rethrow: true 与默认行为一致（防止矫枉过正）', () => {
       const dc = new DebugConsole({ enabled: true, rethrow: true });
       dc.onOutput((): void => {});
       dc.register({ name: 'boom', help: 'x', run: (): void => { throw new Error('内部炸了'); } });
 
-      throws(() => { dc.execute('boom'); }, '内部炸了', 'rethrow 模式应继续抛：');
+      throws(() => { dc.execute('boom'); }, '内部炸了', 'rethrow:true 应继续抛：');
     });
   });
 
@@ -801,6 +870,42 @@ export function runPhase10W1ATests(): void {
 
       const st = s.status(400_001);
       eq(st.yes, 1, '掉线者的票不应被计入（只有发起人 a 的 1 票）：');
+    });
+
+    test('⚠️ ignoredVotes 让"已投但未计入"可见（新增字段，补披露）', () => {
+      /**
+       * 【为什么补这个字段】
+       * 只把掉线者的票拒掉还不够：`_votes` 里**仍存着** b 在线时投的票，
+       * 掉线期间它被 `_tally` 跳过，于是 `yes` 会**凭空少一票**。
+       * 调用方看到票数对不上，却没有任何字段能解释"少的那票去哪了"。
+       *
+       * `ignoredVotes` 就是这"消失的一票"的计数——UI 可以据此提示
+       * "b 掉线中，其 1 票暂不计数"。
+       *
+       * 【实测】b 在线投票 → yes=2, ignored=0
+       *          b 掉线   → yes=1, ignored=1
+       *          b 重连   → yes=2, ignored=0（票"复活"）
+       */
+      const s = new Surrender({ teamSize: 3 });
+      s.setTeam(['a', 'b', 'c']);
+      s.setConnected(['a', 'b', 'c']);
+      s.markMatchStart(0);
+      s.start('a', 400_000);
+      s.vote('b', 'yes', 400_001);
+
+      let st = s.status(400_001);
+      eq(st.yes, 2, 'a + b 共 2 票：');
+      eq(st.ignoredVotes, 0, '都在线时没有被忽略的票：');
+
+      s.setConnected(['a', 'c']); // b 掉线
+      st = s.status(400_002);
+      eq(st.yes, 1, 'b 掉线后其票被跳过：');
+      eq(st.ignoredVotes, 1, '应如实报告 1 票被忽略：');
+
+      s.setConnected(['a', 'b', 'c']); // b 重连
+      st = s.status(400_003);
+      eq(st.yes, 2, '重连后票恢复计数：');
+      eq(st.ignoredVotes, 0, '不再有被忽略的票：');
     });
 
     test('在线玩家的票照常计入（防止矫枉过正）', () => {

@@ -149,15 +149,31 @@ export interface DebugConsoleOptions {
   /** 未知命令时的模糊匹配建议阈值（0~1，默认 0.5） */
   readonly suggestionThreshold?: number;
   /**
-   * 命令内部异常是否继续向上抛（默认 **false**）
+   * 命令内部异常是否继续向上抛（默认 **true**，即保持历史行为）
    *
-   * 【⚠️ 为什么默认是"吞掉"】
-   * 控制台的定位是"最后一道防线"——它是运行时调试工具，
-   * 本该把一切异常转成一行红字。老实现在打印完错误信息后又 `throw e`，
-   * 于是异常被抛回 UI 的输入事件处理器：一行打错的命令就能让整个
-   * 输入系统崩掉，而错误**已经被打印过一次**（重复暴露）。
+   * 【⚠️ 默认值为什么是 true —— 这里踩过一次坑，记下来】
    *
-   * 需要崩溃上报链路捕获时（比如接入了 CrashReporter）显式传 true。
+   * 本窗口一度把默认值翻成 false（"控制台是最后一道防线，应当吞掉一切"）。
+   * 交叉验收（W1-B）指出这是 review 标准 5 的典型形态——**把故意的设计当成缺陷**，
+   * 证据有三条，都很硬：
+   *
+   * 1. 源码注释原本就写着「内部错误是真 bug，向上抛以便崩溃上报捕获」
+   * 2. `README.md`「错误分级」把"内部异常向上抛"列为**设计约定**，
+   *    并解释理由：「混在一起的话，真 bug 会被当成"玩家输错了"而静默吞掉」
+   * 3. 既有测试 `run_batch10.ts` 固化了该行为
+   *
+   * 【真正的代价在哪里】
+   * 翻转默认值是**破坏性变更**：已经按 README 接入 CrashReporter 的调用方，
+   * 会在毫不知情的情况下**静默丢掉全部内部异常**——
+   * 这正是 README 那条约定要防的事。而我原本担心的
+   * "异常抛回 UI 输入事件处理器"是**调用方可以自己规避**的
+   * （显式传 `rethrow: false` 即可）。
+   *
+   * 一个能自己规避的风险，不该用破坏性变更去替所有人规避。
+   *
+   * 【所以现在的语义】
+   * - 默认 `true`：保持历史行为，内部异常继续向上抛（接崩溃上报）
+   * - 显式 `false`：控制台吞掉异常，只打印一行红字（调试期 / 输入框场景适用）
    */
   readonly rethrow?: boolean;
 }
@@ -238,7 +254,10 @@ export class DebugConsole {
     if (opts.enabled !== undefined) this._enabledExplicit = true;
     this._historyLimit = clampNum(opts.historyLimit, 1, 1e6, 100);
     this._threshold = opts.suggestionThreshold ?? 0.5;
-    this._rethrow = opts.rethrow ?? false;
+    // 默认 true = 保持历史行为（内部异常向上抛，接崩溃上报）。
+    // 详见接口 `rethrow` 的注释：翻默认值是破坏性变更，会让已接入
+    // CrashReporter 的调用方静默丢掉全部内部异常。
+    this._rethrow = opts.rethrow ?? true;
     if (opts.builtins !== false) this._registerBuiltins();
 
     /**
@@ -447,9 +466,10 @@ export class DebugConsole {
       } else {
         const msg = e instanceof Error ? (e.stack ?? e.message) : String(e);
         this._output(`✗ 命令内部错误：${msg}`);
-        // 内部错误是真 bug，但**默认不抛**：控制台要吞掉一切，
-        // 否则一行打错的命令就会崩掉调用方的输入链路。
-        // 需要接崩溃上报时传 `rethrow: true`。
+        // 内部错误是真 bug → **默认向上抛**，交给上层（通常是 CrashReporter）。
+        // 这是 README「错误分级」的既有约定：不抛的话，真 bug 会被当成
+        // "玩家输错了"而静默吞掉。
+        // 只在调用方明确不要传播时（输入框 / 调试期）传 `rethrow: false`。
         if (this._rethrow) throw e;
       }
     }
