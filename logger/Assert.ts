@@ -143,26 +143,6 @@ export class Assert {
     throw new AssertionError(msg);
   }
 
-  /** 软断言的告警出口（未设置时回退到 `console.warn`） */
-  private static _softHandler: ((msg: string) => void) | null = null;
-
-  /**
-   * 把软断言的告警接到指定出口（传 `null` 恢复默认）
-   *
-   * 【为什么需要】
-   * 原实现直接 `console.warn`，绕开了 Logger 的 sink 体系。
-   * 而 README 承诺所有输出都能通过 sink 重定向到引擎控制台 / 文件 / 上报通道。
-   * 结果是：接了上报的项目里，断言失败这类**优先级最高的信号**
-   * 反而只落在控制台，线上一条都收不到。
-   *
-   * ```typescript
-   * Assert.setSoftHandler((msg) => log.warn('assert', msg));
-   * ```
-   */
-  static setSoftHandler(fn: ((msg: string) => void) | null): void {
-    Assert._softHandler = fn;
-  }
-
   /**
    * 生产环境安全版：失败时只告警不抛出
    *
@@ -172,14 +152,7 @@ export class Assert {
    * 那正是断言存在的意义。
    */
   static soft(cond: boolean, msg: string): boolean {
-    if (!cond) {
-      const line = `[软断言] ${msg}`;
-      // 【为什么先判 handler 而不是无条件 console.warn】
-      // 接了上报之后不应该再往控制台打一遍——
-      // 软断言在热路径上一天能触发上万次，双写等于双倍开销。
-      if (Assert._softHandler) Assert._softHandler(line);
-      else console.warn(line);
-    }
+    if (!cond) console.warn(`[软断言] ${msg}`);
     return cond;
   }
 }
