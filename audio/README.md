@@ -70,31 +70,12 @@ const v = audio.effectiveVolume(handle.id);
 2. 同级里抢**最早开始**的
 3. **循环音效不抢**（它是持续状态，抢掉会听出来"断了"）
 
-> ⚠️ **第 3 条的代价：`loop` 会把通道占死。**
->
-> 抢占时 `if (h.loop) continue` —— 循环音永远不会被选为 victim。
-> 于是当**所有**通道都被 `loop` 占满时，新来的一次性音效
-> 找不到任何可抢占对象，只能被拒绝（`play()` 返回 `null`）。
->
-> 实测：`maxVoices = 4`，先放 4 个 `loop: true`，
-> 再 `play('normal')` → 返回 **null**，`stats.rejected = 1`。
->
-> 表现是"BGM 和环境音起来之后，脚步声、命中音、UI 音全没了"——
-> 声音系统看起来像坏了，但代码一直在正常调用 `play()`。
->
-> **这是当前设计，不是 bug**：循环音被抢会听出明显的"断一下"，
-> 比一次性音效丢失更糟。
-> 【用法】请为一次性音效**预留通道**——
-> 不要把所有 `maxVoices` 都分配给 `loop` 音，
-> 并定期检查 `stats.rejected`，它不是 0 就说明通道不够用了。
-
 ### 坑
 
 | 坑 | 后果 |
 |---|---|
 | `update` 用了游戏时间 | 暂停时延迟音效永远不触发，恢复后一次性涌出 |
 | 预警音没设 CRITICAL | 被爆炸音挤掉，玩家死得莫名其妙 |
-| **全部通道被 `loop` 音效占满** | 之后所有一次性音效（脚步、命中、UI）**全部被拒绝**，且不报错 |
 | 缓存 `effectiveVolume` | 拖了音量滑块但正在播的音效没变 |
 | 场景切换忘了 `stopAll()` | 上个场景的循环音效跟着进新场景 |
 | `maxVoices` 设得比引擎通道数大 | 超出后行为不可预测（不是排队） |
@@ -120,8 +101,7 @@ console.log(audio.describe());
 | `stop(id)` | 按句柄 id 停 |
 | `stopSound(soundId)` | 按 soundId 停**所有**同名实例，返回停掉的数量 |
 | `stopCategory(cat)` | 停一整类，返回停掉的数量 |
-| `stopAll()` | 全停（**保留去重记录**，换场景用这个） |
-| `destroy()` | 销毁（连去重记录一起清，不再使用用这个） |
+| `stopAll()` | 全停 |
 | `setMasterVolume(v)` / `masterVolume` | 主音量 |
 | `setCategoryVolume(cat, v)` / `getCategoryVolume(cat)` | 分类音量 |
 | `effectiveVolume(id)` | 该实例的**实际**音量（主 × 分类 × 实例） |
@@ -131,23 +111,6 @@ console.log(audio.describe());
 | `isPlaying(soundId)` | 该 soundId 是否正在播 |
 | `stats()` / `resetStats()` | 统计（被拒 / 去重 / 抢占次数） |
 | `describe()` | 一行诊断文本 |
-
-> ⚠️ **`stopAll()` 与 `destroy()` 的区别在"去重记录"，不在"停不停"。**
->
-> 两者都会停掉所有活跃实例和延迟队列。区别在于：
->
-> | | 活跃实例 | 延迟队列 | `_lastPlayed` 去重记录 |
-> |---|---|---|---|
-> | `stopAll()` | 清 | 清 | **保留** |
-> | `destroy()` | 清 | 清 | 清 |
->
-> 保留是刻意的：**换场景时**你想让"刚才播过"的记录继续生效，
-> 否则新场景开场的同一音效会被误判为重复而丢掉。
->
-> 而 `destroy()` 是"这个管理器不要了"，必须连记录一起清——
-> 不清的话 `_lastPlayed` 会一直吊着 soundId 字符串。
-> 音效 id 动态生成时（`hit_${uuid}`）这就是纯泄漏：
-> 每放一次多一个条目，永不释放。
 
 > ⚠️ **`play()` 被拒时返回 `null`，不是句柄。**
 > 不判空直接用 `handle.id` 会抛 `TypeError`——
