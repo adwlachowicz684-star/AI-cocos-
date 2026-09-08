@@ -91,19 +91,8 @@ export class ConditionEngine {
   private readonly _stats = new Map<string, number>();
   private readonly _completed = new Set<string>();
 
-  /**
-   * 条件完成时的回调列表
-   *
-   * 【⚠️ 必须是数组，不能是单个字段】
-   * 原实现 `this._onComplete = fn` 直接覆盖，**第二次注册静默顶掉第一次**；
-   * 且第一次拿到的取消函数此后 `this._onComplete === fn` 恒为 false，形同失效。
-   *
-   * 实测（修复前）：注册 A、B 两个监听器后 `check()`，
-   * A 触发 0 次、B 触发 1 次。成就系统和任务系统同时监听时，
-   * 先注册的那个会彻底失联——表现为"成就弹了但任务没推进"，且不报错。
-   * 修法与 `buff` 的 `onChange`、`damage-pipeline` 的 `onResult` 一致。
-   */
-  private readonly _onCompleteFns: Array<(id: string) => void> = [];
+  /** 条件完成时的回调 */
+  private _onComplete: ((id: string) => void) | null = null;
 
   register(def: ConditionDef): this {
     if (def.conditions.length === 0 && !def.custom) {
@@ -121,37 +110,17 @@ export class ConditionEngine {
   // ==================== 统计项 ====================
 
   setStat(name: string, value: number): void {
-    this._assertFinite(name, value);
-    this._stats.set(name, value);
-  }
-
-  /**
-   * 增量（击杀数之类的累加用这个）
-   *
-   * 【⚠️ addStat 必须和 setStat 一样校验有限性】
-   *
-   * 原实现只有 `setStat` 校验、`addStat` 完全不校验：
-   * 实测（修复前）`addStat('x', NaN)` → `getStat('x') === NaN`，
-   * 而 `setStat('x', NaN)` 正常抛异常。
-   *
-   * 同一份"统计值必须有限"的契约在两个 setter 上不一致，
-   * 调用方按 setStat 的心智去用 addStat，NaN 就静默入库：
-   * 此后 `NaN >= v` 恒为 false，凡涉及该 stat 的条件**永远不完成**，
-   * 且不报错——表现为"这个成就死活解不开"。
-   * 更糟的是 NaN 会顺着 `stats` 流出引擎，污染外部的存档与统计。
-   */
-  addStat(name: string, delta: number): number {
-    this._assertFinite(name, delta);
-    const v = (this._stats.get(name) ?? 0) + delta;
-    this._stats.set(name, v);
-    return v;
-  }
-
-  /** 【为什么抽出来】两个 setter 必须用同一把尺子，否则契约又会对不齐 */
-  private _assertFinite(name: string, value: number): void {
     if (!Number.isFinite(value)) {
       throw new Error(`[ConditionEngine] 统计值必须是有限数：${name} = ${value}`);
     }
+    this._stats.set(name, value);
+  }
+
+  /** 增量（击杀数之类的累加用这个） */
+  addStat(name: string, delta: number): number {
+    const v = (this._stats.get(name) ?? 0) + delta;
+    this._stats.set(name, v);
+    return v;
   }
 
   getStat(name: string): number {
@@ -204,26 +173,6 @@ export class ConditionEngine {
      * 所以退化为"满足即 1，不满足即 0"是唯一自洽的选择。
      */
     if (c.value === 0) return this._compare(actual, c.op, 0) ? 1 : 0;
-
-    /**
-     * 【⚠️ c.value 为 NaN 必须收口，否则进度条渲染出 NaN%】
-     *
-     * 实测（修复前）：`{stat:'x', op:'>=', value: NaN}`、`x = 5`
-     * → `progress === NaN`（`completed` 倒是 false）。
-     * 机制：`actual / NaN = NaN`，而 `Math.min(1, Math.max(0, NaN))` 仍是
-     * **NaN**——夹取区间对 NaN 无效，因为每次比较都是 false。
-     *
-     * 到达路径很普通：配置表 `value` 字段缺失 → `undefined`，
-     * `x / undefined = NaN`。于是进度条显示 `NaN%`，
-     * 而条件本身看起来"正常地没完成"，排查时会一直在比较逻辑里打转。
-     *
-     * 【为什么不改成 register() 时抛异常】
-     * 配置表缺字段是**数据问题**，让整个引擎在注册期崩掉，
-     * 等于用一个坏配置项拖垮所有条件（含已正常工作的）。
-     * 这里收口成 0（"没有可展示的进度"），`_compare` 对 NaN 已返回 false，
-     * 于是该条件判定为未完成、进度为 0，语义自洽且不扩散。
-     */
-    if (!Number.isFinite(c.value)) return 0;
 
     const p = actual / c.value;
     switch (c.op) {
@@ -319,8 +268,7 @@ export class ConditionEngine {
       if (this.evaluate(id).completed) {
         this._completed.add(id);
         newly.push(id);
-        // 遍历副本：监听器里再注册/注销不会打乱本次派发（模式 E）
-        for (const fn of [...this._onCompleteFns]) fn(id);
+        this._onComplete?.(id);
       }
     }
     return newly;
@@ -344,11 +292,9 @@ export class ConditionEngine {
   }
 
   onComplete(fn: (id: string) => void): () => void {
-    this._onCompleteFns.push(fn);
+    this._onComplete = fn;
     return () => {
-      // indexOf 精确删除：直接删头部会误删别人注册的监听器
-      const i = this._onCompleteFns.indexOf(fn);
-      if (i >= 0) this._onCompleteFns.splice(i, 1);
+      if (this._onComplete === fn) this._onComplete = null;
     };
   }
 
@@ -378,6 +324,6 @@ export class ConditionEngine {
   destroy(): void {
     this.reset();
     this._defs.clear();
-    this._onCompleteFns.length = 0;
+    this._onComplete = null;
   }
 }
