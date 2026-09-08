@@ -34,8 +34,6 @@
  * 【无引擎依赖】纯逻辑，可完整单测。
  */
 
-import { hasOwn } from '../_core/guard';
-
 /** 字段类型 */
 export type FieldType = 'string' | 'number' | 'boolean' | 'array' | 'object' | 'ref' | 'any';
 
@@ -126,46 +124,8 @@ export class Validator {
       // 这里默认报出来，让调用方决定要不要过滤掉。
 
       // ③ id 去重
-      //
-      // 【⚠️ 曾经的 bug：数字型 id 完全不参与重复检测】
-      //
-      // 原实现只在 `typeof r.id === 'string'` 时查重，
-      // 而下面三处都接受 number：
-      //   - `_rowId`（本文件）：string | number 都转成 key
-      //   - `checkReferences` 的 idSets：同样两者都收
-      //   - `ConfigLoader` 的索引：同样两者都收
-      //
-      // 于是用数字 id 的表（自动生成 id 的策划表非常常见）出现重复行时：
-      //   启动校验全绿（0 个问题）→ 行数 count() 也对 →
-      //   但 `get(table, id)` 拿到的**永远是后一条**。
-      //
-      // 实测（修复前）：两行 id 都是 1 的 hero 表，
-      //   validateTable 报出的问题 = []
-      //   get(hero, 1) = {"id":1,"name":"第二个（id 撞了）"}
-      //   count(hero) = 2
-      //
-      // 表现为「我改了这条配置，游戏里没变」，
-      // 排查时第一反应是热重载或缓存坏了，很难想到是 id 撞了。
-      //
-      // 修法：判断口径与 `_rowId` / `idSets` / 索引保持一致。
-      if (typeof r.id === 'string' || typeof r.id === 'number') {
-        /**
-         * 【为什么 key 带类型前缀，而不是直接 String(id)】
-         *
-         * 直接 `String(id)` 会把 `'1'` 和 `1` 判成同一个 id。
-         * 从"索引会不会撞"的角度看它们确实会撞（索引就是 String(id)），
-         * 但把跨类型碰撞判成"重复 id"是**新增的报错**——
-         * 原本合法的一张混用 id 类型的表会突然在启动校验里失败。
-         *
-         * 本条的目的只是"把数字 id 纳入检测"（与 `_rowId` / idSets 的口径对齐），
-         * 不该顺带改变 string / number 之间的碰撞语义。
-         * 所以按类型区分：'1' 与 1 各占一个 key。
-         *
-         * ⚠️ 索引层（`ConfigLoader._loadTable`）仍会为这种组合报一条
-         * "后者覆盖了前者"——那反映的是真实发生的覆盖，口径不同但都对。
-         */
-        const key = `${typeof r.id}:${String(r.id)}`;
-        const prev = seenIds.get(key);
+      if (typeof r.id === 'string') {
+        const prev = seenIds.get(r.id);
         if (prev !== undefined) {
           issues.push({
             table: tableName,
@@ -175,7 +135,7 @@ export class Validator {
             message: `id 重复（与第 ${prev} 行相同）`,
           });
         } else {
-          seenIds.set(key, index);
+          seenIds.set(r.id, index);
         }
       }
     });
@@ -244,20 +204,11 @@ export class Validator {
     }
 
     // 数组元素类型
-    //
-    // 【⚠️ 曾经的 bug：遇到第一个错误元素就 return，一次只报一个】
-    //
-    // `tags: [1, 2, 3]` 只会报「第 0 个元素类型错误」，
-    // 改完第 0 个重启，又报第 1 个——"改一个→重启→再改一个"的循环
-    // 正是本文件开头说要避免的体验。
-    // 校验器一次把全部错误列出，改一遍就能通过。
     if (rule.type === 'array' && Array.isArray(value) && rule.item) {
-      const elemErrors: string[] = [];
       for (let i = 0; i < value.length; i++) {
         const e = Validator._checkType(value[i], { type: rule.item });
-        if (e) elemErrors.push(`第 ${i} 个元素类型错误：${e}`);
+        if (e) return `第 ${i} 个元素类型错误：${e}`;
       }
-      if (elemErrors.length > 0) return elemErrors.join('；');
     }
 
     // 自定义
@@ -341,22 +292,6 @@ export class Validator {
           const target = rule.table!;
           const validIds = idSets.get(target);
           if (!validIds) {
-            /**
-             * 【⚠️ 曾经的 bug：加载失败会引发级联误报】
-             *
-             * 只要被引用的表不在 `tables` 里就报「引用了不存在的表」，
-             * 但"不在 tables 里"有两种完全不同的原因：
-             *   ① 这张表根本没在 schema 里声明（真·写错了表名）→ 该报
-             *   ② 声明了，但本次加载失败（数据源异常 / 上一张表抛错中断）→ 不该报
-             *
-             * ② 的后果最坏：一张表加载失败，引用它的 8 张表各报一条，
-             * 一条真正的错误（那次加载失败）被 8 条无意义的"表不存在"淹掉，
-             * 排查时注意力被引到"是不是表名拼错了"。
-             *
-             * 所以：schema 里声明过的表不在这里重复报，
-             * 它的失败由 `_loadTable` 自己负责报（那条信息才是真因）。
-             */
-            if (hasOwn(schemas as object, target)) continue;
             issues.push({
               table: tableName,
               index,
