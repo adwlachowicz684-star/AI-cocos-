@@ -44,7 +44,7 @@
  */
 
 /** 一次输入记录 */
-import { clampNum, numOr, safeDt } from '../_core/math';
+import { safeDt } from '../_core/math';
 export interface BufferedInput {
   /** 动作名 */
   action: string;
@@ -106,26 +106,8 @@ export class InputBuffer {
   private _queue: BufferedInput[] = [];
 
   constructor(opts: InputBufferOptions = {}) {
-    /**
-     * 【⚠️ 为什么两个字段都要收口（P2）】
-     *
-     * `maxQueue` 用 `?? 6`：NaN 穿过去之后，
-     * 裁剪判定 `this._queue.length > NaN` **恒为 false**
-     * → 队列永不裁剪。实测（修复前）：连按 50 次后队列长度 50，
-     * 而上限本该是 6。搓招序列越长、比对越慢，且内存只增不减。
-     *
-     * `window` 用 `?? 0.15`：NaN 穿过去之后，
-     * `now - t <= NaN` 恒为 false、`now - t > NaN` 也恒为 false，
-     * 于是 `peek` 永远 false、`consume` 永远走"未过期"分支——
-     * **输入时灵时不灵，且和帧率、时机都无关**。
-     *
-     * 上界 64 的依据：搓招序列超过 64 步没有实际意义
-     * （人类在 1 秒内按不出 64 个有意图的输入），
-     * 而它属于"容量类"字段，按 _core 的约定用 clampNum 定上界
-     * ——`Infinity` 会让裁剪判定永远为假，是这类字段最典型的死法。
-     */
-    this._window = numOr(opts.window, 0.15);
-    this._maxQueue = clampNum(opts.maxQueue, 1, 64, 6);
+    this._window = opts.window ?? 0.15;
+    this._maxQueue = opts.maxQueue ?? 6;
     this._useInternalClock = opts.now === undefined;
     this._now = opts.now ?? (() => this._clock);
   }
@@ -136,28 +118,7 @@ export class InputBuffer {
   }
 
   set window(v: number) {
-    /**
-     * 【⚠️ 为什么非法值是"保持旧值"，而不是像构造函数那样兜成 0.15（P2）】
-     *
-     * 第一版这里写的是 `Math.max(0, numOr(v, 0))`，注释还论证过
-     * "与构造函数的 `numOr(opts.window, 0.15)` 保持同一口径"——
-     * **这句话是假的**：构造函数兜的是 0.15，setter 兜的是 0，两条路径不一样。
-     *
-     * 更糟的是 0 这个兜底值本身：命中判定是 `now - t <= this._window`
-     * （见 `peek` / `consume`），`window = 0` 时只有"同一时间戳"成立，
-     * 也就是**除了按下那一帧之外全部立即过期**。实测（W5-A 在交叉验收里给出）：
-     *   setter 传 NaN → window = 0 → press('attack') 隔一帧 consume() = false
-     * 缓冲看着在、实际已经死了，和没修之前的 `now - t <= NaN` 恒 false 表现一致。
-     * 这正是我在 P1-1（accessibility）里批评过的毛病——
-     * "构造时传 5 生效、之后重设被压到 1，行为随调用路径变化"，我在这里又犯了一遍。
-     *
-     * 改成保持旧值：`window` 允许运行时热更新（难度自适应、不同角色手感），
-     * 一次热更传进来 NaN 时，让窗口维持上一次的有效值，
-     * 至少不会把手感一键清空。与全库 skill-queue 的 `window` 收口口径一致。
-     * 显式传 0 是合法意图（"不要缓冲"），照旧接受。
-     */
-    const next = numOr(v, this._window);
-    this._window = Math.max(0, next);
+    this._window = Math.max(0, v);
   }
 
   /**
