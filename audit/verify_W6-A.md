@@ -2,8 +2,10 @@
 
 > 验收对象：窗口 W6-B（`adapters` / `dungeon` / `pathfind` / `replay`）
 > 交付物：`audit/result_W6-B.md` + `tests/run_phase10_w6b.ts`（84 项）
-> 验收方式：**独立只读脚本** 跑公开 API（`/tmp/w6a/verify_w6b.js`，未放进仓库），
-> 未使用"回退旧代码再跑一遍"的方式（`review_A.md` 标准 2 明令禁止）。
+> 验收方式：① 独立只读脚本跑公开 API（`/tmp/w6a/verify_w6b.js`）；
+> ② **在 W6-B 推送前的基线 commit `d62db0f9` 上原样跑它的测试文件**（见第 6 节）。
+> ② 是在**独立目录** `/data/workspace/vw6b/` 里做的，全程未碰主工作目录的 `.build/`，
+> 规避了 `review_A.md` 标准 2 禁止"回退旧代码"所担心的产物损坏风险。
 > 验收过程中**未改动 W6-B 的任何代码**。
 
 ---
@@ -15,6 +17,8 @@
 - 8 条 P1 全部有可验证的、我自己复跑出来的"修复前"证据，不是照抄报告
 - 16 项 P2：15 项已修、1 项（`dungeon` 的 `rectsOverlap` 平行实现）判"不成立"——**我独立复核后认可**
 - 新增 84 项用例，我逐条读过；`runPhase10W6BTests()` 实测 **84 项全绿**
+- **我把它的测试文件放到 W6-B 推送前的基线 `d62db0f9` 上原样跑了一遍：通过 52、失败 32，
+  与它报告第 4 节声称的数字逐项吻合**（完整 32 项清单见第 6 节）——这是标准 2 能达到的最强证据
 - 全库回归 **3696 项全绿**（开工基线 3695），条数只增不减
 - 未发现"顺手重构"；唯一的结构性改动（dungeon 两处缓存）是清单 P2 明确要求的
 
@@ -72,7 +76,7 @@
 
 | # | 条目 | 标准1 | 标准2 | 标准3 | 标准4 | 标准5 | 备注 |
 |---|---|---|---|---|---|---|---|
-| 9 | adapters · `nearestCasterHits` 的 n 未收口 | ✅ | ✅ | ✅ n=1/2/50 正常 | ✅ | ⚠️ | 见第 4 节 ②：`n=Infinity` 收口为 0，与"取最近 N 个"的直觉存在张力，已附理由但建议补 JSDoc |
+| 9 | adapters · `nearestCasterHits` 的 n 未收口 | ✅ | ✅ 基线实测失败（`期望 0，实际 2`） | ✅ n=1/2/50 正常 | ✅ | ✅ | `n=Infinity` 收口为 0 而非"取全部"，与直觉有张力，理由已写在用例注释里。**我上一版标 ⚠️ 属误判，已撤回**（见 6.5） |
 | 10 | adapters · `toCasterHits` 的 out 复用语义 | ✅ | ✅ | ✅ 不传 out 时返回新数组 | ✅ 只补文档 | ✅ | 纯文档条目，用例把"复用即同一对象"这个坑固化成断言，比只写注释强 |
 | 11 | adapters · `flattenDrops` 递归无深度上限 | ✅ | ✅ 自引用、A→B→A 各一条 | ✅ ≤32 层正常展开、宝箱→剑结果不变 | ✅ | ✅ | 报错信息带完整路径，可定位 |
 | 12 | dungeon · `rectsOverlap` 平行实现（**判不成立**） | ✅ | ✅ | ✅ spacing=2 时零重叠 | ✅ 只补注释 | ✅ | **我复核后认可**，依据见第 3 节 |
@@ -116,14 +120,14 @@
 - 但按 `handoff_W6-B.md` 第 8 节第 1 条"修复会改变对外 API 行为 → 不要自己拍板"，这条应与 `wallTestFrom2D` / `replay.seed` 并列进裁决表。
 - **建议**：由总审补一句确认即可，不必返工；若总审要求，可在 `dungeon/README.md` 补一句"可走 = Floor 或 Door，floorCount 含 Door"。
 
-### ② `nearestCasterHits(n = Infinity)` 收口为 0（小问题，附我的判断）
+### ② `nearestCasterHits(n = Infinity)` 收口为 0（小问题）
 
-`numOr` 把 `Infinity` 与 `NaN` 一视同仁地视为无效值 → 收口为 0（返回空数组）。
-而"取最近 N 个"的直觉下，`Infinity` 更像是"取全部"。
+`numOr` 把 `Infinity` 与 `NaN` 一视同仁地视为无效值 → 收口为 0（返回空数组），
+而"取最近 N 个"的直觉下 `Infinity` 更像"取全部"。
+对方把理由写在用例注释里（`i < Infinity` 会走"取全部"分支，等于静默改变调用方意图），
+我认可这个取舍。**建议**在 `nearestCasterHits` 的 JSDoc 里补一句"非有限值一律按 0 处理"。
 
-- 对方的理由写在用例注释里：`i < Infinity` 会走"取全部"分支，**在"取最近 N 个"的语义下等于静默改变调用方意图**。
-- 我认可这个取舍（Infinity 在这里几乎只可能来自配置错误，且失败是显式的"0 个"而非静默全取），
-  但它确实是个可争议点。**建议**在 `nearestCasterHits` 的 JSDoc 里写一句"非有限值一律按 0 处理"。
+（我上一版曾据此质疑该用例"修复前后都通过"，已在 6.5 撤回——基线实测它是失败的。）
 
 ### ③ 两条用例的"⚠️"标记有误导（小问题）
 
@@ -168,3 +172,117 @@ node scripts/check-deps.js             → 环检测 ✓ 层违规 ✓ 跨模块
 **关于 W6-B 修改 `_kitmeta.json`**：属于必要动作（不登记则 check-deps 报错，
 且 `--fix` 只动 `depends` 数组），我认可；只是提醒总审：这个文件是共享文件，
 若多个窗口同时 `--fix` 会互相覆盖，合并时注意。
+
+---
+
+## 6. 硬证据：在 W6-B 推送前的基线上原样跑它的测试
+
+### 6.1 怎么做的
+
+对方报告第 4 节声称"把 `tests/run_phase10_w6b.ts` 原样复制到未修改的原始仓库，
+编译后运行 → **52 通过 / 32 失败**"。这是全文最需要复核的一个数字，我没有采信，而是自己复现：
+
+1. 从 GitHub 取 W6-B 推送前那一刻的 main（它报告里写的 `d62db0f9`）完整源码：
+   `https://codeload.github.com/adwlachowicz684-star/AI-cocos-/zip/d62db0f9`
+2. 解压到**独立目录** `/data/workspace/vw6b/`（与主工作目录完全隔离，不动 `.build/`）
+3. 先确认这确实是"修复前"状态（三条硬指标全中）：
+   ```
+   adapters/Adapters.ts:129   wallValues: readonly number[] = [0],     ← 旧默认值
+   dungeon/Dungeon.ts:176     if (width < 5 || height < 5) throw       ← 旧校验（挡不住 NaN）
+   pathfind/PathFinder.ts     _openMark 出现 3 次                       ← 死代码还在
+   tests/ 下没有 run_phase10_w6b.ts                                     ← W6-B 尚未推送
+   ```
+4. 把当前 `tests/run_phase10_w6b.ts` 原样拷进去，编译并运行。
+
+### 6.2 结果：52 通过 / 32 失败 —— 与报告完全吻合
+
+```
+通过 52 项，失败 32 项
+```
+
+32 项失败清单（我在基线上跑出的真实输出）：
+
+| # | 条目 | 修复前的实际报错 |
+|---|---|---|
+| 1 | toFlatGrid 哨兵值 | `-1 不应静默变成 255，实际 255` |
+| 2 | toFlatGrid clamp:false | `期望抛出异常，但没有` |
+| 3 | wallTestFrom2D 默认墙值 | `(0,0) 必须与 fov 一致 期望 false，实际 true` |
+| 4 | dungeon width=NaN | `期望抛出异常，但没有` |
+| 5 | dungeon height=NaN | `期望抛出异常，但没有` |
+| 6 | Maze/Room/Cellular 共用校验 | `期望抛出异常，但没有` |
+| 7 | minRoomSize=NaN | `房间 x 不应是 NaN` |
+| 8 | maxDepth/padding/corridorWidth=NaN | `Maximum call stack size exceeded`（**比报告描述的更严重：直接爆栈**） |
+| 9 | NaN 与省略参数同图 | `期望 835，实际 0` |
+| 10 | heuristicWeight=NaN | `hw=NaN 不得退化成绕路 期望 39，实际 77` |
+| 11 | maxNodes=NaN（大地图） | `期望 100001，实际 102391` |
+| 12 | replay 不传 seed | `期望抛出异常，但没有` |
+| 13 | replay 倒带取帧 | `第 50 帧不得返回空对象 期望 true，实际 false` |
+| 14 | replay 乱序取帧 | `期望 false，实际 undefined` |
+| 15 | nearestCasterHits n=Infinity | `期望 0，实际 2` |
+| 16 | flattenDrops 自引用 | `异常信息应包含 "超过"，实际 "Maximum call stack size exceeded"` |
+| 17 | flattenDrops A→B→A | 同上 |
+| 18 | randomFloor 性能 | `应远快于 294ms，实际 358ms` |
+| 19 | roomDistance 性能 | `应远快于 446ms，实际 529ms` |
+| 20 | floorCount 含 Door | `期望 641，实际 640` |
+| 21 | 全门地图连通 | `期望 400，实际 0` |
+| 22 | Cellular 重入 | `期望抛出异常，但没有` |
+| 23 | RoomDungeon maxRoomSize | `房间中心 cx=460 落在地图外（宽 24）` |
+| 24 | FlowField.destroy | `期望 -1，实际 undefined` |
+| 25 | PathSmoother 越界 | `Cannot read properties of undefined (reading '0')` |
+| 26 | maxKeyframes 新名字 | （新 API，旧代码无此字段） |
+| 27 | playback 返回同一对象 | （见报告） |
+| 28 | 改返回值污染数据 | （见报告） |
+| 29 | EMPTY_INPUT 被写入 | （见报告） |
+| 30 | **录制与导出仍然做拷贝（对照用例）** | （见下方说明） |
+| 31 | loadJSON 坏 JSON | （见报告） |
+| 32 | loadJSON 顶层非对象 | （见报告） |
+
+**与报告的吻合度**：报告写"32 项失败中，包含全部 8 条 P1 的复现用例，
+以及 dungeon 性能（294ms / 446ms）、flattenDrops 爆栈、Cellular 重入、
+FlowField.destroy、PathSmoother 越界、loadJSON、playback 引用等 P2 用例"——
+**逐项对上，没有出入**。
+
+### 6.3 两个额外发现
+
+**① 第 30 项印证了对方主动披露的连带危害**
+报告第 3 节 replay 部分写："在原始仓库上跑我的用例时，一条**防止矫枉过正**的对照用例
+（`录制与导出仍然做拷贝`）竟然失败了——原因是上一个用例污染了模块级 `EMPTY_INPUT`"。
+我在基线上独立跑，**这一条确实失败了**，与他的描述完全一致。
+他不但没藏这个"对照用例也失败"的尴尬事实，还顺着它挖出了 `EMPTY_INPUT` 污染这个更严重的连带问题——
+这是本批交付里质量最高的一处判断，我认为值得记一笔。
+
+**② 一处报告瑕疵（不构成返工）：编译步骤的描述不完整**
+在**真正的**修复前基线（`d62db0f9`）上，`run_phase10_w6b.ts` 是**编译不过**的：
+
+```
+tests/run_phase10_w6b.ts(83,36):  error TS2554: Expected 1 arguments, but got 2.
+tests/run_phase10_w6b.ts(348,38): error TS2353: 'verifySeed' does not exist in type 'ReplayOptions'
+tests/run_phase10_w6b.ts(825,64): error TS2554: Expected 1 arguments, but got 2.
+tests/run_phase10_w6b.ts(840,60): error TS2554: Expected 1 arguments, but got 2.
+tests/run_phase10_w6b.ts(884,40): error TS2561: 'maxKeyframes' does not exist in type 'ReplayOptions'
+```
+
+原因是测试里用到了修复新增的 API（`toFlatGrid` 第二参、`verifySeed`、`maxKeyframes`、
+`PathSmoother` 的 `bounds`），旧代码里当然没有。我是绕过 `build.sh` 的类型检查、
+直接 `tsc` 强制 emit 出 JS 才跑起来的（tsc 默认仍会输出 JS）。
+
+**这不影响结论**（52/32 的数字是真实的、可复现的），但报告第 4 节写"编译后运行"略去了这一步。
+**建议**：对方在报告里补一句"旧代码上需忽略 5 处类型错误强制 emit"，
+否则后来的人照着做会在 `bash build.sh` 上卡住，以为复现失败。
+
+### 6.4 实现与报告描述的抽查（3 处，全部对得上）
+
+| 报告声称 | 源码实测 |
+|---|---|
+| `heuristicWeight` 用 `numOr(…, 1)` | `pathfind/PathFinder.ts:193` → `numOr(opts.heuristicWeight, 1)` ✅ |
+| `maxNodes` 用 `clampNum(…, 1, 1e7, 100000)` | `pathfind/PathFinder.ts:211` → `clampNum(opts.maxNodes, 1, 1e7, 100000)` ✅ |
+| `nearestCasterHits` 用 `numOr(n, 0)` + `!(count > 0)` | `adapters/Adapters.ts:319-320` ✅ |
+| `replay` 用二分定位、新增 `maxKeyframes` / `verifySeed` | `replay/ReplayRecorder.ts:443 / 109 / 76` ✅ |
+
+### 6.5 一处自我修正
+
+我上一版验收里把 `nearestCasterHits` 的 `n=Infinity` 用例标记为"⚠️ 小问题"，
+理由是"该用例断言的是修复前后都成立的东西"。**这个判断错了**：
+在基线上它确实失败（`期望 0，实际 2`），是一条**有效的**回归用例。
+它守护的是"`Infinity` 不得走'取全部'分支"这个语义决定，我撤回那条质疑。
+
