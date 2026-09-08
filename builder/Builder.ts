@@ -156,20 +156,6 @@ export interface PlacePreview {
   readonly cells: readonly Cell[];
   /** 与哪些已有建筑冲突（error 为 occupied 时给出） */
   readonly conflicts?: readonly string[];
-  /**
-   * 缺少的资源（error 为 insufficient-resources 时给出）
-   *
-   * 【⚠️ 为什么必须在返回值里带上它】
-   * `PlaceResult.missing` 早就声明了这个字段，但 `preview` 里算出来的
-   * `missing` 只是个**局部变量**，没有进返回对象，`place` 又只透传
-   * `error` / `detail`。结果是 `r.missing` 运行时永远是 undefined：
-   * 调用方照着类型定义写 `if (r.missing?.wood)` 来做"还差多少木头"，
-   * 永远走不到，功能静默失效——**类型检查还是过的**。
-   *
-   * 契约说谎比没有这个字段更糟：没有它，调用方会去找别的办法；
-   * 有它却恒为 undefined，调用方会一直以为是自己的数据问题。
-   */
-  readonly missing?: Readonly<Record<ResourceId, number>>;
 }
 
 // ==================== 注入接口 ====================
@@ -197,31 +183,14 @@ export interface TerrainQuery {
 
 // ==================== 实现 ====================
 
-/**
- * 旋转一个相对坐标
- *
- * 【⚠️ 为什么非法角度要抛错而不是"原样返回"】
- *
- * `Direction` 是 `0|90|180|270` 的字面量联合，TS 层能挡住写死的错误，
- * 但**挡不住运行时的数字**：蓝图配置从 JSON 反序列化后就是 `number`，
- * `rot` 传 45 时类型系统是看不见的。
- *
- * 老实现 `default: return c` 的后果是：建筑**不旋转，也不报错**。
- * 于是占位（旋转后）与预览对不上，玩家看到的是"我选了旋转但它没转"，
- * 而代码路径一路走通，日志一行都没有。
- *
- * 这类"静默不生效"比抛错难查得多：抛错至少能定位到配置里那个 45。
- */
+/** 旋转一个相对坐标 */
 export function rotateCell(c: Cell, rot: Direction): Cell {
   switch (rot) {
     case 0: return c;
     case 90: return { x: -c.y, y: c.x };
     case 180: return { x: -c.x, y: -c.y };
     case 270: return { x: c.y, y: -c.x };
-    default:
-      throw new Error(
-        `[Builder] 非法旋转角度：${JSON.stringify(rot)}（只接受 0 / 90 / 180 / 270）`
-      );
+    default: return c;
   }
 }
 
@@ -407,7 +376,6 @@ export class Builder {
       return {
         ok: false, error: 'insufficient-resources', cells,
         detail: '资源不足',
-        missing,
       };
     }
 
@@ -432,8 +400,6 @@ export class Builder {
         ok: false,
         error: pre.error,
         detail: pre.detail,
-        // 透传预览算出的缺口（仅资源不足时有值），让调用方能提示"还差多少"
-        missing: pre.missing,
       };
     }
 
@@ -446,7 +412,6 @@ export class Builder {
         ok: false,
         error: 'insufficient-resources',
         detail: '资源扣除失败',
-        missing: pre.missing,
       };
     }
 
