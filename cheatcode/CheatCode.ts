@@ -49,7 +49,6 @@
 // ==================== 类型 ====================
 
 import { editDistance as editDistanceCore, tokenize as coreTokenize } from '../_core/string';
-import { clampNum } from '../_core/math';
 export type ArgType = 'int' | 'number' | 'string' | 'bool';
 
 export interface ArgDef {
@@ -239,26 +238,7 @@ export class CheatCode {
     this._prefix = opts.prefix ?? '';
     this._enabled = opts.enabled ?? true;
     if (opts.enabled !== undefined) this._enabledExplicit = true;
-    /**
-     * 【为什么用 clampNum 而不是 `?? 50`】
-     *
-     * `??` 只挡 `null/undefined`，**挡不住 NaN / Infinity / 非数字字符串**。
-     * 而 `_pushHistory` 里的裁剪条件是 `length > limit` 这类**否定式比较**——
-     * NaN 参与比较恒为 false，裁剪**永远不触发**：
-     *
-     * ```
-     * historyLimit = NaN    → 执行 2000 条命令后 history.length = 2000（无限增长）
-     * historyLimit = 0 / -5 → length = 0（碰巧安全，因为 `length > 0` 为真）
-     * ```
-     *
-     * 注意 `0` 和负数"碰巧安全"这一点最危险：它让人以为 `??` 够用了，
-     * 唯独 NaN 这个"缺值被当成 0"的反面案例会漏网，且**没有任何报错**。
-     * historyLimit 通常来自配置表/存档反序列化，缺字段或类型错误就会拿到 NaN。
-     *
-     * 收口到 [0, 1e5]：下界 0 保持"历史关掉"的既有语义（0 是合法配置），
-     * 上界 1e5 防止 Infinity 让裁剪彻底失效。
-     */
-    this._historyLimit = clampNum(opts.historyLimit, 0, 1e5, 50);
+    this._historyLimit = opts.historyLimit ?? 50;
     this._onUnknown = opts.onUnknown;
     this._onRun = opts.onRun;
 
