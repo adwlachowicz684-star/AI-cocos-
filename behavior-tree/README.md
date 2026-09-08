@@ -77,20 +77,11 @@ tree.lastStatus;
 
 ```typescript
 tree.recordNode('attack', BTStatus.Running);
-tree.trackedNodes;   // Map { 'attack' => Running }
+tree.trackedNodes;   // 调试面板显示"AI 现在卡在哪个节点"
 tree.tickCount;
 ```
 
 AI 行为异常时，看当前 Running 的节点比看日志快十倍。
-
-> ⚠️ **`trackedNodes` 是手动接口，不是自动追踪。**
-> 内置节点（Selector / Sequence / Condition / Action / Wait …）**一个都不会自动调用
-> `recordNode`**——跑完一次 tick 后 `trackedNodes.size` 仍然是 `0`。
-> 想用它做调试面板，请自己在 Action / Condition 的回调里调
-> `tree.recordNode(name, status)`，或包一层调试节点。
->
-> （为什么没做成自动：节点接口 `IBTNode` 不暴露 children，运行器无法通用地遍历整棵树；
-> 给每个节点加 tree 反向引用会破坏"节点是可独立复制的纯对象"这个前提。）
 
 ## API
 
