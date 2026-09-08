@@ -162,7 +162,31 @@ $ python3 scripts/check-random-source.py [OK] 未发现自建随机源 ✓
 $ python3 scripts/check-dup-exports.py  [OK] 无待处理的冲突 ✓
 ```
 
-### 4.1 关于 `check-deps.js` 的一条残留说明
+### 4.1 推送后复核（在他窗口代码合入后的真实 main 上重跑）
+
+我推送完 main 之后重新拉取了**含全部窗口最新代码**的远端快照，重跑确认本窗口改动仍然成立：
+
+| 项 | 结果 |
+|---|---|
+| 我的 9 个交付文件是否被他人覆盖 | **无**（逐个 MD5 比对远端，全部一致） |
+| `runPhase10W8ATests()` | 通过 **41** 项，失败 0 项 |
+| 全量 `node .build/tests/run.js` | 通过 3696 项，**失败 1 项**（归因见下） |
+
+**那条失败的归因（非本窗口引入）**：
+
+```
+✗ 第九批 › BinarySerializer · 位级序列化 › ⚠️ float 会 clamp 而不是溢出回绕
+  [Binary] float 越界：999（范围 -10..10）
+```
+
+`binary` 是 W8-B 的单元。它的 P1-5 把 `float` 越界从静默 clamp 改成了默认抛错，
+同步改了 `tests/run_batch10.ts` 里的断言——但**那条改动在后续并发推送中被覆盖回去了**，
+于是"源码改了、测试没改"，红 1 条。
+
+我没有动这个文件（不是我的单元，且按纪律验收方不直接改对方代码），
+已在 `audit/verify_W8-A.md` §6 给出完整归因与 10 行的修复建议，上报总审与 W8-B。
+
+### 4.2 关于 `check-deps.js` 的一条残留说明
 
 本批开工前，原始库上 `check-deps.js` 就报 **8 条**"import 了但没登记"
 （`i18n` / `blessing` / `curse` / `rarity` / `achievement` / `rebind` / `gameflow` / `accessibility`
