@@ -42,7 +42,6 @@
  */
 
 import { DisjointSet } from '../ds/DataStructures';
-import { clampNum, numOr } from '../_core/math';
 
 /**
  * 格子类型
@@ -108,38 +107,6 @@ export function rectCenter(r: Rect): { cx: number; cy: number } {
   return { cx: Math.floor(r.x + r.w / 2), cy: Math.floor(r.y + r.h / 2) };
 }
 
-/**
- * 两个矩形是否重叠（**相切不算重叠**）
- *
- * 【⚠️ 为什么这里用 `<` 而别处用 `<=`：三份实现的语义差异是刻意的】
- *
- * 全库有三份"矩形相交"，语义分两套：
- *
- * | 实现 | 判定 | 相切（边距刚好为 0） |
- * |---|---|---|
- * | **本函数**（dungeon 房间摆放） | `a.x < b.x + b.w` | **不算重叠** |
- * | `ds.rectsOverlap` | 严格相交 | 不算重叠 |
- * | `_core.rectOverlaps` | `<=` | **算重叠** |
- *
- * 这不是笔误，是**用途决定语义**：
- *
- * - 房间摆放要的是"两个房间能不能同时存在"。
- *   两个房间**紧贴着共用一道墙**是完全合法的地牢布局
- *   （共用墙既能省空间，走廊也更好连）。
- *   若按 `<=` 判定，这类布局会被全部拒绝，房间数骤减。
- * - 碰撞检测要的是"两个 AABB 是否接触"。物理上贴在一起就是接触，
- *   按 `<` 判定会让"贴着墙站"被判成"没碰到"。
- *
- * **两套都对。** 这里的判断必须与 `spacing` 参数一起读：
- * 调用方用 `padding` 表达"至少隔开多远"，`padding = 0` 时允许贴边。
- * 改这里的 `<` 会让所有房间的可选位置集体变少，且症状是"地图变得空旷"，
- * 不会报错——所以特意写在这，防止有人"统一三份实现"时误改。
- *
- * 【padding 的 NaN 同样拦不住】
- * `a.x - NaN < b.x + b.w` 恒 false → **任何两个房间都不重叠** →
- * 房间会互相叠在一起。调用方传进来的 spacing 已在本文件构造期收口，
- * 这里不再重复收口（热路径，房间数 × 尝试次数会被放大）。
- */
 export function rectsOverlap(a: Rect, b: Rect, padding = 0): boolean {
   return (
     a.x - padding < b.x + b.w &&
@@ -206,37 +173,7 @@ export abstract class DungeonBase {
   protected readonly _rng: Rng;
 
   constructor(width: number, height: number, seed: number) {
-    /**
-     * 【⚠️ 为什么写 `!(width >= 5)` 而不是 `width < 5`】
-     *
-     * JS 里 NaN 与任何值比较都返回 false，所以**否定式条件天然漏掉 NaN**：
-     *
-     * ```
-     * NaN < 5        === false   // 旧写法：校验通过，NaN 直接穿透
-     * !(NaN >= 5)    === true    // 新写法：正确拒绝
-     * ```
-     *
-     * 穿透之后的实测现象：
-     * ```typescript
-     * new BSPDungeon({ width: NaN, height: 40, seed: 1 })
-     *   // 构造通过，generate() 无异常
-     *   // tileAt(0,0) === undefined、floorCount === 0、isFullyConnected() === false
-     * ```
-     *
-     * 根因在下一步：`new Uint8Array(NaN * NaN)` 得到的是 **length = 0 的数组**
-     * （NaN 被转成 0），于是"生成成功"了一张不存在的地图。
-     *
-     * 为什么这个后果特别严重：尺寸常常来自关卡配置表，配错一格就产出空地图；
-     * 而 `isFullyConnected()` 恒 false 会触发宿主的"死图重生成"策略——
-     * 如果策略是"重试 N 次"，就会**连续重试 N 次全部失败**，
-     * 表现为"进关卡卡在加载"或"反复重生成直到超时"，且日志里没有任何异常。
-     */
-    if (!(width >= 5) || !(height >= 5)) {
-      throw new Error(
-        `[Dungeon] 尺寸至少 5×5，实际 ${String(width)}×${String(height)}。` +
-          `（NaN / undefined 会在这里被拦住：NaN 参与 < 比较恒为 false，靠旧写法是拦不住的）`
-      );
-    }
+    if (width < 5 || height < 5) throw new Error('[Dungeon] 尺寸至少 5×5');
     this._w = width;
     this._h = height;
     this._tiles = new Uint8Array(width * height);
@@ -267,61 +204,18 @@ export abstract class DungeonBase {
   setTile(x: number, y: number, t: Tile): void {
     if (x < 0 || y < 0 || x >= this._w || y >= this._h) return;
     this._tiles[y * this._w + x] = t;
-    // 地形变了 → 地板列表 / BFS 距离缓存失效
-    this._invalidateCaches();
   }
-
-  /**
-   * 缓存失效
-   *
-   * 【为什么必须显式失效】
-   * `randomFloor` / `roomDistance` 原来每次调用都全扫一遍地图（见各自注释）。
-   * 加了缓存就必须有明确的失效点，否则会读到旧地形——
-   * 那比慢更糟：在已经变成墙的格子上刷怪。
-   */
-  protected _invalidateCaches(): void {
-    this._floorCache = null;
-    this._bfsCache = null;
-  }
-
-  /** 地板索引缓存（含 Door，与 isFullyConnected 同口径） */
-  private _floorCache: number[] | null = null;
-  /** BFS 距离缓存：起点索引 → 距离数组 */
-  private _bfsCache: Map<number, Int32Array> | null = null;
 
   isWalkable(x: number, y: number): boolean {
     const t = this.tileAt(x, y);
     return t === Tile.Floor || t === Tile.Door;
   }
 
-  /**
-   * 地板格子总数（**含 Door**）
-   *
-   * 【⚠️ 为什么要把 Door 也算进来】
-   *
-   * 原来这里只数 `Tile.Floor`，而 `isFullyConnected()` 数的是 `Floor + Door`。
-   * **同一个"地板"概念，两个口径**——于是这条判断是错的：
-   *
-   * ```typescript
-   * if (d.floorCount > 0 && !d.isFullyConnected()) 重生成();
-   * ```
-   *
-   * 有了门之后，`floorCount` 会比连通性检查统计的总数少，
-   * 表现为"明明全连通，却被判成死图反复重生成"。
-   * 而且 `isWalkable()` 认定 `Door` 可走、`floodFill` 也从 Door 上走过去——
-   * 只数 Floor 的那一个才是口径不一致的一方。
-   *
-   * 【Door 目前是"死类型"吗】
-   * 是的：当前四个生成器**都没有写过 Door**（走廊直接用地板连通）。
-   * 所以在现有生成器下这个改动**不改变任何数值**（实测 floorCount 前后一致）。
-   * 但 Door 是公开枚举值，调用方完全可以自己 `setTile(x, y, Tile.Door)`，
-   * 那时两个口径就会立刻分叉。统一到"可走格 = 地板 + 门"。
-   */
+  /** 地板格子总数 */
   get floorCount(): number {
     let n = 0;
     for (let i = 0; i < this._tiles.length; i++) {
-      const t = this._tiles[i];
-      if (t === Tile.Floor || t === Tile.Door) n++;
+      if (this._tiles[i] === Tile.Floor) n++;
     }
     return n;
   }
@@ -364,23 +258,10 @@ export abstract class DungeonBase {
 
   /** 所有地板是否连通成一个区域 */
   isFullyConnected(): boolean {
-    /**
-     * 【起点必须按"可走格"找，不能只找 Floor】
-     *
-     * 同一个函数里原本有两套口径：
-     * 找起点只认 `Tile.Floor`，而下面统计 floorTotal 用的是 `Floor + Door`。
-     *
-     * 于是一张"起点区恰好是门"或"全是门"的地图会走到 `start < 0`
-     * → return false，即**明明全连通却被判成死图**，
-     * 触发宿主的"死图重生成"逻辑。
-     *
-     * 这与 `floorCount` 的口径问题是同一处根因的两面，一起修：
-     * 全文件统一"可走 = Floor 或 Door"。
-     */
+    // 找第一个地板
     let start = -1;
     for (let i = 0; i < this._tiles.length; i++) {
-      const t = this._tiles[i];
-      if (t === Tile.Floor || t === Tile.Door) {
+      if (this._tiles[i] === Tile.Floor) {
         start = i;
         break;
       }
@@ -440,38 +321,11 @@ export abstract class DungeonBase {
     return best;
   }
 
-  /**
-   * 从 (sx, sy) 出发的 BFS 距离场
-   *
-   * 【⚠️ 原来是"每问一次就重算一遍全场 BFS"】
-   *
-   * `roomDistance(a, b)` 每次调用都做一次完整 BFS。
-   * 典型用法是"算一遍房间两两距离表"（n 个房间 = n(n-1)/2 次调用），
-   * 或者"每帧问一次出生点到 Boss 房还有多远"，于是：
-   *
-   * ```
-   * 512×512 地图，roomDistance 调用 100 次 → 实测 446ms
-   * 按起点缓存后 → 实测 < 10ms
-   * ```
-   *
-   * 【缓存键为什么是"起点索引"】
-   * 一次 BFS 的结果就是"起点到全场各点的距离"，
-   * 同一个起点的所有查询（问不同的终点）复用同一份结果即可。
-   *
-   * 【失效】`setTile` / `generate` 会清空（见 `_invalidateCaches`）。
-   */
   private _bfsDistances(sx: number, sy: number): Int32Array {
-    const start = sy * this._w + sx;
-    if (this._bfsCache === null) this._bfsCache = new Map<number, Int32Array>();
-    const hit = this._bfsCache.get(start);
-    if (hit !== undefined) return hit;
-
     const dist = new Int32Array(this._w * this._h).fill(-1);
-    if (!this.isWalkable(sx, sy)) {
-      this._bfsCache.set(start, dist);
-      return dist;
-    }
+    if (!this.isWalkable(sx, sy)) return dist;
 
+    const start = sy * this._w + sx;
     dist[start] = 0;
     const queue: number[] = [start];
     let head = 0;
@@ -492,7 +346,6 @@ export abstract class DungeonBase {
       }
     }
 
-    this._bfsCache.set(start, dist);
     return dist;
   }
 
@@ -526,46 +379,15 @@ export abstract class DungeonBase {
     return s;
   }
 
-  /**
-   * 随机一个地板格（放道具/怪物）
-   *
-   * 【⚠️ 原来是 O(n)，刷怪循环里是 O(n²)】
-   *
-   * 原实现每次调用都**全扫一遍地图并重建 floors 数组**。
-   * 单个调用看不出问题，但它的典型用法是"刷 200 只怪，每只找一个落点"：
-   *
-   * ```
-   * 512×512 地图，调用 300 次 → 实测 294ms（每次扫 26 万个格子）
-   * 加缓存后 → 同一个种子、同样的调用序列，实测 < 5ms
-   * ```
-   *
-   * 这 294ms 是**纯主线程阻塞**，正好卡在"进入关卡 / 刷一波怪"的那一刻。
-   *
-   * 【为什么缓存不会破坏可复现性】
-   * 缓存只是**复用同一个按固定顺序构建的 floors 数组**，
-   * `this._rng.int(0, floors.length - 1)` 的调用次数与取值都不变，
-   * 所以相同种子下的随机序列与改前**逐帧一致**（测试里有对照）。
-   *
-   * 【失效时机】`setTile` / `generate` 会清缓存（见 `_invalidateCaches`）。
-   */
+  /** 随机一个地板格（放道具/怪物） */
   randomFloor(): { x: number; y: number } | null {
-    const floors = this._floorList();
+    const floors: number[] = [];
+    for (let i = 0; i < this._tiles.length; i++) {
+      if (this._tiles[i] === Tile.Floor) floors.push(i);
+    }
     if (floors.length === 0) return null;
     const pick = floors[this._rng.int(0, floors.length - 1)];
     return { x: pick % this._w, y: (pick / this._w) | 0 };
-  }
-
-  /** 地板索引列表（缓存，与 floorCount 同口径：Floor + Door） */
-  private _floorList(): number[] {
-    const cached = this._floorCache;
-    if (cached !== null) return cached;
-    const floors: number[] = [];
-    for (let i = 0; i < this._tiles.length; i++) {
-      const t = this._tiles[i];
-      if (t === Tile.Floor || t === Tile.Door) floors.push(i);
-    }
-    this._floorCache = floors;
-    return floors;
   }
 }
 
@@ -604,65 +426,19 @@ export class BSPDungeon extends DungeonBase {
 
   constructor(opts: BSPOptions) {
     super(opts.width, opts.height, opts.seed);
-    /**
-     * 【⚠️ 为什么每个参数都要 numOr / clampNum，光 `?? 默认值` 不够】
-     *
-     * `??` 只挡 `null` 和 `undefined`，**不挡 NaN**——而 NaN 恰恰是配置表漏填、
-     * 或上游算错了之后最常见的形态（比如 `width / 0`、`parseFloat('')`）。
-     *
-     * 实测 `minRoomSize: NaN`：
-     * ```
-     * roomCount = 16，首个房间 cx = NaN，allRoomsReachable() = false
-     * ```
-     *
-     * 根因链：`_split` 里 `minSize = NaN` → `node.w < NaN * 2` 恒 false
-     * → 分割条件永远成立 → `rng.int(NaN, NaN)` 返回 NaN
-     * → 子节点坐标全 NaN → `_createRooms` 造出 NaN 房间 push 进 `_rooms`
-     * → `_carveRoom` 的 `for (y = NaN; y < NaN; y++)` 一次都不执行，
-     *    **地图上其实没有这个房间**，但 `_rooms` 里记了一个。
-     *
-     * 后果：`findFarthestRoom`（放 Boss 房/出生点）基于 NaN 距离算出错误结果；
-     * `allRoomsReachable()` 恒 false 触发死图重生成。
-     *
-     * 【上界怎么定】
-     * - `minRoomSize` / `roomPadding` / `corridorWidth` 是"格子数"，
-     *   不可能超过地图短边，超过就是配错，直接夹到短边。
-     * - `maxDepth` 是递归深度，深度 d 最多产生 2^d 个节点，
-     *   32 层在实践中不可能用到（且会栈溢出），夹到 16 足够。
-     */
-    const shortSide = Math.min(opts.width, opts.height);
-
-    /**
-     * 【为什么这里用 numOr 之后再抛错，而不是一路 clampNum】
-     *
-     * 先用 `numOr` 把 NaN / 非有限值落回默认值 6（这就是本次要修的点：
-     * NaN 原本会一路穿成 NaN 房间），**再**保留"小于 3 就抛错"的既有契约。
-     *
-     * 【为什么不能直接 clampNum(v, 3, ...】
-     * 试过：那样 `minRoomSize: 2` 会被静默夹成 3，不再抛错，
-     * 既有测试 `minRoomSize 过小抛错` 立刻变红。
-     *
-     * 这里体现的是本文件反复出现的那条纪律：
-     * **"小于下界"是调用方填错，要报错；"填了 NaN"是值缺失，要兜底。**
-     * 两类情况不能合并成同一种处理——合并了就一定会漏掉其中一类。
-     */
-    const minRoomSize = numOr(opts.minRoomSize, 6);
-    if (!(minRoomSize >= 3)) throw new Error('[BSP] minRoomSize 至少为 3');
-
     this._opts = {
-      // 上界夹到地图短边：比地图还大的房间根本放不下
-      minRoomSize: Math.min(minRoomSize, shortSide),
-      maxDepth: clampNum(opts.maxDepth, 1, 16, 4),
-      roomPadding: clampNum(opts.roomPadding, 0, Math.max(0, Math.floor(shortSide / 2)), 1),
-      corridorWidth: clampNum(opts.corridorWidth, 1, Math.max(1, Math.floor(shortSide / 2)), 1),
+      minRoomSize: opts.minRoomSize ?? 6,
+      maxDepth: opts.maxDepth ?? 4,
+      roomPadding: opts.roomPadding ?? 1,
+      corridorWidth: opts.corridorWidth ?? 1,
     };
+
+    if (this._opts.minRoomSize < 3) throw new Error('[BSP] minRoomSize 至少为 3');
   }
 
   generate(): void {
     this._tiles.fill(Tile.Wall);
     this._rooms = [];
-    // 整块重写地形（fill 不走 setTile）→ 缓存必须显式失效
-    this._invalidateCaches();
 
     this._root = { x: 0, y: 0, w: this._w, h: this._h, left: null, right: null, room: null, depth: 0 };
     this._split(this._root);
@@ -841,54 +617,17 @@ export class RoomDungeon extends DungeonBase {
 
   constructor(opts: RoomDungeonOptions) {
     super(opts.width, opts.height, opts.seed);
-    /**
-     * 【⚠️ 为什么 maxRoomSize 必须按地图尺寸收口】
-     *
-     * 原实现直接用 `rng.int(minRoomSize, maxRoomSize)` 当房间宽高，
-     * 完全不校验它是否放得进地图。实测 `minRoomSize: 900, maxRoomSize: 999`
-     * 配 24×24 的地图：
-     *
-     * ```
-     * 首个房间 w = 919、h = 985，cx = 460、cy = 493   ← 中心在地图外
-     * ```
-     *
-     * 根因有两层，叠在一起才产生这么离谱的结果：
-     *
-     * 1. `Rng.int(min, max)` 在 `max < min` 时**返回 min**（不是抛错）。
-     *    所以 `x = rng.int(1, this._w - w - 2)` 中 `24 - 919 - 2` 远小于 1，
-     *    于是 x 被静默取成 1。
-     * 2. `setTile` 对越界坐标**直接 return**（静默截断），
-     *    于是地图上真的只画出了左上角那一小块；
-     *    但 `room.w / room.h` 仍然记着 919 / 985 这两个原始值。
-     *
-     * 后果：`rectCenter` 按"记录值"算出 cx = 460，
-     * 于是出生点、Boss 房、传送门全被放到地图外——
-     * 表现为"传送到地图外 / 出生即卡在墙里"，且不报错。
-     *
-     * 【为什么是夹到短边而不是抛错】
-     * 房间尺寸由配置表给出，写大了更可能是笔误而不是致命错误；
-     * 夹到"能放得下"的最大值可以继续出图。
-     * 真正放不下的情况（短边 < 5）已被基类构造拦住。
-     */
-    const shortSide = Math.min(opts.width, opts.height);
-    // 房间必须缩进地图 1 格（边界留墙），再留 1 格余量给走廊
-    const sizeCap = Math.max(3, shortSide - 4);
-    const minRoomSize = clampNum(opts.minRoomSize, 3, sizeCap, 4);
-    const maxRoomSize = clampNum(opts.maxRoomSize, minRoomSize, sizeCap, Math.min(10, sizeCap));
-
     this._opts = {
-      roomCount: clampNum(opts.roomCount, 0, 1e6, 12),
-      minRoomSize,
-      maxRoomSize,
-      spacing: clampNum(opts.spacing, 0, Math.max(0, Math.floor(shortSide / 2)), 2),
+      roomCount: opts.roomCount ?? 12,
+      minRoomSize: opts.minRoomSize ?? 4,
+      maxRoomSize: opts.maxRoomSize ?? 10,
+      spacing: opts.spacing ?? 2,
     };
   }
 
   generate(): void {
     this._tiles.fill(Tile.Wall);
     this._rooms = [];
-    // 整块重写地形（fill 不走 setTile）→ 缓存必须显式失效
-    this._invalidateCaches();
 
     const maxTries = this._opts.roomCount * 20;
 
@@ -1090,52 +829,7 @@ export class CellularDungeon extends DungeonBase {
    * @yields 当前进度（0~1）
    */
   *generateSteps(rowsPerStep = 16): Generator<number, void, void> {
-    /**
-     * 【⚠️ 为什么 _smoothBuf 挂在实例上，以及它带来的三个坑】
-     *
-     * 缓冲必须**跨 yield 存活**（平滑是按行写的，一行写完就 yield 给主线程），
-     * 所以不能是函数内的局部变量，只能挂实例。
-     *
-     * 但"挂实例"意味着这个缓冲是**实例级共享状态**，于是有三个坑：
-     *
-     * ① **重入 / 并发互相踩**：同一个实例同时开两个 generator
-     *    （典型场景：玩家快速切层，上一层的生成还没跑完就起了下一层），
-     *    两个 generator 交替 next 会往同一个 buffer 上写不同的行，
-     *    产出一张"两层的缝合怪"地图 —— 不报错，且极难复现。
-     *
-     * ② **异常退出不清空**：迭代中途抛错（或调用方 break 后不调 `return()`）时，
-     *    `w × h` 字节的缓冲会**一直挂在实例上不释放**。
-     *    1024² 的图就是 1MB × 实例数，切几次关卡就堆起来了。
-     *
-     * ③ 因此这里做两件事：
-     *    - 开头检测重入（第二个 generator 直接抛错，而不是默默产出坏地图）
-     *    - `try/finally` 保证任何出口都清空缓冲
-     *
-     * 【调用方约定】丢弃 generator 前请 `g.return()`，
-     * 否则 `finally` 要等到 GC 才执行（挂起的 generator 不会自己跑 finally）。
-     */
-    if (this._genRunning) {
-      throw new Error(
-        '[Cellular] 上一次 generateSteps 尚未结束，不能同时开第二个。' +
-          '同一个实例的平滑缓冲是共享的，两个生成器交替推进会产出"缝合地图"。' +
-          '请先把上一个跑完（或调用 g.return() 中止），或换一个实例。'
-      );
-    }
-    this._genRunning = true;
-    // 上一次半途而废留下的残留先清掉（否则 w×h 内存一直驻留）
-    this._smoothBuf = null;
     this._rooms = [];
-    this._invalidateCaches();
-
-    try {
-      yield* this._generateStepsInner(rowsPerStep);
-    } finally {
-      this._smoothBuf = null;
-      this._genRunning = false;
-    }
-  }
-
-  private *_generateStepsInner(rowsPerStep = 16): Generator<number, void, void> {
 
     const w = this._w;
     const h = this._h;
@@ -1193,8 +887,6 @@ export class CellularDungeon extends DungeonBase {
 
   /** 平滑缓冲（跨 yield 存活，仅 generateSteps 期间非空） */
   private _smoothBuf: Uint8Array | null = null;
-  /** generateSteps 是否正在跑（重入保护，见 generateSteps 注释） */
-  private _genRunning = false;
 
   /** 平滑一行：把结果写进 _smoothBuf */
   private _smoothRow(y: number): void {
@@ -1382,52 +1074,9 @@ export interface MazeOptions {
 export class MazeDungeon extends DungeonBase {
   private readonly _opts: Required<Omit<MazeOptions, 'width' | 'height' | 'seed'>>;
 
-  /**
-   * 复用的方向缓冲（4 个对象，整个生命周期只有这 4 个）
-   *
-   * 【⚠️ 为什么不能继续在循环里 `shuffle([{dx,dy} × 4])`】
-   *
-   * 原写法是**每个格子**都新建一个数组 + 4 个对象字面量再洗牌。
-   * 迷宫生成要访问每一个"房间格"，所以分配次数 ≈ 格子数：
-   *
-   * ```
-   * 512×512 迷宫 → 约 6.5 万个房间格 × (1 数组 + 4 对象) ≈ 26 万次分配
-   * ```
-   *
-   * 这些对象**活不过一次循环**（洗完牌、挑一个方向就扔），
-   * 是典型的"新生代垃圾"：不 OOM，但会让 GC 在生成期反复触发，
-   * 表现为"生成大迷宫时偶发掉帧"，且**只在大地图上出现**——
-   * 小地图测多少次都不会卡，所以极难定位。
-   *
-   * 【为什么复用不会改变生成结果】
-   * `shuffle` 的随机性只来自 `rng.next()` 的调用次数与取值，
-   * 与数组里装的是新对象还是旧对象无关。
-   * 只要每次洗牌前把顺序**重置成固定的 [上,右,下,左]**，
-   * 洗牌算法的输入就与原来完全一致 —— 相同种子生成**逐格相同**的迷宫
-   * （测试里有这条对照）。
-   */
-  private readonly _stepBuf: Array<{ dx: number; dy: number }> = [
-    { dx: 0, dy: -2 },
-    { dx: 2, dy: 0 },
-    { dx: 0, dy: 2 },
-    { dx: -2, dy: 0 },
-  ];
-
-  /** 取一个洗过牌的方向数组（复用缓冲，调用方不得保存引用） */
-  private _nextStepOrder(): Array<{ dx: number; dy: number }> {
-    const b = this._stepBuf;
-    b[0].dx = 0; b[0].dy = -2;
-    b[1].dx = 2; b[1].dy = 0;
-    b[2].dx = 0; b[2].dy = 2;
-    b[3].dx = -2; b[3].dy = 0;
-    return this._rng.shuffle(b);
-  }
-
   constructor(opts: MazeOptions) {
     super(opts.width, opts.height, opts.seed);
-    // 与 BSP / Room 保持同样的收口口径：?? 挡不住 NaN，
-    // 而 NaN 会让 `braidRatio <= 0` 恒为 false，环路一条都打不通（静默）。
-    this._opts = { braidRatio: clampNum(opts.braidRatio, 0, 1, 0.1) };
+    this._opts = { braidRatio: opts.braidRatio ?? 0.1 };
 
     /**
      * 【坑】迷宫尺寸必须是奇数
@@ -1444,8 +1093,6 @@ export class MazeDungeon extends DungeonBase {
   generate(): void {
     this._tiles.fill(Tile.Wall);
     this._rooms = [];
-    // 整块重写地形（fill 不走 setTile）→ 缓存必须显式失效
-    this._invalidateCaches();
 
     // 递归回溯（迭代版，避免深递归爆栈）
     const stack: Array<{ x: number; y: number }> = [];
@@ -1459,7 +1106,12 @@ export class MazeDungeon extends DungeonBase {
       const cur = stack[stack.length - 1];
 
       // 找未访问的邻居（隔一格）
-      const dirs = this._nextStepOrder();
+      const dirs = this._rng.shuffle([
+        { dx: 0, dy: -2 },
+        { dx: 2, dy: 0 },
+        { dx: 0, dy: 2 },
+        { dx: -2, dy: 0 },
+      ]);
 
       let moved = false;
 
