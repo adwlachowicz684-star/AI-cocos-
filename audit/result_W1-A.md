@@ -18,6 +18,11 @@
 | 需总审裁决 | 0 |
 | 新增测试 | `tests/run_phase10_w1a.ts`，**44 项**，全绿 |
 | 全量回归 | **3696 项全绿（0 失败）** |
+
+> ⚠️ **以上两个数字互不包含**：`tests/run.ts` 未改动，本窗口的 **44 项尚未注册**，
+> 不在这 3696 里。合并后预期为 **3740**（3696 + 44）。
+> （此点是在交叉验收 W1-B 时对照发现的 —— W1-B 明确写了"注册后应为 3753"，
+> 我第一版漏了这句说明，现补正。详见 `audit/verify_W1-A.md` §6.3。）
 | 校验脚本 | 6 个全过（1 处断链为既有问题，与本窗口无关，见 §5） |
 
 ### ⚠️ 一处与任务书不符，需要总审知悉
@@ -453,6 +458,7 @@ Infinity 帧       : {"state":"finished","timedOut":true,"time":null}   ← 时�
 ```
 bash build.sh                        TSC OK（211 个 .js）
 node .build/tests/run.js             通过 3696 项，失败 0 项   ← 基线 3695，涨 1
+                                     （不含本窗口未注册的 44 项，合并后 3740）
 node scripts/check-deps.js           全部通过 ✓
 node scripts/check-links.js          44 条链接，断链 1 处（见下）
 python3 scripts/scan-dt-guard.py     扫描 146 个文件，命中 0 处 ✓
