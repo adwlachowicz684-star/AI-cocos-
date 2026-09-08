@@ -36,7 +36,7 @@
  */
 
 import { IRandomSource } from '../_core/types';
-import { clamp, numOr, safeDt } from '../_core/math';
+import { clamp, safeDt } from '../_core/math';
 import { needCount } from '../_core/guard';
 
 // ============================================================
@@ -228,26 +228,6 @@ export interface EmitterOptions {
   readonly aimAtTarget?: boolean;
   /** 固定角度（aimAtTarget=false 时用） */
   readonly fixedAngle?: number;
-  /**
-   * 子弹速度。`shape` 为函数形状时用它；`shape` 为 `ShapeSpec` 时忽略本字段（用 `ShapeSpec.speed`）
-   *
-   * 【⚠️ 为什么函数形状必须单独给一个速度】
-   *
-   * `ShapeFn` 只返回**角度偏移数组**，没有 `ShapeSpec`，
-   * 于是 `_fire` 里拿不到 `spec.speed`，只能填 0。
-   * 实测：`shape: () => [0,1,2]` 的发射器产出 3 颗，
-   * `speed` 全是 **0**；而对照组 `Shapes.ring(3, 10, 'b')` 是 `[10,10,10]`。
-   *
-   * 后果不是"子弹慢一点"，是**全部原地不动**——
-   * 用自定义形状（弹幕玩法最核心的扩展点）打出的弹幕堆在发射点成一团，
-   * 玩家不会认为是 bug，只会觉得"这 Boss 有问题"，
-   * 而开发查碰撞、查渲染都查不到源头（`BulletSpawn.speed` 明明是 README 列名的产出字段）。
-   *
-   * 【为什么不默认给 1 而是 0】
-   * 保持与修复前一致：既有的函数形状调用方不受影响，
-   * 需要速度的显式传。默认 1 会让"只想要角度、速度由别处算"的用法静默变速。
-   */
-  readonly speed?: number;
   /** 业务数据 */
   readonly data?: unknown;
 }
@@ -316,30 +296,10 @@ export class BulletPattern {
       throw new Error(`[BulletPattern] 发射器 id 重复：${opts.id}`);
     }
     // 【构造时校验】配置错误现在就报，别等到 Boss 战打一半
-    /**
-     * 【⚠️ 为什么写成 `!(x > 0)` 而不是 `x <= 0`】
-     *
-     * JS 里 NaN 与任何值比较都是 **false**，所以 `NaN <= 0` 为 false——
-     * 否定式守卫会被 NaN 直接穿透。
-     *
-     * 实测：`interval = NaN` **通过构造校验**（`NaN <= 0` 为 false），
-     * 之后 tick 里 `while (e.time >= NaN)` 恒为 false，跑 600 帧产出 **0** 颗。
-     * 发射器静默罢工，Boss 战打一半突然不弹幕了，
-     * 而这一行注释原本写的正是"配置错误现在就报，别等到 Boss 战打一半"——
-     * 注释承诺了它没做到的事。
-     *
-     * 肯定式写法 `!(x > 0)` 对 NaN / 0 / 负数 / 非数字全部成立，一个都不漏。
-     * （本库把这一类统一叫"模式 A"，是全库最高频的错误形态。）
-     */
-    if (!(opts.interval > 0)) {
+    if (opts.interval <= 0) {
       throw new Error(`[BulletPattern] 发射器 "${opts.id}" 的 interval 必须为正`);
     }
-    /**
-     * 【同理】`shots < 0` 也挡不住 NaN。
-     * `shots = NaN` 时 `e.shotIndex >= NaN` 恒为 false，
-     * "有限次"退化成**无限次**——三连发变成永动机，且不报错。
-     */
-    if (opts.shots !== undefined && !(opts.shots >= 0)) {
+    if (opts.shots !== undefined && opts.shots < 0) {
       throw new Error(`[BulletPattern] 发射器 "${opts.id}" 的 shots 不能为负`);
     }
     const shape = typeof opts.shape === 'function' ? opts.shape : compileShape(opts.shape);
@@ -390,24 +350,6 @@ export class BulletPattern {
 
   get playing(): boolean {
     return this._playing;
-  }
-
-  /**
-   * 卸载（rule5：有 install 就要有对应的 destroy）
-   *
-   * 【为什么必须显式提供，哪怕调用方可以直接丢弃实例】
-   * 常见的写法是"关卡切换时把 BulletPattern 置空"，
-   * 但只要还有别处持有这个引用（序列编排表、Boss 的状态机），
-   * 它就会继续被 tick——而 `_pending` 里还留着上一次的产出，
-   * 下游会在换场后再收到一批"上一关的弹幕"。
-   * 显式 destroy 让"这个发射器已经不存在了"变成一个可调用的动作。
-   */
-  destroy(): void {
-    this._playing = false;
-    this._time = 0;
-    this._pending.length = 0;
-    this._emitters.clear();
-    this._order.length = 0;
   }
 
   /** 重置到未播放（保留配置） */
@@ -499,29 +441,7 @@ export class BulletPattern {
       // dt 很大（掉帧）时可能跨过多次开火间隔，
       // 用 if 会漏掉中间的几次——表现为"卡顿后弹幕缺了一段"。
       let guard = 0;
-      while (e.time >= e.opts.interval && !e.done) {
-        /**
-         * 【⚠️ 为什么命中上限后要把 e.time 清零，而不是直接退出循环】
-         *
-         * 原写法 `while (... && guard++ < 64)` 在截断时**保留了未消耗的时间**。
-         * 于是掉一帧大的（比如 dt = 10s、interval = 0.01s，积压 1000 次）之后：
-         *
-         * ```
-         * 第 1 帧：产出 64 发（剩下的 936 次仍留在 e.time 里）
-         * 第 2 帧：又产出 64 发
-         * 第 3 帧：又产出 64 发   ← 实测连续多帧都是 64
-         * ```
-         *
-         * 表现是"卡了一下之后 Boss 突然连续喷出十几轮弹幕"——
-         * 玩家躲不掉，还会以为是自己卡了导致的判定问题。
-         *
-         * 掉帧本来就说明这一帧不可信，积压的时间不该补发。
-         * 清零后下一帧从干净状态重新累积，弹幕节奏回到正常。
-         */
-        if (guard++ >= 64) {
-          e.time = 0;
-          break;
-        }
+      while (e.time >= e.opts.interval && !e.done && guard++ < 64) {
         e.time -= e.opts.interval;
         this._fire(e);
         e.shotIndex++;
@@ -541,24 +461,8 @@ export class BulletPattern {
     const oy = this.hostY + (opts.offsetY ?? 0);
 
     let aim: number;
-    /**
-     * 【⚠️ 为什么去掉了 `opts.fixedAngle !== undefined` 这个条件】
-     *
-     * `EmitterOptions.aimAtTarget` 的 JSDoc 写的是
-     * "false = 用固定角度（用于固定方向的激光、陷阱）"，
-     * 但原实现要求同时给了 `fixedAngle` 才走固定角度分支，
-     * 否则**仍然自动瞄准目标**——文档承诺与实现相反。
-     *
-     * 实测：目标在正上方 (0,100)，`aimAtTarget: false` 且不传 `fixedAngle`，
-     * 产出子弹的 `angle = 1.5708`（π/2，仍在自动瞄准），而不是期望的 0。
-     *
-     * 按"模式 F"处理：文档与实现冲突时二选一，不能只改一边。
-     * 这里以文档为准（JSDoc 是调用方唯一能看到的契约），
-     * 固定角度缺省取 **0**（+X 方向），并用 `numOr` 收口，
-     * 避免 `fixedAngle: NaN` 把整颗子弹的 angle 变成 NaN。
-     */
-    if (opts.aimAtTarget === false) {
-      aim = numOr(opts.fixedAngle, 0);
+    if (opts.aimAtTarget === false && opts.fixedAngle !== undefined) {
+      aim = opts.fixedAngle;
     } else {
       const dx = this.targetX - ox;
       const dy = this.targetY - oy;
@@ -570,13 +474,7 @@ export class BulletPattern {
 
     const spec = typeof opts.shape === 'function' ? null : opts.shape;
     for (let i = 0; i < offsets.length; i++) {
-      /**
-       * 函数形状没有 `ShapeSpec`，拿不到 `spec.speed`，
-       * 改从 `EmitterOptions.speed` 取（见该字段的注释）。
-       * `numOr` 保证 NaN / Infinity 不会漏进 `BulletSpawn.speed`——
-       * 速度是会被下游直接乘进位移的字段，一个 NaN 就让子弹永久消失。
-       */
-      const speed = spec ? speedAt(spec, i) : numOr(opts.speed, 0);
+      const speed = spec ? speedAt(spec, i) : 0;
       const a = aim + offsets[i];
       this._pending.push({
         typeId: e.typeId,
@@ -652,33 +550,7 @@ export class SequencePlayer {
 
     if (this._index >= this._steps.length) {
       if (this._loop) {
-        /**
-         * 【⚠️ 为什么是"减掉一个周期"而不是 `_time = 0`】
-         *
-         * `_time = 0` 会把本帧**超出周期的那部分时间直接丢掉**，
-         * 于是每个循环的实际周期都被拉长到"下一个 dt 边界"：
-         *
-         * ```
-         * dt = 0.3s、周期 1s → 实测 10.2 秒只触发 9 次（理想 10 次）
-         * ```
-         *
-         * 丢掉的是**每个周期的零头**，而它不会自己补回来——
-         * 循环跑得越久，编排相对背景音乐/其他发射器偏移越远，
-         * 表现为"Boss 招式越打越跟不上 BGM"，而且没法靠调配置修
-         * （配 1 秒就是 1 秒，慢的是实现不是配置）。
-         *
-         * 循环周期取"最后一步的 at"（steps 是相对开始的时刻，
-         * 最后一步的时刻就是一轮走完所需的时间）。
-         * 减掉它而不是归零，余量被保留到下一轮，周期才精确。
-         *
-         * 【为什么还要判 period > 0】
-         * 所有步骤都写在 at=0 时 period 为 0，
-         * `_time -= 0` 没有任何进展——此时退回 `_time = 0` 的旧行为。
-         */
-        const period = this._steps.length > 0
-          ? this._steps[this._steps.length - 1].at
-          : 0;
-        this._time = period > 0 ? this._time - period : 0;
+        this._time = 0;
         this._index = 0;
       } else {
         this._running = false;
