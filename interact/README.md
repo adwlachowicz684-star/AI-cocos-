@@ -75,15 +75,7 @@ sys.interact(ctx);                         // 绑定按键
 | `usedCount(id)` | 已交互次数（对照 `maxUses`） |
 | `setDisabled(id, disabled)` | 手动启停（**比反复 register/unregister 便宜**） |
 | `reset(id)` / `resetAll()` | 重置使用次数（**每日重置的箱子用这个**） |
-| `clear()` | 清空全部注册（**会通知 `onFocusChange(null)`**） |
-| `destroy()` | 卸载：清空并摘掉回调引用 |
-
-**`Interactable` 的位置字段 `pos`（可选）**：
-
-| 传法 | 语义 |
-|---|---|
-| 传 `pos: { x, y }`（`z` 可选） | 受距离与朝向限制 |
-| 不传 | **全局可交互**（UI 按钮等），`distance = 0` / `inRange = true` |
+| `clear()` | 清空全部注册 |
 
 ### 两个排序函数的区别
 
