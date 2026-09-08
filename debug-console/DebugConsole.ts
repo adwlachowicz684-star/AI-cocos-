@@ -148,34 +148,6 @@ export interface DebugConsoleOptions {
   readonly builtins?: boolean;
   /** 未知命令时的模糊匹配建议阈值（0~1，默认 0.5） */
   readonly suggestionThreshold?: number;
-  /**
-   * 命令内部异常是否继续向上抛（默认 **true**，即保持历史行为）
-   *
-   * 【⚠️ 默认值为什么是 true —— 这里踩过一次坑，记下来】
-   *
-   * 本窗口一度把默认值翻成 false（"控制台是最后一道防线，应当吞掉一切"）。
-   * 交叉验收（W1-B）指出这是 review 标准 5 的典型形态——**把故意的设计当成缺陷**，
-   * 证据有三条，都很硬：
-   *
-   * 1. 源码注释原本就写着「内部错误是真 bug，向上抛以便崩溃上报捕获」
-   * 2. `README.md`「错误分级」把"内部异常向上抛"列为**设计约定**，
-   *    并解释理由：「混在一起的话，真 bug 会被当成"玩家输错了"而静默吞掉」
-   * 3. 既有测试 `run_batch10.ts` 固化了该行为
-   *
-   * 【真正的代价在哪里】
-   * 翻转默认值是**破坏性变更**：已经按 README 接入 CrashReporter 的调用方，
-   * 会在毫不知情的情况下**静默丢掉全部内部异常**——
-   * 这正是 README 那条约定要防的事。而我原本担心的
-   * "异常抛回 UI 输入事件处理器"是**调用方可以自己规避**的
-   * （显式传 `rethrow: false` 即可）。
-   *
-   * 一个能自己规避的风险，不该用破坏性变更去替所有人规避。
-   *
-   * 【所以现在的语义】
-   * - 默认 `true`：保持历史行为，内部异常继续向上抛（接崩溃上报）
-   * - 显式 `false`：控制台吞掉异常，只打印一行红字（调试期 / 输入框场景适用）
-   */
-  readonly rethrow?: boolean;
 }
 
 interface Entry {
@@ -217,28 +189,11 @@ export function resetAudit(): void {
 
 export class DebugConsole {
   private readonly _commands = new Map<string, Entry>();
-  /**
-   * 别名 → 命令（**索引**，不是每次遍历比对）
-   *
-   * 【为什么需要它】
-   * `_resolve` 原先对未命中名字的情况遍历**全部命令**比对 alias 数组，
-   * 是 O(命令数 × 别名数)。`complete()` 每次按键都会调 `list()` + `_resolve`，
-   * 几百条命令时补全有可见卡顿。
-   */
-  private readonly _aliasIndex = new Map<string, Entry>();
-  /**
-   * `list()` 的排序结果缓存
-   *
-   * 【为什么敢缓存】命令集合只在 register / unregister 时变化，
-   * 这两处把缓存置空即可，不存在"缓存住了还在变"的窗口。
-   */
-  private _listCache: { visible: readonly CommandDef[]; all: readonly CommandDef[] } | null = null;
   private readonly _history: string[] = [];
   private _historyIndex = -1;
   private readonly _prefix: string;
   private readonly _historyLimit: number;
   private readonly _threshold: number;
-  private readonly _rethrow: boolean;
 
   /** 输出目标（宿主注入） */
   private _output: (line: string) => void = () => {};
@@ -254,10 +209,6 @@ export class DebugConsole {
     if (opts.enabled !== undefined) this._enabledExplicit = true;
     this._historyLimit = clampNum(opts.historyLimit, 1, 1e6, 100);
     this._threshold = opts.suggestionThreshold ?? 0.5;
-    // 默认 true = 保持历史行为（内部异常向上抛，接崩溃上报）。
-    // 详见接口 `rethrow` 的注释：翻默认值是破坏性变更，会让已接入
-    // CrashReporter 的调用方静默丢掉全部内部异常。
-    this._rethrow = opts.rethrow ?? true;
     if (opts.builtins !== false) this._registerBuiltins();
 
     /**
@@ -340,21 +291,11 @@ export class DebugConsole {
         );
       }
     }
-    const entry: Entry = { def };
-    this._commands.set(def.name, entry);
-    for (const a of def.alias ?? []) this._aliasIndex.set(a, entry);
-    this._listCache = null;
+    this._commands.set(def.name, { def });
     return this;
   }
 
   unregister(name: string): boolean {
-    const entry = this._commands.get(name);
-    if (entry) {
-      for (const a of entry.def.alias ?? []) {
-        if (this._aliasIndex.get(a) === entry) this._aliasIndex.delete(a);
-      }
-    }
-    this._listCache = null;
     return this._commands.delete(name);
   }
 
@@ -368,26 +309,14 @@ export class DebugConsole {
     return this._commands.has(name);
   }
 
-  /**
-   * 所有命令（按名排序，隐藏的排在后面）
-   *
-   * 【⚠️ 返回的是缓存数组，调用方不要改它】
-   * 之前每次调用都新建数组 + `sort()`，`complete()` 每次按键都会走到这里，
-   * 命令多时（几百条）补全会卡。排序结果只在命令集合变化时重算。
-   */
+  /** 所有命令（按名排序，隐藏的排在后面） */
   list(includeHidden = false): readonly CommandDef[] {
-    if (this._listCache === null) {
-      const out: CommandDef[] = [];
-      const all: CommandDef[] = [];
-      for (const e of this._commands.values()) {
-        all.push(e.def);
-        if (!e.def.hidden) out.push(e.def);
-      }
-      out.sort((a, b) => a.name.localeCompare(b.name));
-      all.sort((a, b) => a.name.localeCompare(b.name));
-      this._listCache = { visible: out, all };
+    const out: CommandDef[] = [];
+    for (const e of this._commands.values()) {
+      if (!includeHidden && e.def.hidden) continue;
+      out.push(e.def);
     }
-    return includeHidden ? this._listCache.all : this._listCache.visible;
+    return out.sort((a, b) => a.name.localeCompare(b.name));
   }
 
   // ==================== 输入输出绑定 ====================
@@ -466,11 +395,8 @@ export class DebugConsole {
       } else {
         const msg = e instanceof Error ? (e.stack ?? e.message) : String(e);
         this._output(`✗ 命令内部错误：${msg}`);
-        // 内部错误是真 bug → **默认向上抛**，交给上层（通常是 CrashReporter）。
-        // 这是 README「错误分级」的既有约定：不抛的话，真 bug 会被当成
-        // "玩家输错了"而静默吞掉。
-        // 只在调用方明确不要传播时（输入框 / 调试期）传 `rethrow: false`。
-        if (this._rethrow) throw e;
+        // 内部错误是真 bug，向上抛以便崩溃上报捕获
+        throw e;
       }
     }
   }
@@ -618,8 +544,11 @@ export class DebugConsole {
   private _resolve(name: string): Entry | undefined {
     const direct = this._commands.get(name);
     if (direct) return direct;
-    // 别名：走索引，O(1)（原来是 O(命令数) 遍历）
-    return this._aliasIndex.get(name);
+    // 别名
+    for (const e of this._commands.values()) {
+      if (e.def.alias?.includes(name)) return e;
+    }
+    return undefined;
   }
 
   private _suggest(name: string): string | null {
@@ -679,20 +608,6 @@ export class DebugConsole {
   }
 
   private _coerce(def: CommandDef, a: ArgDef, token: string): unknown {
-    /**
-     * 【⚠️ 空串 / 纯空白必须当成"没给值"，不能当成 0】
-     *
-     * `Number('') === 0`、`Number(' ') === 0`，而 `Number.isInteger(0)` 为真。
-     * 引号内空串（`set_hp ""`）是合法 token——`tokenize` 只过滤未加引号的空白，
-     * 于是 `set_hp ""` 会静默把血量**设为 0**，而不是报"参数错误"。
-     *
-     * 调试命令本来就权限很大，这种静默把值打到 0 的写法，
-     * 会让一条手滑的输入直接毁掉正在调试的局。
-     */
-    if ((a.type === 'int' || a.type === 'float') && token.trim() === '') {
-      throw new CommandError(`参数 <${a.name}> 需要数字，收到空值`, usageOf(def));
-    }
-
     switch (a.type) {
       case 'int': {
         const n = Number(token);
