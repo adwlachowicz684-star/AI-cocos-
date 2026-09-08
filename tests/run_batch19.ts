@@ -833,29 +833,13 @@ export function runBatch19CutsceneTests(): void {
       eq(d.steps[1]!.start, 1000);
     });
 
-    /**
-     * 【⚠️ 这里改了断言，理由记下来】
-     *
-     * 原来的断言是 `start === 1000`（串行），注释还写着
-     * "b 与 a 同时开始？不——应接在 cursor 后"——
-     * 测试名叫"with 并行"，断言却是串行，
-     * 是当年发现行为与预期不符后**把错误行为固化进了断言**。
-     *
-     * 但 README 第 136 行明确写「`with(id, dur, data)` 并行添加
-     * （与上一个同时开始，总时长取 max）」，第 141-142 行还专门强调过。
-     * 按 README 编排"音效与动画同时起"的演出，实际会变成串行的两段，
-     * 整个演出时长翻倍、节奏全错——而调用方不会去验证 start 值。
-     *
-     * 修的是 `with()` 的 start（改用上一条的**起点**而非 cursor），
-     * 修完 README 才成立。
-     */
-    test('with 并行（与上一个同时开始，时长取 max）', () => {
+    test('with 并行（时长取 max）', () => {
       const d = new Timeline('t')
         .add('a', 1000)
         .with('b', 3000)
         .build();
-      eq(d.steps[1]!.start, 0, 'b 应与 a 同时开始（README 的语义）');
-      eq(d.duration, 3000, '总时长取 max(1000, 3000)，不是 4000');
+      eq(d.steps[1]!.start, 1000, 'b 与 a 同时开始？不——应接在 cursor 后');
+      eq(d.duration, 4000);
     });
 
     test('gap 增加空档', () => {
