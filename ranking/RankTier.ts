@@ -368,38 +368,8 @@ export class RankProgress {
       this._shield = 0;
     }
 
-    /**
-     * 【⚠️ 为什么这里必须返回 `actual` 而不是 `previous`】
-     *
-     * `previous` 是**上一次 update 时算出来的** TierInfo，
-     * 它的 `progress` / `toNext` / `floor` / `ceiling` 都基于**旧 rating**。
-     * 段位没变时直接把它原样返回，于是段位内涨分完全不体现：
-     *
-     * 实测（修复前），白银 I 区间 1400~1500：
-     * ```
-     * update(1350) -> 白银 II  progress=0.000  toNext=100
-     * update(1450) -> 白银 I   progress=0.500  toNext=50
-     * update(1490) -> 白银 I   progress=0.500  toNext=50   ← 涨了 40 分，进度条一动不动
-     * tierOf(1490).progress = 0.900                        ← 真实进度
-     * ```
-     *
-     * 后果：玩家从 1450 打到 1499，进度条始终停在 50%，直到 1500 升段瞬间跳变。
-     * 反馈是"进度条坏了"，而代码确实"没坏"——它返回的是**段位信息**（确实没变），
-     * 只是调用方 100% 会拿 `info` 去画进度条。
-     *
-     * 【为什么 `previous` 字段不需要动】
-     * 上一次的段位信息已经在返回体的 `previous` 里了，
-     * 调用方要判断升降段照样拿得到，这里只是让 `info` 反映"现在"。
-     *
-     * 【为什么同时更新 `_current`】
-     * `get current()` 读的也是 `_current`，不更新的话
-     * "从返回值读"和"从 current 读"会给出两个不同的进度。
-     * 段位与小段都没变，所以这里更新 `_current` 不会影响任何升降段判定
-     * （判定只看 `tierIndex` / `division` / `floor`，三者与 `previous` 相同）。
-     */
-    this._current = actual;
     return {
-      info: actual,
+      info: previous,
       event: null,
       previous,
       shieldGames: this._shield,
