@@ -904,6 +904,179 @@ export function runPhase10W2BTests(): void {
   });
 
   // ============================================================
+  // 二次任务 · [curse] 两条与 blessing 同构的洞（§3.8，W2-A 附议派工）
+  //
+  // 【为什么这两条不在原清单里】
+  // W8-B 修 blessing 时把 `pick()` 权重与 `importState` 通知一并修了，
+  // 而 curse 与 blessing 是同构单元——同一个 bug 在 curse 上原样存在。
+  // 上一轮我按纪律 1.1「不擅自扩范围」只登记未修；W2-A 验收时附议
+  // 「建议派 W2-B 补修」，本轮据此补修 + 补对照用例。
+  // ============================================================
+  describe('curse · 二次任务：pick 的 NaN 权重（同构洞 1）', () => {
+    /**
+     * 确定性随机源（LCG），保证 300 次抽样的分布可复现。
+     * 用 Math.random 的话这条用例会偶发失败，那就失去了护栏的意义。
+     */
+    function makeRng(seed = 1) {
+      let s = seed >>> 0;
+      return {
+        next(): number {
+          s = (s * 1664525 + 1013904223) >>> 0;
+          return s / 4294967296;
+        },
+      };
+    }
+
+    test('⚠️ NaN 权重不得让轮盘赌退化成"永远抽池尾"（修复前 300/300 命中最后一个）', () => {
+      const defs = [
+        { ...curseDef('c1', [{ stat: 'atk', op: 'add' as const, value: 1 }]), weight: 1 },
+        { ...curseDef('c2', [{ stat: 'atk', op: 'add' as const, value: 1 }]), weight: 1 },
+        { ...curseDef('c3', [{ stat: 'atk', op: 'add' as const, value: 1 }]), weight: NaN },
+      ];
+      const cs = makeCurse(defs, { allowDuplicate: true });
+      const rng = makeRng();
+      const hit: Record<string, number> = { c1: 0, c2: 0, c3: 0 };
+      for (let i = 0; i < 300; i++) hit[cs.pick(rng, 1)[0].id]++;
+
+      /**
+       * 【修复前的实测】`{"c1":0, "c2":0, "c3":300}`
+       * total 变 NaN → `total <= 0` 恒 false → `r -= NaN` 让 `r < 0` 恒 false
+       * → idx 停在初值 `pool.length - 1` → 每次都是池子最后一个。
+       */
+      assert(hit.c3 < 300, `NaN 权重不该让 c3 被抽中 300/300 次，实际 ${JSON.stringify(hit)}`);
+      assert(hit.c1 > 0 && hit.c2 > 0, `c1 / c2 应能被抽到，实际 ${JSON.stringify(hit)}`);
+    });
+
+    test('⚠️ 负权重同样被夹到 0（NaN 是"非有限"，负数是"合法但荒谬"）', () => {
+      const defs = [
+        { ...curseDef('c1', [{ stat: 'atk', op: 'add' as const, value: 1 }]), weight: 1 },
+        { ...curseDef('c2', [{ stat: 'atk', op: 'add' as const, value: 1 }]), weight: -5 },
+      ];
+      const cs = makeCurse(defs, { allowDuplicate: true });
+      const hit: Record<string, number> = { c1: 0, c2: 0 };
+      const rng = makeRng(7);
+      for (let i = 0; i < 200; i++) hit[cs.pick(rng, 1)[0].id]++;
+      eq(hit.c2, 0, '负权重应被夹到 0，不该被抽中');
+      eq(hit.c1, 200);
+    });
+
+    test('正常权重下的分布仍然均衡（防止矫枉过正）', () => {
+      const defs = [
+        { ...curseDef('c1', [{ stat: 'atk', op: 'add' as const, value: 1 }]), weight: 1 },
+        { ...curseDef('c2', [{ stat: 'atk', op: 'add' as const, value: 1 }]), weight: 1 },
+        { ...curseDef('c3', [{ stat: 'atk', op: 'add' as const, value: 1 }]), weight: 1 },
+      ];
+      const cs = makeCurse(defs, { allowDuplicate: true });
+      const rng = makeRng(42);
+      const hit: Record<string, number> = { c1: 0, c2: 0, c3: 0 };
+      for (let i = 0; i < 300; i++) hit[cs.pick(rng, 1)[0].id]++;
+      // 300 次分给 3 个等权重项，每个约 100；给足余量防偶发
+      for (const k of ['c1', 'c2', 'c3']) {
+        assert(hit[k] > 60, `等权重下 ${k} 应大致均衡，实际 ${JSON.stringify(hit)}`);
+      }
+    });
+
+    test('权重悬殊时仍按权重倾斜（防止矫枉过正）', () => {
+      const defs = [
+        { ...curseDef('c1', [{ stat: 'atk', op: 'add' as const, value: 1 }]), weight: 9 },
+        { ...curseDef('c2', [{ stat: 'atk', op: 'add' as const, value: 1 }]), weight: 1 },
+      ];
+      const cs = makeCurse(defs, { allowDuplicate: true });
+      const rng = makeRng(9);
+      const hit: Record<string, number> = { c1: 0, c2: 0 };
+      for (let i = 0; i < 300; i++) hit[cs.pick(rng, 1)[0].id]++;
+      assert(hit.c1 > hit.c2 * 2, `9:1 的权重应明显偏向 c1，实际 ${JSON.stringify(hit)}`);
+    });
+
+    test('pick 多次不重复、且 filter 仍生效（防止矫枉过正）', () => {
+      const defs = [
+        { ...curseDef('c1', [{ stat: 'atk', op: 'add' as const, value: 1 }]), weight: 1 },
+        { ...curseDef('c2', [{ stat: 'atk', op: 'add' as const, value: 1 }]), weight: 1 },
+        { ...curseDef('c3', [{ stat: 'atk', op: 'add' as const, value: 1 }]), weight: 1 },
+      ];
+      const cs = makeCurse(defs, { allowDuplicate: false });
+      const picked = cs.pick(makeRng(3), 2).map((d) => d.id);
+      eq(picked.length, 2);
+      eq(new Set(picked).size, 2, '同一次 pick 内不应重复');
+
+      const only1 = cs.pick(makeRng(3), 1, (d) => d.id === 'c1').map((d) => d.id);
+      eq(only1.join(','), 'c1', 'filter 仍应生效');
+    });
+  });
+
+  describe('curse · 二次任务：importState 触发 onChange（同构洞 2）', () => {
+    function makeTracking(ids: string[]) {
+      const log: string[] = [];
+      const cs = new CurseSystem({
+        defs: ids.map((id) => curseDef(id, [{ stat: 'atk', op: 'add' as const, value: 1 }])),
+        allowDuplicate: true,
+        nowProvider: () => 0,
+        onChange: (id, action) => log.push(`${action}:${id}`),
+      });
+      return { cs, log };
+    }
+
+    test('⚠️ 导入新增的诅咒要通知（修复前：一次都不通知）', () => {
+      const { cs, log } = makeTracking(['c1']);
+      log.length = 0;
+      cs.importState([{ id: 'c1', since: 0, stacks: 4 }]);
+      assert(log.includes('add:c1'), `导入后应通知 add:c1，实际 ${JSON.stringify(log)}`);
+      eq(cs.stacks('c1'), 4);
+    });
+
+    test('⚠️ 导入后消失的诅咒要通知 remove（修复前：UI 残留图标）', () => {
+      const { cs, log } = makeTracking(['c1', 'c2']);
+      cs.add('c1');
+      cs.add('c2');
+      log.length = 0;
+      cs.importState([]);
+      assert(log.includes('remove:c1'), `应通知 remove:c1，实际 ${JSON.stringify(log)}`);
+      assert(log.includes('remove:c2'), `应通知 remove:c2，实际 ${JSON.stringify(log)}`);
+      eq(cs.count, 0);
+    });
+
+    test('⚠️ 部分消失时：留下的报 add、消失的报 remove', () => {
+      const { cs, log } = makeTracking(['c1', 'c2']);
+      cs.add('c1');
+      cs.add('c2');
+      log.length = 0;
+      cs.importState([{ id: 'c2', since: 0, stacks: 3 }]);
+      assert(log.includes('add:c2'), `留下的 c2 应报 add，实际 ${JSON.stringify(log)}`);
+      assert(log.includes('remove:c1'), `消失的 c1 应报 remove，实际 ${JSON.stringify(log)}`);
+    });
+
+    test('每个 id 恰好通知一次，不重复（幂等性）', () => {
+      const { cs, log } = makeTracking(['c1', 'c2', 'c3']);
+      cs.add('c1');
+      cs.add('c2');
+      log.length = 0;
+      cs.importState([
+        { id: 'c2', since: 0, stacks: 2 },
+        { id: 'c3', since: 0, stacks: 1 },
+      ]);
+      const c2Count = log.filter((l) => l.endsWith(':c2')).length;
+      eq(c2Count, 1, '同一个 id 在 before ∪ after 里只应出现一次');
+      eq(log.length, 3, 'c1(remove) + c2(add) + c3(add) = 3 条');
+    });
+
+    test('未配 onChange 时导入不报错（防止矫枉过正）', () => {
+      const cs = makeCurse([
+        curseDef('c1', [{ stat: 'atk', op: 'add' as const, value: 1 }]),
+      ]);
+      cs.importState([{ id: 'c1', since: 0, stacks: 2 }]);
+      eq(cs.stacks('c1'), 2);
+    });
+
+    test('配置里已删除的 id 不通知（防止矫枉过正）', () => {
+      const { cs, log } = makeTracking(['c1']);
+      log.length = 0;
+      cs.importState([{ id: 'ghost', since: 0, stacks: 1 }]);
+      eq(log.length, 0, '配置里没有的 id 应被跳过，不该凭空通知');
+      eq(cs.count, 0);
+    });
+  });
+
+  // ============================================================
   // P2 · [hitbox] 采样数硬编码
   // ============================================================
   describe('hitbox · 采样密度可配（P2）', () => {
@@ -981,6 +1154,70 @@ export function runPhase10W2BTests(): void {
       lb.submit({ playerId: 'p1', name: 'p1', score: 1, at: 1 });
       lb.destroy();
       eq(lb.size, 0);
+    });
+  });
+
+  // ============================================================
+  // P2 · [leaderboard] Lb5 的**现状护栏**（刻意不修，只把现状钉住）
+  //
+  // 【为什么要有这一组】
+  // `submit()` 是"末位比较 + push + 全量 sort"，多一次 O(n log n)，
+  // 我在 §3.5 判定**不改成二分插入**（收益常数级，风险是动到已跑通大量用例的路径）。
+  // W2-A 验收时指出："判定保持现状是合理的，但'不修'的地方最好也有一条用例
+  // 把现状钉住，否则将来别人会把它当缺陷重开一遍。"——本组即为此而写。
+  //
+  // 【注意】这 4 条是"现状上锁"型，不是"修复前会失败"型：
+  // 它们断言的是 submit 的**语义契约**，任何改动（包括"优化"）都不应破坏它。
+  // ============================================================
+  describe('leaderboard · Lb5 现状护栏：submit 的语义契约（刻意不优化）', () => {
+    test('插入后榜单始终有序（升序 / 降序都对）', () => {
+      const desc = new Leaderboard({ order: 'desc' });
+      for (const s of [5, 1, 9, 3, 7, 2, 8]) {
+        desc.submit({ playerId: `p${s}`, name: `p${s}`, score: s, at: s });
+      }
+      const scores = desc.ranked().map((e) => e.score);
+      eq(scores.join(','), '9,8,7,5,3,2,1', 'desc 应从高到低');
+
+      const asc = new Leaderboard({ order: 'asc' });
+      for (const s of [5, 1, 9, 3, 7, 2, 8]) {
+        asc.submit({ playerId: `p${s}`, name: `p${s}`, score: s, at: s });
+      }
+      eq(asc.ranked().map((e) => e.score).join(','), '1,2,3,5,7,8,9', 'asc 应从低到高');
+    });
+
+    test('乱序插入 N 条后仍然是全序（不是局部有序）', () => {
+      const lb = new Leaderboard({ capacity: 1000 });
+      // 用固定序列，保证可复现
+      const seq: number[] = [];
+      let x = 7;
+      for (let i = 0; i < 200; i++) { x = (x * 37 + 11) % 997; seq.push(x); }
+      seq.forEach((s, i) => lb.submit({ playerId: `p${i}`, name: `p${i}`, score: s, at: i }));
+
+      const scores = lb.ranked().map((e) => e.score);
+      for (let i = 1; i < scores.length; i++) {
+        assert(scores[i - 1] >= scores[i], `第 ${i} 位 ${scores[i - 1]} 应 >= ${scores[i]}`);
+      }
+    });
+
+    test('满容量时淘汰末位，且新成绩排不进则返回 false', () => {
+      const lb = new Leaderboard({ capacity: 3, order: 'desc' });
+      lb.submit({ playerId: 'a', name: 'a', score: 30, at: 1 });
+      lb.submit({ playerId: 'b', name: 'b', score: 20, at: 2 });
+      lb.submit({ playerId: 'c', name: 'c', score: 10, at: 3 });
+
+      eq(lb.submit({ playerId: 'd', name: 'd', score: 5, at: 4 }), false, '排不进应拒绝');
+      eq(lb.size, 3);
+      eq(lb.submit({ playerId: 'e', name: 'e', score: 25, at: 5 }), true, '能进则应挤掉末位');
+      eq(lb.ranked().map((e) => e.playerId).join(','), 'a,e,b', '末位 10 被淘汰');
+    });
+
+    test('bestPerPlayer 下去重与最好成绩保留的语义不变', () => {
+      const lb = new Leaderboard({ bestPerPlayer: true, order: 'desc' });
+      eq(lb.submit({ playerId: 'p1', name: 'p1', score: 10, at: 1 }), true);
+      eq(lb.submit({ playerId: 'p1', name: 'p1', score: 5, at: 2 }), false, '更差的成绩应被拒');
+      eq(lb.submit({ playerId: 'p1', name: 'p1', score: 20, at: 3 }), true, '更好的成绩应替换');
+      eq(lb.size, 1);
+      eq(lb.ranked()[0].score, 20);
     });
   });
 

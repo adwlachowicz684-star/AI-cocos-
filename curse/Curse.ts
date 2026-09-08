@@ -461,12 +461,34 @@ export class CurseSystem {
     for (let k = 0; k < n; k++) {
       if (pool.length === 0) break;
       let total = 0;
-      for (const d of pool) total += d.weight ?? 1;
+      /**
+       * 【⚠️ 曾经的 bug：`?? 1` 挡不住 NaN 权重（与 blessing / affix 同源）】
+       *
+       * `??` 只挡 null / undefined。某条定义的 `weight` 是 NaN 时：
+       *   ① `total` 变成 NaN；
+       *   ② `if (total <= 0) break` —— NaN 比较恒为 false，**这道防线形同虚设**；
+       *   ③ 循环里 `r -= NaN` 让 `r < 0` 也恒为 false → `idx` 停在
+       *      初值 `pool.length - 1` → **永远抽中池子最后一个**。
+       *
+       * 实测（3 个诅咒，`c3` 的 weight 为 NaN，`pick` × 300 次）：
+       *   `{"c1":0, "c2":0, "c3":300}`   ← 权重表静默失效
+       *   对照（权重全为 1）：`{"c1":98, "c2":104, "c3":98}`
+       *
+       * 症状比崩溃难查得多：不报错、不抛异常，只是"这个诅咒怎么老是抽到"，
+       * 而配置表里权重写得明明白白是别的数。
+       *
+       * 【为什么是 Math.max(0, numOr(...)) 两层】
+       * `numOr` 处理非有限值（NaN / Infinity → 0），`Math.max(0, ...)`
+       * 再处理"合法但荒谬"的负权重——负权重会让 total 变小甚至为负，
+       * 同样让轮盘赌失去意义。与 `blessing.pick()` 的收口方式逐字一致，
+       * 两边口径统一，避免各修各的。
+       */
+      for (const d of pool) total += Math.max(0, numOr(d.weight ?? 1, 0));
       if (total <= 0) break;
       let r = rng.next() * total;
       let idx = pool.length - 1;
       for (let j = 0; j < pool.length; j++) {
-        r -= pool[j].weight ?? 1;
+        r -= Math.max(0, numOr(pool[j].weight ?? 1, 0));
         if (r < 0) { idx = j; break; }
       }
       out.push(pool[idx]);
@@ -505,6 +527,14 @@ export class CurseSystem {
    * 修法：层数取 >= 0 的整数，since 非有限时回落到当前时间。
    */
   importState(s: ReadonlyArray<{ id: string; since: number; stacks?: number }>): void {
+    /**
+     * 导入前持有哪些 —— 用于给"导入后消失的"补一次移除通知
+     *
+     * 【为什么必须在 clear() 之前快照】
+     * `this._active.clear()` 之后就再也无从知道"谁被导入顶掉了"，
+     * 而 UI 恰恰需要知道这件事（见下面的 onChange 说明）。
+     */
+    const before = [...this._active.keys()];
     this._active.clear();
     /**
      * 【⚠️ 曾经的 bug：导入后代价计数与"已激活"状态对不上】
@@ -526,6 +556,33 @@ export class CurseSystem {
         since: numOr(e.since, this._now()),
         stacks: Math.max(0, Math.floor(numOr(e.stacks, 1))),
       });
+    }
+
+    /**
+     * 【⚠️ 曾经的 bug：导入后完全不通知，UI 停在读档前的画面】
+     *
+     * 实测（修复前）：
+     *   `add('c1')`                      → onChange: ["add:c1"]
+     *   `importState([{c1, stacks:4}])`  → onChange **仍是 ["add:c1"]**，层数却已是 4
+     *   `importState([])`                → onChange **仍是 ["add:c1"]**，诅咒已全部消失
+     *
+     * 第二个更严重：读档后一条诅咒都不剩，UI 上却还挂着三个图标，
+     * 直到下一次别的操作触发通知才"突然消失"。这是模式 C
+     * （`importState` 绕过校验与事件）里**只修了校验、没修事件**的那一半
+     * ——本窗口上一轮修的正是 stacks 校验这一半，这里是另一半。
+     *
+     * 【为什么对 before ∪ after 全量通知，而不是只通知"新增的"】
+     * 只通知新增的，"消失的"就永远没有出口：UI 无法知道该撤下哪个图标。
+     * 全量通知后每个 id 恰好一次，调用方不需要自己 diff 前后差异。
+     *
+     * 【为什么 action 用 'add' / 'remove' 而不是加个 'change'】
+     * `onChange` 的签名是 `(id, 'add' | 'remove')`，与 `add()` 的语义一致：
+     * `add()` 对"已持有、只加层数"的情况同样通知 `'add'`。
+     * 所以这里对导入后仍存在的 id 一律报 `'add'`，
+     * 对导入后消失的报 `'remove'` —— 不新增 action，避免 breaking 调用方。
+     */
+    for (const id of new Set([...before, ...this._active.keys()])) {
+      this._onChange?.(id, this._active.has(id) ? 'add' : 'remove');
     }
   }
 
