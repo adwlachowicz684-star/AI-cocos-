@@ -29,8 +29,6 @@
  * 【无引擎依赖】
  */
 
-import { numOr } from '../_core/math';
-
 // ==================== 类型 ====================
 
 export type CurseOp = 'add' | 'mul' | 'set';
@@ -120,19 +118,6 @@ export interface CurseSystemOptions {
    * 而增益的边际收益递减。这不是有趣的选择。
    */
   readonly allowDuplicate?: boolean;
-  /**
-   * 时间源（默认 `Date.now`）
-   *
-   * 【为什么要注入】
-   * 原实现 `add(id, now = Date.now())` 让模块内部主动去"找"墙钟时间，
-   * 违反 rule2（配置驱动 / 依赖注入）：
-   *   - 回放、确定性测试无法控制时间推进
-   *   - "持有 N 秒后自动解除"这类条件在快进时算错
-   *   - 单测里想构造"过了 10 秒"只能真的 sleep 或改全局 Date
-   *
-   * 保持默认值为 `Date.now`，所以既有调用方（不传也能用）不受影响。
-   */
-  readonly nowProvider?: () => number;
 }
 
 /** 一个已获得的诅咒 */
@@ -162,7 +147,6 @@ export class CurseSystem {
   ) => boolean;
   private readonly _onChange?: (id: string, action: 'add' | 'remove') => void;
   private readonly _allowDuplicate: boolean;
-  private readonly _now: () => number;
 
   /** 统计：某诅咒的代价已触发次数 */
   private readonly _costCount = new Map<string, number>();
@@ -172,7 +156,6 @@ export class CurseSystem {
     this._checker = opts.checker;
     this._onChange = opts.onChange;
     this._allowDuplicate = opts.allowDuplicate ?? false;
-    this._now = opts.nowProvider ?? (() => Date.now());
 
     for (const d of opts.defs) {
       if (this._defs.has(d.id)) throw new Error(`[Curse] 诅咒 id 重复：${d.id}`);
@@ -205,8 +188,8 @@ export class CurseSystem {
 
   // ==================== 获得 / 移除 ====================
 
-  /** 获得诅咒（不传 now 时用注入的时间源，默认 Date.now） */
-  add(id: string, now = this._now()): boolean {
+  /** 获得诅咒 */
+  add(id: string, now = Date.now()): boolean {
     const def = this._defs.get(id);
     if (!def) {
       throw new Error(`[Curse] 未定义的诅咒：${id}`);
@@ -384,33 +367,17 @@ export class CurseSystem {
     return this._active.get(id)?.stacks ?? 0;
   }
 
-  /** 全部增益（重复获得时按层数累加 add / 累乘 mul，set 不随层数缩放） */
+  /** 全部增益（重复获得时按层数累加 add / 累乘 mul） */
   effects(): CurseEffect[] {
     const out: CurseEffect[] = [];
     for (const c of this._active.values()) {
       const n = c.stacks;
       for (const e of c.def.effects) {
         if (n === 1) { out.push(e); continue; }
-        /**
-         * 【⚠️ 曾经的 bug：`set` 效果被乘了层数】
-         *
-         * 原实现只有「mul → 乘方，其它 → 乘以 n」两个分支，
-         * 于是 `set` 被当成 `add` 处理：
-         *
-         *   2 层「最大生命设为 100」→ value = 200
-         *
-         * `set` 的语义是**覆盖**（"最大生命减半"这类固定值），
-         * 叠加两层应该是 100，不是 200。
-         * 与 blessing / meta 的同类问题同源：三个单元都把覆盖语义
-         * 和累加语义混在了一个表达式里。
-         *
-         * 表现为"诅咒叠到 2 层时数值突然翻倍"，
-         * 而数值策划表里写的是固定值——看代码的人会以为策划表写错了。
-         */
         out.push({
           stat: e.stat,
           op: e.op,
-          value: e.op === 'mul' ? Math.pow(e.value, n) : (e.op === 'set' ? e.value : e.value * n),
+          value: e.op === 'mul' ? Math.pow(e.value, n) : e.value * n,
         });
       }
     }
@@ -436,20 +403,6 @@ export class CurseSystem {
    *
    * 【默认排除已持有的】
    * 不允许重复时，已持有的不该再出现在选项里。
-   *
-   * 【为什么与 blessing.pick() 是两份独立实现，而不抽成公共函数】
-   * 这两段代码逐行同构，看上去就该抽走。但铁律 6 禁止单元之间横向 import，
-   * 而 `_core/` 是共享层且**严禁本窗口修改**——放 `_core` 这条路走不通。
-   * 抽到第三个新目录又会给整个库多一个"什么都能依赖"的垃圾桶层。
-   *
-   * 所以这里明确写清：**两份是刻意独立的。**
-   * 理由不只是"规则不允许"，还有业务语义：
-   * 祝福的池子只按稀有度过滤，诅咒这里额外要排除已持有的、
-   * 且"权重"在诅咒侧的语义是"出现概率"而非"稀有度权重"。
-   * 两边的演化方向不同（诅咒侧正在加"代价上限"过滤），
-   * 强行共用会在第一次分叉时被迫加参数开关。
-   *
-   * 【改这里的注意】如果将来真要合并，必须同步改 blessing/README.md 的说明。
    */
   pick(rng: { next(): number }, n: number, filter?: (d: CurseDef) => boolean): CurseDef[] {
     let pool = this.all.filter((d) => {
@@ -461,34 +414,12 @@ export class CurseSystem {
     for (let k = 0; k < n; k++) {
       if (pool.length === 0) break;
       let total = 0;
-      /**
-       * 【⚠️ 曾经的 bug：`?? 1` 挡不住 NaN 权重（与 blessing / affix 同源）】
-       *
-       * `??` 只挡 null / undefined。某条定义的 `weight` 是 NaN 时：
-       *   ① `total` 变成 NaN；
-       *   ② `if (total <= 0) break` —— NaN 比较恒为 false，**这道防线形同虚设**；
-       *   ③ 循环里 `r -= NaN` 让 `r < 0` 也恒为 false → `idx` 停在
-       *      初值 `pool.length - 1` → **永远抽中池子最后一个**。
-       *
-       * 实测（3 个诅咒，`c3` 的 weight 为 NaN，`pick` × 300 次）：
-       *   `{"c1":0, "c2":0, "c3":300}`   ← 权重表静默失效
-       *   对照（权重全为 1）：`{"c1":98, "c2":104, "c3":98}`
-       *
-       * 症状比崩溃难查得多：不报错、不抛异常，只是"这个诅咒怎么老是抽到"，
-       * 而配置表里权重写得明明白白是别的数。
-       *
-       * 【为什么是 Math.max(0, numOr(...)) 两层】
-       * `numOr` 处理非有限值（NaN / Infinity → 0），`Math.max(0, ...)`
-       * 再处理"合法但荒谬"的负权重——负权重会让 total 变小甚至为负，
-       * 同样让轮盘赌失去意义。与 `blessing.pick()` 的收口方式逐字一致，
-       * 两边口径统一，避免各修各的。
-       */
-      for (const d of pool) total += Math.max(0, numOr(d.weight ?? 1, 0));
+      for (const d of pool) total += d.weight ?? 1;
       if (total <= 0) break;
       let r = rng.next() * total;
       let idx = pool.length - 1;
       for (let j = 0; j < pool.length; j++) {
-        r -= Math.max(0, numOr(pool[j].weight ?? 1, 0));
+        r -= pool[j].weight ?? 1;
         if (r < 0) { idx = j; break; }
       }
       out.push(pool[idx]);
@@ -505,104 +436,20 @@ export class CurseSystem {
     }));
   }
 
-  /**
-   * 导入存档
-   *
-   * 【⚠️ 曾经的 bug：stacks 不做校验，负数让增益反向】
-   *
-   * 原实现 `stacks: e.stacks ?? 1` 有两个洞：
-   *
-   *   1. `??` 只挡 null / undefined，**挡不住 NaN**
-   *      → `Math.pow(value, NaN)` = NaN → 属性被写成 NaN
-   *   2. 负数直接进来 → `effects()` 里 `Math.pow(value, -3)` 取**倒数**
-   *      → 减益变增益（0.5 的"减半"变成 8 倍的"增强"），且不报任何错
-   *
-   * 存档是会被改的（本地文件、云同步冲突、跨版本残留），
-   * "坏存档能写进任何值"是模式 C 的典型形态：
-   * 导入路径绕开了 `add()` 的校验，于是成了唯一的后门。
-   *
-   * 实测（修复前）：`importState([{id:'c1', since:0, stacks:-3}])`
-   *   → stacks = -3，mul 2 的效果变成 **0.125**
-   *
-   * 修法：层数取 >= 0 的整数，since 非有限时回落到当前时间。
-   */
   importState(s: ReadonlyArray<{ id: string; since: number; stacks?: number }>): void {
-    /**
-     * 导入前持有哪些 —— 用于给"导入后消失的"补一次移除通知
-     *
-     * 【为什么必须在 clear() 之前快照】
-     * `this._active.clear()` 之后就再也无从知道"谁被导入顶掉了"，
-     * 而 UI 恰恰需要知道这件事（见下面的 onChange 说明）。
-     */
-    const before = [...this._active.keys()];
     this._active.clear();
-    /**
-     * 【⚠️ 曾经的 bug：导入后代价计数与"已激活"状态对不上】
-     *
-     * `_costCount` 只在 `remove` / `clear` 时清，
-     * 于是"清掉旧档→导入新档"之后，新档的诅咒**沿用了上一局的代价计数**。
-     * `describe()` 里显示的"代价已触发 N 次"是上一局留下的数字，
-     * 读档后 UI 一上来就显示"已触发 7 次"，而这一局一次都还没触发过。
-     *
-     * 语义上"导入"等价于"用这份存档重建状态"，
-     * 那计数就该跟状态一起被重建——历史代价不属于这一局。
-     */
-    this._costCount.clear();
     for (const e of s) {
       const def = this._defs.get(e.id);
       if (!def) continue;   // 配置里删了：跳过
       this._active.set(e.id, {
         def,
-        since: numOr(e.since, this._now()),
-        stacks: Math.max(0, Math.floor(numOr(e.stacks, 1))),
+        since: e.since ?? Date.now(),
+        stacks: e.stacks ?? 1,
       });
-    }
-
-    /**
-     * 【⚠️ 曾经的 bug：导入后完全不通知，UI 停在读档前的画面】
-     *
-     * 实测（修复前）：
-     *   `add('c1')`                      → onChange: ["add:c1"]
-     *   `importState([{c1, stacks:4}])`  → onChange **仍是 ["add:c1"]**，层数却已是 4
-     *   `importState([])`                → onChange **仍是 ["add:c1"]**，诅咒已全部消失
-     *
-     * 第二个更严重：读档后一条诅咒都不剩，UI 上却还挂着三个图标，
-     * 直到下一次别的操作触发通知才"突然消失"。这是模式 C
-     * （`importState` 绕过校验与事件）里**只修了校验、没修事件**的那一半
-     * ——本窗口上一轮修的正是 stacks 校验这一半，这里是另一半。
-     *
-     * 【为什么对 before ∪ after 全量通知，而不是只通知"新增的"】
-     * 只通知新增的，"消失的"就永远没有出口：UI 无法知道该撤下哪个图标。
-     * 全量通知后每个 id 恰好一次，调用方不需要自己 diff 前后差异。
-     *
-     * 【为什么 action 用 'add' / 'remove' 而不是加个 'change'】
-     * `onChange` 的签名是 `(id, 'add' | 'remove')`，与 `add()` 的语义一致：
-     * `add()` 对"已持有、只加层数"的情况同样通知 `'add'`。
-     * 所以这里对导入后仍存在的 id 一律报 `'add'`，
-     * 对导入后消失的报 `'remove'` —— 不新增 action，避免 breaking 调用方。
-     */
-    for (const id of new Set([...before, ...this._active.keys()])) {
-      this._onChange?.(id, this._active.has(id) ? 'add' : 'remove');
     }
   }
 
   // ==================== 调试 ====================
-
-  /**
-   * 【铁律 5】可卸载
-   *
-   * 【为什么原先没有】
-   * 这个类的字段全是自己的 Map，没有注册任何外部监听器，
-   * 于是"看起来不需要 destroy"。但调用方持有的 `onChange`、
-   * 以及"系统是否还活着"这件事，仍然需要一个明确的终点：
-   * 切场景时没有 destroy，就只剩"把引用置空靠 GC"这一条路，
-   * 而 `_active` 里残留的诅咒在下一局被 `importState` 之前仍可被读到。
-   */
-  destroy(): void {
-    this._active.clear();
-    this._costCount.clear();
-    this._defs.clear();
-  }
 
   describe(): string {
     const act = this.active;
