@@ -98,9 +98,6 @@ export class Leaderboard {
   /** 内部存储（始终有序） */
   private _entries: ScoreEntry[] = [];
 
-  /** 上一次 importEntries 丢弃的非法条目数 */
-  private _lastDroppedCount = 0;
-
   constructor(opts: LeaderboardOptions = {}) {
     this._capacity = clampNum(opts.capacity, 1, 1e7, 100);
     this._order = opts.order ?? 'desc';
@@ -250,30 +247,11 @@ export class Leaderboard {
    * - competition：100,100,90 → 1,1,3
    * - ordinal：    100,100,90 → 1,2,3
    */
-  ranked(start = 0, end = Number.POSITIVE_INFINITY): RankedEntry[] {
+  ranked(): RankedEntry[] {
     const out: RankedEntry[] = [];
     let rank = 0;
     let prevScore: number | null = null;
     let distinctSeen = 0;
-
-    /**
-     * 【⚠️ 曾经的 bug：每次查询都全量展开整个榜单】
-     *
-     * `ranked()` 对**每一条**都做 `{ ...e }`，而 `capacity` 的上界是 1e7。
-     * 于是 `page()` / `rankOf()` / `around()` / `top()`
-     * 每一次调用都要分配 n 个对象再排序——
-     * 翻一页 = 分配 1000 万个对象。
-     *
-     * 实测（修复前）：2 万条 × 60 次 `page()` = **913ms**（纯分配开销）；
-     * 按 1e7 外推，一次翻页就是秒级卡顿直到 OOM，而且**不报错**，
-     * 只是"越用越慢"——这类问题在测试环境（榜单小）永远测不出来。
-     *
-     * 修法：名次必须从头累计（dense 要知道前面出现过几种分数），
-     * 所以扫描仍是 O(n)；但**只为 [start, end) 区间内的条目分配对象**，
-     * 把分配量从 O(n) 降到 O(每页条数)。
-     */
-    const lo = Math.max(0, start);
-    const hi = Math.min(end, this._entries.length);
 
     for (let i = 0; i < this._entries.length; i++) {
       const e = this._entries[i];
@@ -293,7 +271,7 @@ export class Leaderboard {
        */
       if (this._rankMode === 'ordinal') {
         rank = i + 1;
-        if (i >= lo && i < hi) out.push({ ...e, rank });
+        out.push({ ...e, rank });
         continue;
       }
 
@@ -306,7 +284,7 @@ export class Leaderboard {
       }
       // 同分：dense / competition 沿用上一条的名次
 
-      if (i >= lo && i < hi) out.push({ ...e, rank });
+      out.push({ ...e, rank });
     }
     return out;
   }
@@ -318,29 +296,16 @@ export class Leaderboard {
    * 先切片再排名的话，第 2 页的第一条名次会显示成 1。
    */
   page(page: number, pageSize: number): LeaderboardPage {
-    /**
-     * 【⚠️ 曾经的 bug：pageSize 未收口】
-     *
-     * `pageSize = 0`  → `Math.ceil(total / 0)` = Infinity → `pageCount = Infinity`
-     * `pageSize < 0`  → `start` 为负 → `slice` 返回空页
-     *
-     * 实测（修复前）：`page(1, 0)` → `pageCount = Infinity`、
-     * entries 为空、`hasNext = true`。
-     * "有下一页但翻出来是空的"——UI 上的表现是"下一页"按钮永远可点、
-     * 永远翻不动，而没人会怀疑是自己传的 pageSize 有问题。
-     *
-     * 修法：收口到 >= 1 的整数，与 capacity 的处理口径一致。
-     */
-    const size = this._pageSizeOf(pageSize);
-    const total = this._entries.length;
-    const pageCount = Math.max(1, Math.ceil(total / size));
+    const all = this.ranked();
+    const total = all.length;
+    const pageCount = Math.max(1, Math.ceil(total / pageSize));
     const p = Math.min(Math.max(1, page), pageCount);
-    const start = (p - 1) * size;
+    const start = (p - 1) * pageSize;
 
     return {
-      entries: this.ranked(start, start + size),
+      entries: all.slice(start, start + pageSize),
       page: p,
-      pageSize: size,
+      pageSize,
       total,
       pageCount,
       hasPrev: p > 1,
@@ -348,19 +313,9 @@ export class Leaderboard {
     };
   }
 
-  /** pageSize 收口：非有限 / 0 / 负数 → 1 */
-  private _pageSizeOf(v: number): number {
-    const n = typeof v === 'number' ? v : NaN;
-    if (!(n >= 1)) return 1;
-    return Math.floor(n);
-  }
-
   /** 某玩家的排名（没上榜返回 null） */
   rankOf(playerId: string): RankedEntry | null {
-    const i = this._entries.findIndex((e) => e.playerId === playerId);
-    if (i < 0) return null;
-    const one = this.ranked(i, i + 1);
-    return one.length > 0 ? one[0] : null;
+    return this.ranked().find((e) => e.playerId === playerId) ?? null;
   }
 
   /**
@@ -369,17 +324,16 @@ export class Leaderboard {
    * 【用途】玩家排第 500 名时，给他看 495-505 比看前 10 有用得多。
    */
   around(playerId: string, radius = 5): RankedEntry[] {
-    const i = this._entries.findIndex((e) => e.playerId === playerId);
+    const all = this.ranked();
+    const i = all.findIndex((e) => e.playerId === playerId);
     if (i < 0) return [];
-    const r = Number.isFinite(radius) ? Math.max(0, Math.floor(radius)) : 0;
-    const start = Math.max(0, i - r);
-    return this.ranked(start, i + r + 1);
+    const start = Math.max(0, i - radius);
+    return all.slice(start, i + radius + 1);
   }
 
   /** 前 N 名 */
   top(n: number): RankedEntry[] {
-    const k = Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 0;
-    return this.ranked(0, k);
+    return this.ranked().slice(0, Math.max(0, n));
   }
 
   /**
@@ -407,19 +361,6 @@ export class Leaderboard {
     this._entries = [];
   }
 
-  /**
-   * 【铁律 5】可卸载
-   *
-   * 【为什么原先只有 clear 不够】
-   * `clear()` 清空的是**数据**，而"这个榜单对象还能不能用"是另一件事。
-   * 切场景/换赛季时，宿主如果只置空引用，残留的 `onChange` 闭包
-   * 和 `_entries` 仍能被任何持有者读到并继续 submit。
-   * 这里给一个明确的终点，与库内其它单元的 `destroy()` 口径一致。
-   */
-  destroy(): void {
-    this._entries = [];
-  }
-
   /** 导出（存档 / 上传服务器） */
   exportEntries(): ScoreEntry[] {
     return this._entries.map((e) => ({ ...e }));
@@ -430,52 +371,11 @@ export class Leaderboard {
    *
    * 【⚠️ 会清空现有数据】
    * 想合并用 `submitAll`。
-   *
-   * 【⚠️ 曾经的 bug：这是 `submit` 的旁路，完全不校验分数】
-   *
-   * `submit`（L125）和 `submitAll`（L176）都有 `Number.isFinite` 校验，
-   * 只有 `importEntries` 拿到什么就信什么——浅拷贝 + 排序 + 裁剪，一行校验都没有。
-   *
-   * 后果不是"抛错"，而是**安静地产出一个错榜**：
-   *   - NaN 参与比较恒为 false，排序结果**不可预测**
-   *   - 名次照排，玩家看到"第一名分数是空的"或"名次乱序"
-   *   - 因为 `submit` 有校验，排查方向 100% 被引到"是不是提交逻辑错了"，
-   *     而这条路是干净的
-   *
-   * 实测（修复前）：`importEntries([{p1, NaN}, {p2, 5}])`
-   *   → ranked = [{p1, rank 1, score NaN}, {p2, rank 2}]
-   *
-   * 【为什么默认是丢弃而不是抛错】
-   * 榜单数据来自服务端/存档，一条脏数据就让整个榜单加载失败太脆。
-   * 默认丢掉脏条目（保证榜单里永不出现 NaN），并提供 `strict: true`
-   * 让调用方选择与 `submitAll` 一致的抛错语义。
-   *
-   * 丢弃条数记在 `lastDroppedCount`，方便调用方上报/告警，不至于"静默到无从发现"。
    */
-  importEntries(entries: readonly ScoreEntry[], opts: { strict?: boolean } = {}): void {
-    const clean: ScoreEntry[] = [];
-    let dropped = 0;
-    for (const e of entries) {
-      if (!e || !Number.isFinite(e.score)) {
-        dropped++;
-        continue;
-      }
-      clean.push({ ...e });
-    }
-    this._lastDroppedCount = dropped;
-
-    if (dropped > 0 && opts.strict) {
-      throw new Error(`[Leaderboard] importEntries 收到 ${dropped} 条分数非有限的条目`);
-    }
-
-    this._entries = clean;
+  importEntries(entries: readonly ScoreEntry[]): void {
+    this._entries = entries.map((e) => ({ ...e }));
     this._sort();
     this._trim();
-  }
-
-  /** 上一次 `importEntries` 丢弃的非法条目数（0 = 没有） */
-  get lastDroppedCount(): number {
-    return this._lastDroppedCount;
   }
 
   // ==================== 调试 ====================
@@ -538,26 +438,10 @@ export function mergeLeaderboards(
         byPlayer.set(e.playerId, e);
         continue;
       }
-      /**
-       * 【⚠️ 曾经的 bug：同分时的 tie-break 写死成 earlier，忽略了配置】
-       *
-       * 本类的 `tieBreak` 配置项（默认 'earlier'）在 `_cmp` / `_isBetter` 里
-       * 是生效的，但 `mergeLeaderboards` 里写成了固定的 `e.at < prev.at`。
-       *
-       * 后果：`tieBreak: 'later'` 的榜单，在"本地 + 服务器"合并这条路径上
-       * 会**静默退化成 earlier**——同一份数据，合并前后排序不一样。
-       *
-       * 实测（修复前）：两个 `tieBreak:'later'` 的榜（p1 分数同为 10，
-       * at 分别为 1 和 2）合并后保留的是 **at=1** 那条，而不是 at=2。
-       *
-       * 表现是"玩家刷新榜单后名次/条目跳变"，
-       * 而排查时没人会怀疑"配置项没生效"——因为它明明配了。
-       */
       const asc = opts.order === 'asc';
       const better = asc ? e.score < prev.score : e.score > prev.score;
-      const laterWins = opts.tieBreak === 'later';
-      const sameButBetter = e.score === prev.score && (laterWins ? e.at > prev.at : e.at < prev.at);
-      if (better || sameButBetter) byPlayer.set(e.playerId, e);
+      const sameButEarlier = e.score === prev.score && e.at < prev.at;
+      if (better || sameButEarlier) byPlayer.set(e.playerId, e);
     }
   }
 
