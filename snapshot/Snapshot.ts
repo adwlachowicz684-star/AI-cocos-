@@ -90,52 +90,7 @@ export function deepClone<T>(value: T, seen = new WeakMap<object, unknown>()): T
     return out as unknown as T;
   }
 
-  /**
-   * 【⚠️ TypedArray 为什么必须单独分支（2026 精审 P1 修复）】
-   *
-   * 老代码最后兜底成一个 `{}` 再逐键复制，于是 `Uint8Array` 被摊平成
-   * 下标对象，原型与方法全部丢失：
-   *
-   * 实测（修复前）：
-   * ```
-   * 克隆后还是 Uint8Array 吗？ false   实际 = {"0":1,"1":2,"3":3}  constructor = Object
-   * 类实例克隆后 constructor = Object，double 方法 = undefined
-   * ```
-   *
-   * 后果不在 `deepClone` 这一行，而在很远的调用处：`UndoStack.push()`
-   * 对任何含 `Uint8Array`（binary 序列化结果、存档字节）、`Vec3`、
-   * 自定义类的状态做深拷贝后，撤销回来的是"长得像但方法没了"的普通对象，
-   * 崩溃点是 `x.double is not a function` —— 没人会想到是撤销栈干的。
-   *
-   * 【为什么用 `slice()` 而不是 `new ctor(value)`】
-   * 所有 TypedArray 都有 `slice()` 且**返回同类型副本**，
-   * 不需要去拿 constructor 做类型体操；`DataView` 没有 slice，单独按字节复制。
-   */
-  if (ArrayBuffer.isView(value)) {
-    if (value instanceof DataView) {
-      const out = new DataView(value.buffer.slice(0), value.byteOffset, value.byteLength);
-      seen.set(asObj, out);
-      return out as unknown as T;
-    }
-    const out = (value as unknown as { slice(): ArrayBufferView }).slice();
-    seen.set(asObj, out);
-    return out as unknown as T;
-  }
-
-  /**
-   * 【为什么用 `Object.create(原型)` 而不是 `{}`】
-   *
-   * 自定义类的方法挂在原型上，`{}` 只复制了自有字段 → 克隆体是个
-   * "长得像但方法没了"的普通对象。保留原型后方法可用。
-   *
-   * 【已知边界（不是 bug，是 JS 的能力上限）】
-   * 类的 `#private` 字段与闭包状态**无法**通过反射复制，
-   * 需要这类状态的类应自行实现 `clone()`。文档已声明：
-   * 深拷贝支持纯数据 + Date / Map / Set / TypedArray + 原型方法可继承的普通类实例。
-   */
-  const proto = Object.getPrototypeOf(asObj) as object | null;
-  const out: Record<string, unknown> =
-    proto === null || proto === Object.prototype ? {} : Object.create(proto);
+  const out: Record<string, unknown> = {};
   seen.set(asObj, out);
   for (const k of Object.keys(value as Record<string, unknown>)) {
     out[k] = deepClone((value as Record<string, unknown>)[k], seen);
@@ -177,21 +132,7 @@ export function diffSnapshots<T>(before: T, after: T, maxDepth = 10): DiffResult
   const added: DiffEntry[] = [];
   const removed: DiffEntry[] = [];
 
-  /**
-   * 【⚠️ 为什么 maxDepth 必须收口】
-   *
-   * `maxDepth` 默认 10，但它直接来自调用方配置。传 `0` 或负数时
-   * `depth >= maxDepth` 在根节点就成立，整棵树被当成"一个变化"，
-   * 产出的 `DiffEntry` 路径是空串、值是整棵对象——
-   * 下游 `createPatch` / `applyPatch` 拿到 `{ path: '', to: {...} }` 无法定位，
-   * 比对结果也就失去了意义。
-   *
-   * 下界取 1：至少递归一层，"只判断有没有变化"由 `hasChanges` 表达就够了。
-   * 上界 1e4：防 `Infinity` 让递归失去保护（深层树比对会卡死主线程）。
-   */
-  const limit = clampNum(maxDepth, 1, 1e4, 10);
-
-  walk(before, after, '', 0, limit, changed, added, removed);
+  walk(before, after, '', 0, maxDepth, changed, added, removed);
 
   return {
     changed,
@@ -221,25 +162,9 @@ function walk(
     return;
   }
 
-  /**
-   * 深度到了，整体算一个变化
-   *
-   * 【⚠️ 为什么存 deepClone 而不是原引用】
-   *
-   * 这里存的是**整棵子树**。老实现直接把 `before` / `after` 的引用塞进
-   * `DiffEntry`，于是 DiffResult 变成了旧状态的一条**强引用链**：
-   * 调用方只要缓存了 diff 结果（做回放、做撤销历史、做增量存档），
-   * 那一整棵旧对象就永远无法被 GC 回收。
-   *
-   * 典型场景：每帧 diff 一次大世界状态并缓存最近 100 条的撤销栈——
-   * 内存里同时挂着 100 份本该被回收的旧世界。
-   * 这类问题不会报错，只表现为"内存一点点涨上去"。
-   *
-   * 存副本的代价是一次深拷贝，但只发生在**到达深度上限**的节点上，
-   * 那些节点本来就是"不再递归"的大块，数量很少。
-   */
+  // 深度到了，整体算一个变化
   if (depth >= maxDepth) {
-    changed.push({ path, from: deepClone(before), to: deepClone(after) });
+    changed.push({ path, from: before, to: after });
     return;
   }
 
