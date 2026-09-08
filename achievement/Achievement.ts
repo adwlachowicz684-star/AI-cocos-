@@ -30,8 +30,6 @@
  * 【无引擎依赖】
  */
 
-import { clampNum } from '../_core/math';
-
 // ==================== 类型 ====================
 
 /** 进度查询上下文（由宿主提供，本模块不解释） */
@@ -248,31 +246,7 @@ export class Achievement {
 
   // ==================== 手动操作 ====================
 
-  /**
-   * 手动解锁
-   *
-   * @param id 成就 id
-   * @param bypassRequires 是否跳过前置校验（默认 **false**，即校验）
-   * @returns 是否**本次**真的解锁了（已解锁 / 前置未达成都返回 false）
-   *
-   * 【⚠️ 默认必须校验 requires】
-   *
-   * `checkOne()` 在入口显式校验了 `requirementsMet()`，`unlock()` 却没校验——
-   * 同一个"解锁"动作，两条路径两套规则。后果是：
-   *
-   * - 后台补发奖励、GM 命令调 `unlock('b')` 能直接造出违反依赖图的存档
-   *   （实测：B requires A，A 未解锁时 `unlock('B')` 返回 true）
-   * - 而 `requirementsMet('b')` 对同一份存档仍返回 false
-   *   → UI 出现"已解锁但前置未完成"的矛盾态
-   *
-   * 隐藏成就的存在感也依赖这条链：前置不校验的话，
-   * 玩家能从"总数 + 已解锁列表"反推出隐藏成就。
-   *
-   * 【为什么加开关而不是直接禁止】
-   * 补发历史存档、GM 调试确实需要绕过依赖。
-   * 让调用方显式写 `unlock('b', true)`，"绕过依赖"这件事才在调用点看得见。
-   */
-  unlock(id: string, bypassRequires = false): boolean {
+  unlock(id: string): boolean {
     const def = this._defs.get(id);
     if (!def) {
       throw new Error(
@@ -280,7 +254,6 @@ export class Achievement {
       );
     }
     if (this._unlocked.has(id)) return false;
-    if (!bypassRequires && !this.requirementsMet(id)) return false;
     this._unlocked.add(id);
     this._onUnlock?.(def);
     return true;
@@ -288,30 +261,7 @@ export class Achievement {
 
   /** 撤销（调试 / 重置用） */
   revoke(id: string): boolean {
-    const ok = this._unlocked.delete(id);
-    /**
-     * 【⚠️ 撤销后必须一并清掉"上次通知过的进度"】
-     *
-     * `check()` 的进度去重靠 `last !== p.current`：
-     * revoke 只改了解锁标记，`current` 一个字没动，
-     * 于是下一次 `check()` 判定"进度没变化"→ 跳过 `onProgress`。
-     *
-     * 实测：注册 onProgress → check（回调 1 次）→ revoke('x') → check
-     * → 回调仍为 1 次（期望 2）。表现是"撤销成就后 UI 进度条不再更新"，
-     * 看起来像回调丢了，而 onProgress 相关代码一行都没改过。
-     *
-     * 【为什么放在 `if (ok)` 外面】
-     * 撤销一个**没解锁过**的成就时 `ok === false`，但宿主的意图同样是
-     * "把这个成就退回未解锁并重新观察"——GM 工具就是这么用的。
-     * 只在 ok 时清，等于让"撤销未解锁的成就"保留了一份过期的进度缓存，
-     * 这个分支恰好是 GM / 测试脚本最常走的那条路。
-     *
-     * `reset()` 清了 `_lastProgress`，`revoke()` 没清——
-     * 两者都是"把状态退回未解锁"，没有理由只清一半。
-     * 这种"两个对称方法不对称"的写法，是回调型 bug 最容易藏身的地方。
-     */
-    this._lastProgress.delete(id);
-    return ok;
+    return this._unlocked.delete(id);
   }
 
   reset(): void {
@@ -325,47 +275,8 @@ export class Achievement {
     return [...this._unlocked];
   }
 
-  /**
-   * 导入存档（**替换**语义：先清空，再写入）
-   *
-   * 未知 id 静默跳过，兼容旧存档。
-   *
-   * 【⚠️ 为什么必须是替换，不能追加】
-   *
-   * 旧实现只有 `add`，从不清空：
-   *
-   * ```
-   * importState(['a']);   // unlockedCount === 1
-   * importState(['b']);   // unlockedCount === 2   ← 槽位 2 的存档里只有 1 个成就
-   * ```
-   *
-   * 存档是"某个时刻的完整快照"，不是增量补丁。
-   * 追加语义把"读档"变成了"取并集"：换槽位、断线重连后重新载入存档，
-   * 旧槽位的解锁状态被带进新槽位，玩家看到"没达成的成就已点亮"，
-   * 且 `points` 虚高。**整个过程不抛错**，只在数值上体现，
-   * 排查时没人会怀疑 importState。
-   *
-   * 【为什么连 _lastProgress 一起清】
-   * 换存档等于换了玩家的全部进度，上一份存档的"已通知进度"缓存必须一并作废，
-   * 否则新存档的第一帧不会触发 `onProgress`，UI 停留在上一个槽位的进度上。
-   */
+  /** 导入（未知 id 静默跳过，兼容旧存档） */
   importState(ids: readonly string[]): void {
-    this._unlocked.clear();
-    this._lastProgress.clear();
-    for (const id of ids) {
-      if (this._defs.has(id)) this._unlocked.add(id);
-    }
-  }
-
-  /**
-   * 合并导入（**追加**语义：不清空，只并入）
-   *
-   * 【为什么单独开一个方法，而不是给 importState 加参数】
-   * "读档"和"并集"是两种语义，混在一个布尔参数里，
-   * 调用点写出来是 `importState(ids, true)`——看不出 true 是什么意思。
-   * 两个名字各自把语义写在方法名上，误用成本更高。
-   */
-  mergeState(ids: readonly string[]): void {
     for (const id of ids) {
       if (this._defs.has(id)) this._unlocked.add(id);
     }
@@ -374,25 +285,7 @@ export class Achievement {
   // ==================== 内部 ====================
 
   private _progressOf(def: AchievementDef, ctx: AchievementContext): AchievementProgress {
-    /**
-     * 【⚠️ target 必须收口，只写 `?? 1` 是挡不住的】
-     *
-     * `??` 只对 null / undefined 生效，挡不住 NaN / 0 / Infinity / 负数。
-     * 而这两种输入恰好都是"配置表里很常见且看起来合法"的形态：
-     *
-     * - `target: NaN`  → `Math.min(NaN, current)` 得 NaN（NaN 参与比较恒为 false，
-     *                    夹取区间这一步整个失效），进度条显示 "NaN/NaN"
-     * - `target: 0`    → `current = Math.min(0, 5) = 0`，`done = 0 >= 0 = true`
-     *                    → **零目标成就在构造后第一次 check 就秒解锁**
-     * - `target: Infinity` → 进度永远追不上，成就永远不解锁
-     *
-     * 三者的共同点是：**不抛异常**，只在数值上体现，
-     * 排查时没人会怀疑配置表里那个没填的格子。
-     *
-     * 收口到 [1, 1e12]：目标值 ≤ 0 没有语义（等价于"无条件达成"），
-     * 1e12 之上也谈不上"可展示的进度"。未填 → 回落 1（布尔型成就）。
-     */
-    const target = clampNum(def.target, 1, 1e12, 1);
+    const target = def.target ?? 1;
     const locked = !this.requirementsMet(def.id);
 
     let current: number;
