@@ -108,17 +108,8 @@ export interface MissingMaterial {
 export interface CanCraftResult {
   readonly ok: boolean;
   readonly missing: readonly MissingMaterial[];
-  /** 最多能做几个（无消耗型材料时为 `Infinity`，见 `unlimited`） */
+  /** 最多能做几个 */
   readonly maxCount: number;
-  /**
-   * 产能是否不受材料限制（配方没有任何消耗型输入）
-   *
-   * 【为什么需要这个标志】
-   * 只有 `maxCount: Infinity` 的话，UI 拿它当滑块上限会得到
-   * "滑块拉到底也到不了尽头"，只能自己判断 `isFinite`，
-   * 而这个判断在 16 个调用点各写一遍必然有人漏。
-   */
-  readonly unlimited: boolean;
 }
 
 export interface CraftResult {
@@ -129,15 +120,6 @@ export interface CraftResult {
   readonly produced?: Array<{ itemId: string; count: number }>;
   /** 副产物 */
   readonly byproducts?: Array<{ itemId: string; count: number }>;
-  /**
-   * 因背包放不下而被丢弃的副产物（**主产物仍然成功**）
-   *
-   * 【为什么和 byproducts 分开】
-   * 混在 byproducts 里的话，调用方分不清"拿到了"和"被丢了"。
-   * 只在真的丢东西时才出现这个字段——没有丢弃时它是 undefined，
-   * 调用方 `r.lost?.length` 即可判断，不必额外加布尔标志。
-   */
-  readonly lost?: Array<{ itemId: string; count: number }>;
 }
 
 export class CraftSystem {
@@ -205,7 +187,7 @@ export class CraftSystem {
    */
   canCraft(recipeId: string, inv: IInventory, count = 1): CanCraftResult {
     const recipe = this._recipes.get(recipeId);
-    if (!recipe) return { ok: false, missing: [], maxCount: 0, unlimited: false };
+    if (!recipe) return { ok: false, missing: [], maxCount: 0 };
 
     const missing: MissingMaterial[] = [];
     let maxCount = Infinity;
@@ -232,26 +214,10 @@ export class CraftSystem {
       }
     }
 
-    /**
-     * 【⚠️ 无消耗型输入时，产能是"无限"而不是 0】
-     *
-     * 老实现末尾统一 `Number.isFinite(maxCount) ? maxCount : 0`，
-     * 把"没有任何消耗型材料"这个情况也归零了。
-     * 于是"需要有工作台（consume:false）+ 产出物品"的配方会得到
-     * `{ ok: true, missing: [], maxCount: 0 }`——
-     * UI 拿 maxCount 做"最多能做几个"滑块的上限，滑块直接禁用；
-     * 而 `craft()` 本身能成功。**两个 API 对同一事实给出相反答案**。
-     *
-     * 区分的关键不是"算没算出上限"，而是"有没有消耗型材料"：
-     * 没有 → 语义上就是无限（`unlimited: true`，maxCount 给 Infinity）；
-     * 有但材料为 0 → 真的做不了 0 个（保持 0）。
-     */
-    const unlimited = maxCount === Infinity;
     return {
       ok: missing.length === 0 && this.isUnlocked(recipeId) && count > 0,
       missing,
-      maxCount: unlimited ? Infinity : maxCount,
-      unlimited,
+      maxCount: Number.isFinite(maxCount) ? maxCount : 0,
     };
   }
 
@@ -306,27 +272,7 @@ export class CraftSystem {
       // 这个材料本身能不能合成？能就递归展开
       const sub = this._findRecipeProducing(input.itemId);
       if (sub) {
-        /**
-         * 【⚠️ 递归时必须把"需要 need 个产物"换算成"需要做几次子配方"】
-         *
-         * 老实现直接 `totalMaterials(sub.id, need, ...)`，
-         * 把「需要 8 个板」当成「要做 8 次板配方」，
-         * 但板配方**一次产出 4 个**。于是需求被高估整整一个产率倍数：
-         *
-         * ```
-         * plank: 2 木 → 4 板
-         * house: 8 板 → 1 房
-         * 实需：8 板 ÷ 4 板/次 = 2 次 × 2 木 = 4 木
-         * 老实现返回 {"wood":16}   ← 正好高估 4 倍
-         * ```
-         *
-         * 后果不只是 UI 让玩家多攒材料：自动合成 / 代工系统照着这个数执行，
-         * 会多做 4 倍的中间产物，材料消耗远超预期，
-         * 而数字都是"合理的正整数"，任何校验都抓不到。
-         */
-        const yieldPerCraft = this._yieldOf(sub);
-        const times = Math.ceil(need / yieldPerCraft);
-        this.totalMaterials(sub.id, times, inv, visiting, out);
+        this.totalMaterials(sub.id, need, inv, visiting, out);
       } else {
         out[input.itemId] = (out[input.itemId] ?? 0) + need;
       }
@@ -334,29 +280,6 @@ export class CraftSystem {
 
     visiting.delete(recipeId);
     return out;
-  }
-
-  /**
-   * 一次合成能产出几个（产率）
-   *
-   * 【为什么有 variants 时取**最小**产率】
-   * variants 是"这次合成随机出其中一种"，产率本来就不确定。
-   * 取最大产率会得到"最乐观"的需求数——真 roll 到低产率时材料不够，
-   * 材料清单就成了谎言（而且是**低估**，比高估更糟：
-   * 玩家照着清单备料，合成到一半发现不够）。
-   * 取最小产率则保证"照这个数备料一定够"，是**上界**。
-   *
-   * 【固定产出的配方】就是 `output.count`（至少 1，防 0 导致除零/无限递归）。
-   */
-  private _yieldOf(r: Recipe): number {
-    let y = r.output.count;
-    if (r.output.variants && r.output.variants.length > 0) {
-      for (const v of r.output.variants) {
-        const c = v.count ?? 1;
-        if (c < y) y = c;
-      }
-    }
-    return Number.isFinite(y) && y > 0 ? y : 1;
   }
 
   /** 找出产出某物品的配方（取第一个） */
@@ -426,36 +349,15 @@ export class CraftSystem {
 
     // ⑥ 副产物
     const byproducts: Array<{ itemId: string; count: number }> = [];
-    /**
-     * 【⚠️ 副产物没放进去必须说出来，不能静默丢弃】
-     *
-     * 主产物已经成功了，副产物因为背包满被 `Inventory.add` 吞掉，
-     * 老实现里 `byproducts` 就是空数组——`ok: true`、没有任何字段表示
-     * "有东西被扔了"。
-     *
-     * 带概率的稀有副产物（比如 5% 出橙装）被这么丢掉时，
-     * 运营侧看到的是"掉率异常低"，代码侧一切正常，两边都查不出问题。
-     *
-     * 【为什么不在副产物放不下时整体回滚】
-     * 副产物是**附赠**的，不是交易的对价。为了赠品把已经炼好的主产物
-     * 一起退掉，玩家损失更大。正确做法是如实上报，让调用方决定
-     * （提示"背包已满，XX 被丢弃"或转成邮件补发）。
-     */
-    const lost: Array<{ itemId: string; count: number }> = [];
     for (const bp of recipe.byproducts ?? []) {
       const chance = bp.chance ?? 1;
       if (this._rng && chance < 1 && this._rng.next() >= chance) continue;
-      const want = bp.count * count;
-      const leftover = inv.add(bp.itemId, want);
-      const got = want - leftover;
+      const leftover = inv.add(bp.itemId, bp.count * count);
+      const got = bp.count * count - leftover;
       if (got > 0) byproducts.push({ itemId: bp.itemId, count: got });
-      if (leftover > 0) lost.push({ itemId: bp.itemId, count: leftover });
     }
 
-    return {
-      ok: true, produced: added, byproducts,
-      ...(lost.length > 0 ? { lost } : {}),
-    };
+    return { ok: true, produced: added, byproducts };
   }
 
   private _rollOutput(recipe: Recipe, count: number): Array<{ itemId: string; count: number }> {
