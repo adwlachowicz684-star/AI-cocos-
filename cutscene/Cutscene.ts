@@ -41,7 +41,7 @@
  * 所以它可以被测试——测试里注册一个记录器，验证时间轴推进正确。
  */
 
-import { clamp, clampNum, safeDt } from '../_core/math';
+import { clamp } from '../_core/math';
 
 // ==================== 类型 ====================
 
@@ -144,21 +144,9 @@ export class Cutscene {
   /** 阻塞累计时长（用于超时判定） */
   private _blockElapsed = 0;
   private _timedOut = false;
-  /** 单帧最多解几道门（见构造参数说明） */
-  private readonly _maxGatesPerTick: number;
 
-  constructor(def: CutsceneDef, opts: { readonly maxGatesPerTick?: number } = {}) {
+  constructor(def: CutsceneDef) {
     this._def = def;
-    /**
-     * 【为什么 64 不能写死在循环里】
-     * 它是"一帧最多解几道阻塞门"的上限：门极多时（比如连续 100 个
-     * 等待玩家按键的 step）一帧推不完，演出会**变慢**（不是卡死，
-     * 但节奏被拉长），而调用方没有任何办法调整——
-     * 数值埋在循环条件里，配置驱动这条铁律就落空了。
-     *
-     * 默认仍是 64（保持原行为），需要时显式调大。
-     */
-    this._maxGatesPerTick = clampNum(opts.maxGatesPerTick, 1, 1e6, 64);
 
     // 解析 start：未指定的话串行排列
     let cursor = 0;
@@ -221,19 +209,6 @@ export class Cutscene {
   update(dtMs: number): readonly CutsceneCut[] {
     if (this._state !== 'playing' && this._state !== 'blocked') return [];
 
-    /**
-     * 【⚠️ dt 守卫：NaN / 负数 / Infinity 一律丢弃这一帧】
-     *
-     * 老实现没有守卫，`remaining = dtMs` 直接参与比较：
-     * `update(NaN)` 后 `this._time + NaN = NaN`，
-     * `target > this._time` 恒为 false → 时间**不再推进**，
-     * 而 `state` 仍是 `playing`。
-     *
-     * 后果比"演出卡一下"严重：上层"等演出结束"的等待逻辑永久挂起，
-     * 没有任何报错——演出看起来在播，其实已经死了。
-     */
-    if (!safeDt(dtMs)) return [];
-
     const all: CutsceneCut[] = [];
     let remaining = dtMs;
     /** 本帧是否已经把 dtMs 计过一次阻塞时长 */
@@ -244,7 +219,7 @@ export class Cutscene {
      * 一帧内可能先推进到某个门的起点，再解除它、继续推进。
      * 用 guard 限制轮数，避免配置出问题时死循环。
      */
-    for (let guard = 0; guard < this._maxGatesPerTick; guard++) {
+    for (let guard = 0; guard < 64; guard++) {
       const gate = this._findGate();
 
       if (gate !== null) {
@@ -509,20 +484,6 @@ export class Timeline {
   private readonly _id: string;
   private readonly _steps: CutsceneStep[] = [];
   private _cursor = 0;
-  /**
-   * 上一个 step 的**起点**
-   *
-   * 【⚠️ 为什么必须单独记，不能用 `_cursor`】
-   * `_cursor` 是"下一个 step 该从哪开始"（即上一条的**结束时刻**），
-   * 而 `with()` 要的是"与上一个**同时开始**"，需要的是上一条的**起点**。
-   *
-   * 老实现 `with()` 里也调 `_lastStart()`（= `_cursor`），
-   * 于是 `add('a',1000); with('b',1000);` 得到 `a:0, b:1000`——
-   * 名字和 README 都写着"并行"，实际排成了**串行两段**，
-   * 整个演出时长翻倍、节奏全错。
-   * 因为没人会去验证 start 值，这种错误能一直留到上线。
-   */
-  private _lastAddedStart = 0;
 
   constructor(id: string) {
     this._id = id;
@@ -536,7 +497,6 @@ export class Timeline {
     const start = this._lastStart();
     this._steps.push({ id, kind: id, start, duration, data });
     this._cursor = start + duration;
-    this._lastAddedStart = start;
     return this;
   }
 
@@ -548,12 +508,9 @@ export class Timeline {
    * 整体推进应该是 3 秒，不是 4 秒。
    */
   with(id: string, duration: number, data?: unknown): this {
-    // 与上一个 step **同时开始**：用它的起点，而不是 cursor（它的结束时刻）
-    const start = this._lastAddedStart;
+    const start = this._lastStart();
     this._steps.push({ id, kind: id, start, duration, data });
     this._cursor = Math.max(this._cursor, start + duration);
-    // 连续 with 时，后面的仍与同一个起点并行
-    this._lastAddedStart = start;
     return this;
   }
 
@@ -561,15 +518,12 @@ export class Timeline {
   wait(id: string, waitFor: () => boolean, timeoutMs = 30_000): this {
     const start = this._lastStart();
     this._steps.push({ id, kind: id, start, duration: 0, waitFor, timeoutMs });
-    this._lastAddedStart = start;
     return this;
   }
 
   /** 空档（纯等待） */
   gap(ms: number): this {
     this._cursor += ms;
-    // 空档之后没有"上一个 step"了，下一个 with 应从空档结束处起算
-    this._lastAddedStart = this._cursor;
     return this;
   }
 
