@@ -79,6 +79,41 @@
 
 ---
 
+### 1.1 复现脚本的真实输出（节选）
+
+```
+===== P1-1 affix 窄区间越界 =====
+  critMul (期望落在 [1.2,1.4]) = 1
+  leech   (期望落在 [0.05,0.07]) = 0
+  >>> 越界? true / true
+
+===== P1-2 affix lastRerollDegraded 不复位 =====
+  第1次 rerollAll(降级) → true
+  >>> 第2次 rerollAll(未降级) → true （应为 false）
+  >>> 第3次 rerollAll(未降级) → true （应为 false）
+
+===== P1-3 binary uint/int 的 31、32 位范围 =====
+  uint(31).describe = uint31[0..-2147483649]
+  uint(32).describe = uint32[0..0]
+  int(32).describe  = int32[2147483648..-2147483649]
+  >>> uint(31).write(1) 抛错： [Binary] uint31 越界：1（范围 0..-2147483649）
+  >>> writeBits(1,31) 抛错： [Binary] 值 1 需要超过 31 位表示
+
+===== P1-5 binary float 越界是否静默截断 =====
+  >>> float(0,10,1).write(999) 读回 = 10 （无抛错=静默截断）
+    对照 uint(8).write(999) 抛错： [Binary] uint8 越界：999（范围 0..255）
+
+===== B7/B8 utf8 =====
+  >>> utf8Decode([0x41,0xff,0x42]) = "AB"
+  >>> utf8Encode(孤立代理项) = 237,160,128 （WTF-8）
+
+===== P1-7 blessing set 效果被层数缩放 =====
+  >>> 2 层的 set(100) → 200 （应为 100，报告称 200）
+  >>> 5 层的 set(100) → 500
+```
+
+---
+
 ## 2. 标准 1 的复现比对（我独立跑的 11 个场景）
 
 | 场景 | 我的实测（修复前源码） | 对方报告 | 一致 |
@@ -127,7 +162,59 @@
 
 改动 9 个文件，全部在清单范围内：`affix/` `binary/` `blessing/` 各 2 个（源码 + README）、
 `tests/run_phase10_w8b.ts` 新增、`tests/run_batch10.ts` 改 1 条断言、`_kitmeta.json` 登记。
-`_core/`、`tests/run.ts`、根 `README.md` 未触碰。**未发现顺手重构**。
+`_core/`、`tests/run.ts`、根 `README.md` 未触碰。
+
+### 3.2.1 逐行核查：过滤注释后的纯代码改动
+
+我把三个单元的 diff **过滤掉全部注释行**后逐行看过，每一行都能对应到清单里的某一条：
+
+**`affix/AffixSystem.ts`**
+
+| 改动 | 对应条目 |
+|---|---|
+| `if (r.weight < 0)` → `if (!(r.weight >= 0))` | A3（肯定式才能挡 NaN，模式 A） |
+| 新增 `min`/`max` 的 `Number.isFinite` 校验 | A4 |
+| 新增 `this.lastRerollDegraded = false` | P1-2 |
+| 权重/`valueScale` 统一走 `numOr(...)` 收口 | A3 / A4 |
+| 窄区间新增 `quantized` 标志（精度让位于范围） | P1-1 |
+| `validateAffixPool` 新增 errors/warnings 分支 | A3 / A4 |
+
+**`binary/BinarySerializer.ts`**
+
+| 改动 | 对应条目 |
+|---|---|
+| `1 << bits` → `Math.pow(2, bits)`（含 31/32 位） | P1-3 ⚠️ 见下方说明 |
+| `levels` 计算加 `1e-9`、读写端加 `Math.min(maxLevel, …)` | P1-4 |
+| `float` 新增 `opts.clamp` + 越界抛错 | P1-5 |
+| utf8 非法字节/孤立代理项产出 `U+FFFD` | B7 / B8 |
+
+> ⚠️ **`1 << bits` → `Math.pow(2, bits)` 容易被误认成风格调整，它不是。**
+> JS 的位运算按 **32 位有符号**处理，`1 << 31 === -2147483648`（负数）。
+> 这正是 P1-3 的根因之一（`uint31` 范围算成 `[0..-2147483649]`），不是顺手重构。
+
+**`blessing/Blessing.ts`**
+
+| 改动 | 对应条目 |
+|---|---|
+| 新增 `private _safeCount(n)` 供 `add`/`remove`/`importState` 共用 | P1-6 |
+| `if (actual <= 0)` → `if (!(actual > 0))` | P1-6（模式 A） |
+| `effects` 里 `set` 分支不再乘层数 | P1-7（模式 D） |
+| `pick` 权重走 `numOr` 收口 | B12 |
+| `importState` 记录 `before` 集合 + 结束后通知（含"消失的报 0"） | P1-8 |
+| `_validate` 空 if 补 `console.warn` | B10 |
+
+**核查结论：无顺手重构。** 没有改命名、没有调结构、没有删"看着没用"的代码；
+`_safeCount` 是为了给三处**统一**收口（同一份校验写三遍才是隐患），属模式 B 的标准修法。
+
+### 3.2.2 改动量参考（注释远多于代码）
+
+| 文件 | 含注释 | 纯代码 | 注释 : 代码 |
+|---|---|---|---|
+| `affix/AffixSystem.ts` | 160 | 72 | ≈ 1.2 : 1 |
+| `binary/BinarySerializer.ts` | 144 | 38 | ≈ 2.8 : 1 |
+| `blessing/Blessing.ts` | 120 | 30 | ≈ 3 : 1 |
+
+每处修复都配了"为什么"注释，符合第 5 节要求。
 
 ---
 
@@ -251,7 +338,30 @@ $ node .build/tests/run.js
 
 ---
 
+## 7. 本轮复核（第二次完整验收）的更新
+
+对家文件与我首次验收时**逐字节未变**（`result_W8-B.md`、`run_phase10_w8b.ts` 的 MD5 与首次验收时一致），
+因此首次结论依然成立。本轮补齐了三件事：
+
+1. **标准 4 从"统计改动量"升级为"逐行核查"**——过滤注释后三个单元的每一行纯代码改动都已对应到具体条目（§3.2.1）
+2. **补录独立复现脚本的真实输出**——11 个场景的原始 stdout 节选（§1.1）
+3. **确认对家遗留仍未修复**——远端 `tests/run_batch10.ts` 里仍是旧断言 `float 会 clamp 而不是溢出回绕`，
+   全量回归仍红 1 条（§6 的现象持续存在）
+
+本轮实测（含全部窗口最新代码的远端快照）：
+
+```
+W8-B 的 50 项用例      通过 50 项，失败 0 项
+全量回归                通过 3696 项，失败 1 项（float，非本窗口）
+本窗口 W8-A 的 41 项    通过 41 项，失败 0 项
+```
+
+---
+
 ## 验收人签字
 
-W8-A / 五条硬标准逐条独立验证完毕 / 结论：**通过（有条件）**
-条件：§5 的两条"需总审裁决"由总审拍板后生效；三条小问题建议对方在后续批次顺手补掉。
+W8-A / 五条硬标准逐条独立验证完毕（两轮） / 结论：**有条件通过**
+条件：
+- §5 的两条"需总审裁决"由总审拍板后生效
+- §6 的 `tests/run_batch10.ts` 遗留需 W8-B 重新推送（约 10 行），否则全量回归的红字会持续误导后续窗口
+- 三条小问题建议对方在后续批次顺手补掉
