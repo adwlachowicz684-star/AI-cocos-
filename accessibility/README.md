@@ -46,9 +46,6 @@ if (a.needsColorAid()) hpBar.addIcon();   // 不能只靠颜色区分
 | **字号要夹范围** | 太小等于没有无障碍，太大会让文字跑出按钮外。这里夹到 [0.8, 2.0] |
 | **三色盲是蓝黄难分，不是红绿** | 三种色觉障碍要分别处理 |
 | **导入脏数据不崩溃** | 手改存档、旧版本残留都会遇到，抛错会让玩家进不去游戏 |
-| **构造参数也会夹范围** | 以前只有 setter 夹，构造传 `shakeScale: 5` 得到 5、`setShakeScale(5)` 却得到 1——同一个值走不同路径结果不同。现在两者同口径 |
-| **`fontScale` 传 NaN 直接抛错** | `fontSize()` 是 `base × fontScale`，一个 NaN 进去全 UI 字号变 NaN，文本消失且不报错。宁可构造时炸，也不能让 NaN 进布局 |
-| **设置界面关掉要 `destroy()`** | `onChange` 闭包通常持有 UI 节点，不断开就是"切几次界面涨几 MB" |
 
 ## 预设
 
@@ -80,10 +77,6 @@ Accessibility.largeText();         // 大字号 + 高对比
 > ⚠️ **`setFontScale` 和 `setShakeScale` 内部会夹范围**，
 > 传超范围的值不报错——返回的是夹完之后的值。
 > 别自己先夹一遍再传，容易两边夹的不一致。
->
-> **构造函数用同一套夹取**（`fontScale` [0.8, 2] / `shakeScale` [0, 1] /
-> `longPressMs` [200, 3000]），非有限值回落到默认值。
-> 唯一的例外是 `fontScale` 传非正数：仍然抛错（见坑表格）。
 
 **表现层查询**（**这三组是本模块的核心**）：
 
@@ -119,15 +112,6 @@ Accessibility.largeText();         // 大字号 + 高对比
 
 > ⚠️ **不调 `exportState()` 的话，玩家每次进游戏都要重设一遍无障碍选项。**
 > 而这恰恰是"最需要长期生效、重设成本最高"的一类设置。
-
-**卸载**：
-
-| 成员 | 说明 |
-|---|---|
-| `destroy()` | 断开 `onChange` 引用 |
-
-> 本单元没有 `install`、没有定时器，看着"没什么可清理的"——
-> 真正要清的就是 `onChange` 这一个引用。
 
 ### `EffectKind` 的全部取值
 
@@ -177,16 +161,6 @@ sway        屏幕震动之外的持续性画面晃动
 散落的布尔量会导致"改了一处忘了另一处"。
 统一入口让"减少动效到底影响什么"有一个地方可以查、
 一个地方可以改、一条测试可以锁住。
-
-## 示例
-
-可运行的完整例子见 [`examples/accessibility-usage.ts`](../examples/accessibility-usage.ts)：
-
-```bash
-npm run build && node .build/examples/accessibility-usage.js
-```
-
-覆盖：影响面查询、震屏倍率、脏配置不进 UI、色觉障碍、存档往返与 `destroy()`。
 
 ## 测试
 
