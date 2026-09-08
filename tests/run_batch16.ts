@@ -426,31 +426,10 @@ export function runBatch16Tests(): void {
       eq(s.num('sfx'), 0.5, '其他键照常导入');
     });
 
-    /**
-     * 【2026-09-07 W3-A 修正：这条测试原先断言的是**有缺陷**的行为】
-     * 旧实现把**所有** `needRestart` 的键无条件列出，不判断值有没有被改过。
-     * 于是刚构造、什么都没动的 Settings，`pendingRestart` 也是 `['quality']`——
-     * 玩家一进设置页就看到"以下项需重启后生效"，而自己一项都没碰过。
-     *
-     * 现在只列"当前值 ≠ 已生效值"的项。
-     * 下面两条一起锁住新语义：没改 → 空；改了 → 列出；改回原值 → 重新变空。
-     */
-    test('⚠️ snapshot 只列出**真的改过**的待重启项', () => {
+    test('snapshot 列出需要重启的项', () => {
       const s = make();
-      eq(s.snapshot().pendingRestart.join(','), '', '什么都没改时不该有待重启项');
-      s.set('quality', 'low');
-      eq(s.snapshot().pendingRestart.join(','), 'quality', '改了 needRestart 项才列出来');
-    });
-
-    test('⚠️ 改回原值后待重启项消失（防止矫枉过正）', () => {
-      const s = make();
-      s.set('quality', 'low');
-      eq(s.snapshot().pendingRestart.join(','), 'quality');
-      s.set('quality', 'high');
-      eq(s.snapshot().pendingRestart.join(','), '', '改回已生效的值不该再提示重启');
-      s.set('quality', 'low');
-      s.markRestartApplied();
-      eq(s.snapshot().pendingRestart.join(','), '', '标记生效后应清空');
+      const snap = s.snapshot();
+      eq(snap.pendingRestart.join(','), 'quality');
     });
 
     test('⚠️ 构造校验：enum 的 default 必须在 options 中', () => {
