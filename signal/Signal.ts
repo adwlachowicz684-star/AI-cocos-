@@ -43,28 +43,9 @@
 export type Listener<T> = T extends (...args: infer A) => unknown ? (...args: A) => void : never;
 
 export class Signal<F extends (...args: never[]) => void> {
-  /**
-   * 【⚠️ 为什么每条注册都要带一个唯一 id，而不是按函数值来认】
-   *
-   * 老实现里"移除"是 `findIndex((l) => l.fn === fn)`（只删第一个），
-   * 但 emit 收尾的清理是 `filter((l) => !_pendingRemoval.has(l.fn))`——
-   * `_pendingRemoval` 是 **Set<函数>**，按函数值去重。
-   *
-   * 于是同一个函数注册两次时（一个 `once` + 一个 `add`，或两个模块各注册一次同一个
-   * 具名回调），任何一次取消都会让收尾的 filter 把**所有** fn 相同的条目一起删掉：
-   *
-   *     listenerCount 2 → emit() → n=1, listenerCount=0   ← add 的那条被连坐删除
-   *
-   * 这是 EventBus 那次"旧取消函数误删同名新监听器"的同类实例，只不过发生在 Signal 上。
-   * 表现是"某个 UI 突然不刷新了"，而代码里看不到任何错误。
-   *
-   * 修法：注册即分配自增 id，取消函数闭包捕获**自己的** id，
-   * `_pendingRemoval` 存 id 而不是函数值 → 一次取消只影响一条注册。
-   */
-  private _listeners: Array<{ id: number; fn: F; once: boolean }> = [];
+  private _listeners: Array<{ fn: F; once: boolean }> = [];
   private _emitting = false;
-  private _pendingRemoval = new Set<number>();
-  private _nextId = 1;
+  private _pendingRemoval = new Set<F>();
 
   /**
    * 添加监听
@@ -76,38 +57,36 @@ export class Signal<F extends (...args: never[]) => void> {
    */
   add(fn: F): () => void {
     let removed = false;
-    const id = this._nextId++;
-    this._listeners.push({ id, fn, once: false });
+    this._listeners.push({ fn, once: false });
     return () => {
       if (removed) return;
       removed = true;
-      this._remove(id);
+      this._remove(fn);
     };
   }
 
   /** 添加一次性监听 */
   once(fn: F): () => void {
     let removed = false;
-    const id = this._nextId++;
-    this._listeners.push({ id, fn, once: true });
+    this._listeners.push({ fn, once: true });
     return () => {
       if (removed) return;
       removed = true;
-      this._remove(id);
+      this._remove(fn);
     };
   }
 
-  private _remove(id: number): void {
+  private _remove(fn: F): void {
     /**
      * 【坑】正在 emit 时移除会破坏遍历。
      * 经典场景：监听者在回调里把自己取消掉（"只处理第一次命中"）。
      * 这里标记为待移除，emit 结束后统一清理。
      */
     if (this._emitting) {
-      this._pendingRemoval.add(id);
+      this._pendingRemoval.add(fn);
       return;
     }
-    const i = this._listeners.findIndex((l) => l.id === id);
+    const i = this._listeners.findIndex((l) => l.fn === fn);
     if (i >= 0) this._listeners.splice(i, 1);
   }
 
@@ -128,18 +107,18 @@ export class Signal<F extends (...args: never[]) => void> {
 
     try {
       for (const l of snapshot) {
-        if (this._pendingRemoval.has(l.id)) continue;
+        if (this._pendingRemoval.has(l.fn)) continue;
         try {
           (l.fn as unknown as (...a: unknown[]) => void)(...args);
         } catch (e) {
           console.error('[Signal] 监听者抛异常：', e);
         }
-        if (l.once) this._pendingRemoval.add(l.id);
+        if (l.once) this._pendingRemoval.add(l.fn);
       }
     } finally {
       this._emitting = false;
       if (this._pendingRemoval.size > 0) {
-        this._listeners = this._listeners.filter((l) => !this._pendingRemoval.has(l.id));
+        this._listeners = this._listeners.filter((l) => !this._pendingRemoval.has(l.fn));
         this._pendingRemoval.clear();
       }
     }
@@ -153,7 +132,7 @@ export class Signal<F extends (...args: never[]) => void> {
   /** 移除所有监听 */
   clear(): void {
     if (this._emitting) {
-      for (const l of this._listeners) this._pendingRemoval.add(l.id);
+      for (const l of this._listeners) this._pendingRemoval.add(l.fn);
       return;
     }
     this._listeners.length = 0;
