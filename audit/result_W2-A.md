@@ -232,3 +232,95 @@ tests/run.ts       → 未被误改 ✓
 
 当前仍未登记的 8 项（`accessibility` / `achievement` / `blessing` / `curse` /
 `gameflow` / `i18n` / `rarity` / `rebind`）均属其他窗口，我未代劳。
+
+---
+
+## 10. 自证：把验收 W2-B 的尺子量回自己
+
+我在 `audit/verify_W2-A.md` 里对 W2-B 做了**源码回退实验**
+（回退其 11 个单元源码、保留其新版测试重跑，80 项中 **44 项**在修复前会红），
+并以此作为"标准 2 · 测试是否真的会失败"的核心证据。
+
+**用同一把尺子量自己**，做法完全相同：
+
+```
+1. 取远程 main 干净快照（含 W6-A / W5-A 最新改动）
+2. 复制一份，只把我的 11 个单元源码回退到开工基线 e8f7245
+3. tests/run_phase10_w2a.ts 保持新版不动
+4. 重新构建，跑同一份测试
+```
+
+### 10.1 结果
+
+| 版本 | 结果 |
+|---|---|
+| 当前 main（已修复）| **通过 80 项，失败 0 项** |
+| 源码回退到基线 | **通过 30 项，失败 50 项** |
+
+**50 / 80 = 62.5% 的用例在修复前会失败。**
+
+同样有编译期旁证——回退后 `tsc` 直接报缺失新 API：
+`NO_TASK`、`REPORT_REASONS`、`onRollbackError`、`lastRollbackErrors`、
+`replacer`、`destroy` 等，说明测试确实绑定在新行为上。
+
+### 10.2 按分组分布
+
+| 分组 | 用例 | 回退后失败 |
+|---|---|---|
+| logger · Silent 语义显式化 | 10 | 7 |
+| scheduling · StepContext.elapsed 与 P2 | 10 | 7 |
+| runscope · 原型链键 | 10 | 5 |
+| social · byReason 与阈值收口 | 7 | 6 |
+| diagpack · 配额收口与 destroy（P2）| 8 | 5 |
+| indicator · 中心一致 | 7 | 4 |
+| diagpack · 脱敏不破坏 JSON | 6 | 4 |
+| skill-caster · resetCooldown | 5 | 4 |
+| attribute · clearModifiers 通知 | 4 | 3 |
+| command · rollback | 3 | 2 |
+| diagpack · safeStringify 共享引用 | 3 | 2 |
+| pathfinding · 起点校验 | 4 | 1 |
+| attribute · override 与 add | 3 | **0** ⚠️ |
+
+14 条 P1 中 **13 条**有"修复前会失败"的用例。
+
+### 10.3 ⚠️ 必须坦白：有 4 条我没有"修复前会失败"的用例
+
+按任务书 5.1，每条修复都该配一条"修复前确实会失败"的用例。
+以下 4 条**做不到**，原因是**它们本来就不改变运行期行为**——
+但我不能让它们悄悄混在"19 条已修"里，必须单独列出：
+
+| 条目 | 为什么没有失败用例 | 性质 |
+|---|---|---|
+| **P1-2** attribute `override` 死三元 | 原代码 `v = overridden ? v + add : v + add`，两分支完全相同 → 删掉死变量后结果**恒为 150，与修复前一致**。若想让测试变红，必须改成"override 定终值"（=100），但那会推翻 README 已论证的语义。**我选择保留语义、只删死代码**，用例因此只能是"现状上锁" | 澄清性修复，行为不变 |
+| **P2 · Ru5** `StoreSchema` 的 `any` → `unknown` | 纯类型改动，运行期完全不可观测。它的价值在编译期：防止 `def.initial` 被当数字用而绕过 `_sanitize` 校验 | 类型层修复，运行期不可测 |
+| **P2 · Sch4** ctx 对象按帧复用 | 纯性能（热路径分配），无外部可观测行为变化 | 性能修复 |
+| **P2 · Sch5** `schedule()` 二分插入 | 纯性能（O(N²logN) → O(NlogN)），结果顺序不变 | 性能修复 |
+| **P2 · Sch6** `flush()` 游标遍历 | 纯性能（O(n²) → O(n)），行为不变 | 性能修复 |
+
+（是 5 条，其中 Sch4/Sch5/Sch6 同属 scheduling 性能组。）
+
+**这 5 条的用例全部是"现状上锁"型**——断言修复前后的同一行为，
+防止将来有人改坏，但**回退修复后它们照样通过**。
+
+**我认为这是正确的处理**（为了凑一条"会红"的用例去改语义，才是真正的矫枉过正），
+但判定权在总审：如果总审认为"现状上锁"不达标，请指出，
+我可以为 Sch4/Sch5/Sch6 补性能护栏（如断言大批量注册耗时上界）。
+
+### 10.4 六个校验脚本（远程 main @ 8683604c）
+
+| 脚本 | 结果 |
+|---|---|
+| `node scripts/check-deps.js` | **1 项待处理** ⚠️ |
+| `node scripts/check-links.js` | 断链 0 处 ✓（42 条链接、191 个 .md）|
+| `python3 scripts/scan-dt-guard.py` | 命中 0 处 ✓ |
+| `python3 scripts/scan-num-guard.py` | 命中 0 处 ✓ |
+| `python3 scripts/check-random-source.py` | 未发现自建随机源 ✓ |
+| `python3 scripts/check-dup-exports.py` | 无待处理冲突 ✓ |
+
+**断链已归零** —— 之前那处 `audit/handoff_W3-B.md` 的断链已被 W3-B 或总审修掉，
+我未参与。
+
+**`check-deps.js` 那 1 项**是 8 个未登记依赖
+（`accessibility` / `achievement` / `blessing` / `curse` / `gameflow` /
+`i18n` / `rarity` / `rebind` → `_core`），**全部属于其他窗口**，
+按"验收方不直接改对方代码"我不代劳，已在 §9.2 建议总审统一处理。
