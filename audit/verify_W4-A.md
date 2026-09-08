@@ -1,103 +1,273 @@
 # 验收报告 · W4-A 验收 W4-B
 
+> 被验收：`audit/result_W4-B.md`（178 行）+ `tests/run_phase10_w4b.ts`（752 行 / 71 项）
+> 提交：`c8c1c0f`（7 单元 / 16 条）+ `d62db0f`（推送后复核）
+> 验收依据：`audit/review_A.md` 的五条硬标准
+> 验收时间：2026-09-08，在远程 `main` 最新代码上重跑
+
+---
+
 ## 结论
 
-**无法验收 —— 对方尚未交付。**
+**有条件通过 —— 1 处标红需返工，4 处建议补（不阻塞）。**
 
-按 `review_A.md` 第 1 节，W4-B 应产出：
+16 条里 **14 条达标**。独立复核确认：把 W4-B 的 71 项测试跑在修复前代码上，
+得到 **通过 35 / 失败 36**，与对方自述**完全一致**——测试有效性这一条是硬的，
+71 项里没有一条是"传个正常值断言它正常"的空转。
 
-- `audit/result_W4-B.md`
-- `tests/run_phase10_w4b.ts`（导出 `runPhase10W4BTests()`）
-
-本窗口落盘时，这两份文件**在仓库里都不存在**：
-
-```
-$ ls audit/result_W4-B.md tests/run_phase10_w4b.ts
-ls: cannot access 'audit/result_W4-B.md': No such file or directory
-ls: cannot access 'tests/run_phase10_w4b.ts': No such file or directory
-```
-
-整个 `audit/` 下没有任何 `result_*.md` 或 `verify_*.md`，全库 `tests/` 下也只有本窗口的
-`run_phase10_w4a.ts`——即**第 B 组 8 个窗口整体尚未开始交付**，不是 W4-B 单独落后。
-
-因此五条硬标准**逐条无从判断**：没有对方的复现输出（标准 1）、没有测试代码可读（标准 2/3）、
-没有改动范围可比对（标准 4/5）。按 `review_A.md` 第 0 节
-"验收不是看一遍觉得对，是逐条独立验证"，本窗口不做任何形式的"预估通过"。
+但有一条踩了标准 5：`mover` 的 `knocked` 判据改动，把原代码注释**明确警告要防**
+的传送带场景，从"0 帧误判"变成"几乎全程误判"。这是本项目最容易复发的一类错误的
+**反向形态**——不是漏修，是把"设计如此"当成缺陷修掉了。
 
 ---
 
-## 二、替代动作：W4-B 15 条的**只读基线核验**
+## 一、逐条验收
 
-为了不让这次验收变成一张空表，本窗口在**不修改任何代码**的前提下，
-对 W4-B 的 15 条在当前基线（= W4-A 修复后、`main` 之前）上做了一次存在性核验。
-用途有两个：
+✅ 达标 · ⚠️ 小问题（建议补，不阻塞）· ❌ 实质问题（需返工）· N/A 不适用
 
-1. 对方开工时可直接拿它当"复现前基线"，省一轮重复劳动
-2. 总审合并时可用它判断"W4-B 的修复是否真的改变了行为"
+| 条目 | 标准1<br>复现 | 标准2<br>测试有效 | 标准3<br>对照用例 | 标准4<br>无顺手重构 | 标准5<br>未误判设计 | 备注 |
+|---|---|---|---|---|---|---|
+| W4-B-01 `dialogue` 全禁用死锁 | ✅ | ✅ | ✅ | ✅ | ✅ | 新增 `hasEnabledChoice()`；breaking 已上报裁决 |
+| W4-B-02 `fov` isSymmetric 污染 explored | ✅ | ✅ | ✅ | ✅ | ✅ | 113→148 实测复现；快照还原两张图 |
+| W4-B-03 `fov` _castRay NaN 死循环 | ⚠️ | N/A | ✅ | ✅ | ✅ | **见"建议补 1"**：基线已带守卫，属"锁现状" |
+| W4-B-04 `joystick-mover` 复用对象 | ✅ | ✅ | ✅ | ✅ | ✅ | 保留零分配语义（**未误判设计**，处理得当） |
+| W4-B-05 `mover` addImpulse 默认上限 | ✅ | ✅ | ✅ | ✅ | ✅ | 默认改 `maxSpeed×5`，`Infinity` 仍可显式不设限 |
+| W4-B-06 `mover` moveBy 缺 safeDt | ✅ | ✅ | ✅ | ✅ | ✅ | 三种异常 dt 全拒，冲刺超速对照保留 |
+| W4-B-07 `mover` 配置未收口 | ✅ | ✅ | ✅ | ✅ | ✅ | 9 个配置全走 `numOr` |
+| W4-B-08 `rebind` 坏数据中断整批 | ✅ | ✅ | ✅ | ✅ | ✅ | 与 JSDoc"坏数据跳过"对齐 |
+| W4-B-09 `rebind` 重复 code 静默解绑 | ✅ | ✅ | ✅ | ✅ | ✅ | 保留前者、跳过后进，且触发 onChange |
+| W4-B-10 `rebind` prettyKey 原型链 | ✅ | ✅ | ✅ | ✅ | ✅ | 改用 `hasOwn` |
+| W4-B-11 `reddot` activePaths O(n²) | ✅ | ✅ | ✅ | ✅ | ✅ | 我独立对拍：结果逐条一致，性能改善属实 |
+| W4-B-12 `shop` _log 无上限 | ✅ | ✅ | ✅ | ✅ | ✅ | `logLimit` 用 `clampNum` 收口，默认 200 |
+| W4-B-13 `fov` P2 尺寸校验与周长分配 | ✅ | ✅ | ⚠️ | ✅ | ✅ | **见"建议补 2"**：对拍用例恒通过 |
+| W4-B-14 `mover` P2 knocked 判据与阈值 | ✅ | ✅ | ❌ | ✅ | ❌ | **标红**，见第二节 |
+| W4-B-15 `rebind` P2 恢复默认/destroy | ✅ | ✅ | ✅ | ✅ | ✅ | 补发 onChange；新增 destroy |
+| W4-B-16 `shop` P2 restock 区间反序 | ✅ | ✅ | ✅ | ✅ | ✅ | 清单外附带修复，理由充分（负库存=无限） |
 
-方法：只读脚本 + 源码定位，全部走公开 API 或读文件，**未改任何一行**。
+---
 
-| 条目 | 单元 | 核验方式 | 当前基线结论 |
+## 二、❌ 标红：W4-B-14 的 `knocked` 判据（标准 3 + 标准 5）
+
+### 改了什么
+
+`addImpulse` 里击退态的判据，从"本次冲量"改成"合成后的总外力"：
+
+```typescript
+// 修复前
+const mag2 = Math.sqrt(ix * ix + iy * iy);
+if (mag2 > this._cfg.maxSpeed * 0.5) this.knocked = true;
+
+// 修复后
+if (applied > this._cfg.maxSpeed * 0.5) this.knocked = true;   // applied = 合成后总外力
+```
+
+修复的动机是对的：3 次 `addImpulse(2.5, 0)` 合成 7.5，明显在推开角色，
+却因为每次 `mag2 = 2.5 < 3` 而漏判。测试 `:390` 确实覆盖了这一点。
+
+### 但它踩中了原注释明确警告的场景
+
+被改掉的这段**上方紧挨着**的注释，原文是：
+
+```
+// 【⚠️ 外力存在期间才置 knocked】
+// 用"刚加过冲量"标记，而不是"外力 > 0"，
+// 否则传送带这种持续小外力会让角色永远处于击退态。
+```
+
+**"用单次冲量而不是合成后总外力"是刻意的设计**，目的正是防止传送带误判。
+W4-B 的改动说明里引用了这段注释的前半句，但没有回应后半句这个反例。
+
+### 我实测的结果（每帧持续施加小外力，跑 600 帧 = 10 秒）
+
+| 传送带强度 | 旧实现 knocked 帧数 | 新实现 knocked 帧数 |
+|---|---|---|
+| 每帧 0.5 | **0 / 600** | **590 / 600** |
+| 每帧 1.0 | **0 / 600** | **597 / 600** |
+| 每帧 2.0 | **0 / 600** | **599 / 600** |
+
+（`externalSpeed` 稳态分别为 3.51 / 7.01 / 14.02，与实现无关，两者一致）
+
+### 后果
+
+`update` 里是 `const control = this.knocked ? knockbackControl : 1;`，
+默认 `knockbackControl = 0.3`。于是——
+
+> **玩家一踏上传送带，操作权就从 100% 掉到 30%，且只要还在传送带上就一直不恢复。**
+
+表现是"站上传送带就操作失灵"。而且它不报错、不崩溃，
+只会被玩家归因为"这游戏手感差/我网卡了"。
+
+### 为什么对照用例没抓到
+
+该组唯一的防误判对照是 `:399`——单次 `addImpulse(1, 0)` 后断言 `knocked === false`。
+单次当然不触发（合成外力才 1 < 3）。
+
+**真正该测的是"持续多帧累加"**，而这恰恰是注释里点名的场景。
+所以标准 3 判 ❌：对照用例没有覆盖本次改动最容易伤到的地方。
+
+### 建议（不替对方拍板，给两个方向）
+
+1. **双条件**：合成后够大 **且** 本次冲量不是微量，例如
+   `applied > maxSpeed * 0.5 && mag2 > stopEpsilon * 10`。
+   传送带每帧只有 0.5~2，会被第二个条件挡住；连击每次 2.5 能通过。
+2. **保持单次判据，只补"同帧多次"**：把合成判据限制在**同一帧内的多次调用**
+   （那才是"多段击退"的真实形态），跨帧的持续外力不算。
+
+无论选哪个，都请补一条**持续小外力**的对照用例——原注释既然写了那个警告，
+它就应该有一条测试守着。
+
+---
+
+## 三、⚠️ 建议补（4 处，不阻塞交付）
+
+### 1. W4-B-03 的状态标注应改为"不成立 + 加固"
+
+对方诚实地写了"当前 HEAD 上已带守卫，直接跑返回 0"，
+但表格状态仍写"已修（附说明）"，而复现方式是"**把入口守卫与迭代上限去掉还原成
+报告描述的形态后**，8 秒超时退出码 124"。
+
+我在自己那份开工前基线（`orig`）里核对过，守卫**早就存在**：
+
+```typescript
+if (!this._inBounds(ox, oy)) return 0;          // FOV.ts:496
+const r = normalizeRadius(radius, this._w, this._h);  // 内含 needFinite(radius, 'radius')
+```
+
+`normalizeRadius` 在修复前就在文件第 125 行，且注释里已经记录了
+"实测（修复前）：`compute(NaN, NaN, 4)` → 主线程冻死，5 秒超时被杀（退出码 124）"
+——这是更早的 P0 轮留下的。
+
+所以这条的准确结论是：**现象在当前基线不成立**（与我自己那条 W4A-03 同类），
+本窗口的贡献是"补了 3 条测试把现状锁住"，**实现未改**（我 diff 过 `FOV.ts`，
+`_castRay` 与 `compute` 入口守卫一处没动）。
+
+对应地，那 3 条 ⚠️ 用例在修复前**也通过**（不在我复核出的 36 条失败里），
+按标准 2 属于"锁现状"而非"修复证据"。建议把状态改成"不成立 + 加固"，
+并把这 3 条用例的语义从"回归"改成"防回退锁"。
+
+### 2. W4-B-13 的对照用例 `:215` 是恒通过的
+
+```typescript
+const rc = new Raycasting(11, 11, isWall);
+rc.compute(5, 5, 6);
+const ref = new Raycasting(11, 11, isWall);   // ← 同样是新实现
+ref.compute(5, 5, 6);
+for (...) eq(rc.canSee(x, y), ref.canSee(x, y), ...);
+```
+
+两个实例跑的都是**新代码**，这个对拍永远一致，测不出"重构是否改变了遍历顺序"。
+
+我替他做了真正有效的对拍——拿**修复前**的实现做基准，5 种墙型 × 5 种半径共 25 个场景逐格比对：
+
+```
+perimeter 重构对拍：检查 25 个场景，差异 0 处 → 结果完全一致 ✓
+```
+
+**结论是对的（重构未改变行为），但用例本身无效。** 建议换成硬编码的期望格表，
+或至少在注释里说明"此处是同实现对拍，防的是将来改遍历顺序"。
+
+### 3. fov isSymmetric 的快照用了他自己刚批判过的 `toArray()`
+
+对方新增 `mergeFrom` 时的注释写得很好：
+
+> "行，但 `toArray()` 会为**每个可见格**分配一个对象。视野每帧都要算一次，
+> 4000 格的图就是每帧 4000 次分配——纯粹为了让另一个数组能读到坐标，GC 压力全花在这上面。"
+
+但 `isSymmetric` 的快照还原用的正是 `toArray()` + 逐格 `mark()`，而且是两张图各一次。
+`VisibilityMap` 内部就是 `Uint8Array`，快照本可以 `this._data.slice()`——
+O(w·h) 次内存拷贝、零对象分配。
+
+实测（60×60 地图，1000 次平均）：
+
+| 场景 | 修复前 | 修复后 | 倍数 |
 |---|---|---|---|
-| 所有选项条件都不满足时对话死锁 | dialogue | 查 `DialogueGraph` 实例成员 | **仍存在**：`hasEnabledChoice` 为 `undefined`（建议的 API 尚未提供） |
-| `isSymmetric()` 污染 `explored` | fov | 导出符号核对 | **未修**：`fov/FOV` 导出 `VisibilityMap / Shadowcasting / Raycasting / makeWallTest`，`isSymmetric` 在 `Raycasting` 上 |
-| `_castRay` 在 NaN 坐标下死循环 | fov | **源码定位（不敢实跑）** | **未修**：`FOV.ts:492-509` 越界检查仍是 `x < 0 \|\| y < 0 \|\| x >= w \|\| y >= h`（否定不了 NaN）。**本窗口刻意没有实跑**——死循环会冻死沙盒进程，与"验收不得破坏构建"冲突 |
-| `evaluate()` 返回复用对象 | joystick-mover | 实跑 | **仍存在**：`a === b` → `true`（第二次 `evaluate` 改写了第一次持有的引用） |
-| `addImpulse` 默认 `maxExternal = Infinity` | mover | 读源码 | **仍存在**：签名 `addImpulse(ix, iy, maxExternal = Infinity)` |
-| `moveBy` 无 `safeDt` 守卫 | mover | 读源码 | **仍存在**：`moveBy` 前 400 字符内无 `safeDt`（而 `update` 有） |
-| `externalDamping`/`turnBoost` 未收口 | mover | 读源码 | **仍存在**：构造校验只有 `maxSpeed/accel/decel` 三条 `!(x > 0)` |
-| `importState` 坏数据中断整批 | rebind | 源码定位 | **未修**（需在对方交付后复现） |
-| 重复 code 导入导致前一动作被解绑 | rebind | 源码定位 | **未修** |
-| `prettyKey` 原型链污染 | rebind | 实跑 | **仍存在**：`prettyKey('constructor')` 的 `typeof` 是 **`function`** |
-| `activePaths()` 是 O(n²) | reddot | 读源码 | **仍存在**：`[...this._leaf.keys()].filter((p) => this.get(p) > 0)`，而 `get` 内部全表扫描 |
-| `_log` 无容量上限 | shop | 读源码 | **仍存在**：`Shop.ts:426` / `:459` 两处 `this._log.push`，无裁剪 |
-| P2 三条（fov / mover / rebind，见正文） | — | — | 未逐条展开（P2 可选，等对方交付后按取舍再验） |
+| 半径 6 | 0.0154 ms/次 | 0.0261 ms/次 | **1.70x** |
+| 半径 12 | 0.0265 ms/次 | 0.0392 ms/次 | **1.48x** |
 
-**结论一致性**：12 条 P1 全部"仍存在/未修"，与"W4-B 尚未交付"互相印证——
-不存在"对方偷偷改了但没写报告"的情况。
+而且它**随 explored 累积变贵**（玩得越久越慢）：explored 铺开后涨到
+0.0607 / 0.0850 / 0.1038 ms/次（半径 6 / 12 / 20）。
 
----
+`isSymmetric` 是"怪物看不看得见我"的 AI 判定，属于每帧每怪都要调的热路径。
+**1.7 倍换"迷雾不被污染"是划算的**，我不认为这构成返工理由；
+但既然同一份文件里刚批评过这个写法，这里用 `Uint8Array` 切片是顺手的事。
 
-## 三、给 W4-B 窗口的三点提醒（提前说，减少返工）
+### 4. 7 个单元的 README 一处都没同步
 
-这三点来自本窗口自己踩过的坑，不是对未交付内容的评判。
+| 新增/变更 | 源码 JSDoc | README |
+|---|---|---|
+| `mover.addImpulse` 默认 `maxSpeed×5` | ✅ 写得很详细 | ❌ `mover/README.md:105` 仍写"建议设为 `maxSpeed × 4` 左右"，与新默认值 5 打架 |
+| `shop` 新增 `ShopOptions.logLimit` | ✅ | ❌ 未提 |
+| `joystick-mover` 新增 `snapshot()` / `evaluateInto()` | ✅ | ❌ 未列（但 `:133` 本就写了"复用对象别存引用"，**风险已被文档覆盖**，优先级最低） |
+| `mover` / `rebind` 新增 `destroy()` | ✅ | ❌ 未列 |
 
-1. **`fov._castRay` 的 NaN 死循环，复现时别在沙盒里直接跑。**
-   它会冻死进程（无异常、无日志，`try/catch` 无效）。
-   建议要么按源码逐步模拟（就像原报告 `b1_v2` [17] 做的那样），
-   要么在子进程里跑并加超时。`review_A.md` 第 2 节也明令禁止
-   "改回旧代码跑一遍"的破坏性验证。
-
-2. **`mover` 的 `addImpulse` 是"模式 F：缺省配置与 JSDoc 承诺相反"的实例。**
-   改法二选一（改默认值 / 改文档），**不要只改一个又不动另一个**——
-   本窗口在 `bullet-pattern` 的 `aimAtTarget` 上就是按这条处理的：
-   以 JSDoc 为准改了实现，缺省固定角度取 0，并在 README 写明。
-
-3. **`joystick-mover` 的"每帧零分配"是**有意为之的热路径优化**，不是 bug。**
-   原报告也承认了这个意图。建议按"补文档 / 提供 `evaluateInto(out)` 与 `snapshot()`"的方向处理，
-   而不是直接改成每次 `return { ... }`——那会让热路径重新产生每帧分配。
-   这是标准 5「别把设计如此误判成 bug」的典型场景。
+源码 JSDoc 的质量很高（尤其 `addImpulse` 那段，把"为什么默认不能是 Infinity"
+讲透了），所以这只是文档同步的遗漏，不是"注释不到位"。
 
 ---
 
-## 附：本窗口（W4-A）交付时的全库校验结果
+## 四、对方已上报的 2 处裁决：我的意见
 
-供总审比对——下面这份输出是 W4-A 自己交付时的状态，与 W4-B 无关。
+**① `dialogue` 全禁用即终态（breaking）—— 支持维持现状。**
+"能检测到但解不开"确实不算修复；只加 `hasEnabledChoice()` 而让自动播放继续卡死，
+等于把死锁从"无解"降级成"可诊断的无解"，玩家还是得杀进程。
+代价（调用方适配 `advanceToChoice` 返回值）远小于收益。
+
+**② `addImpulse` 默认取 `maxSpeed × 5`（任务书建议 2）—— 支持 5。**
+理由是"削成挠痒痒比叠成火箭更隐蔽"（没人会想到默认值在削自己），这个判断我认同。
+**但建议与第二节的传送带问题合并考虑**：如果 `knocked` 判据改回保守版本，
+击退的"体感强度"主要靠外力上限控制，那时 5 的取值就更稳妥了。
+
+---
+
+## 五、我的复核方法（供对方与总审复核我的结论）
+
+按 `review_A.md` 第 2 节的要求，**没有用"改回旧代码跑一遍"的破坏性验证**。
+我保留了一份**自己开工前**的完整基线（`orig`，W4-B 交付前的 `main`），
+用它做只读对拍：
 
 ```
-bash build.sh                          → TSC OK（产物校验通过：211 个 .js）
-node .build/tests/run.js               → 通过 3695 项，失败 0 项
-W4-A 独立测试（runPhase10W4ATests）     → 通过 71 项，失败 0 项
-node scripts/check-deps.js             → 全部通过 ✓
-node scripts/check-links.js            → ✗ 1 处误报（见 W4-A 报告第五节）
-python3 scripts/scan-dt-guard.py       → 命中 0 处 ✓
-python3 scripts/scan-num-guard.py      → 命中 0 处 ✓
+# 1. 测试有效性：把 W4-B 的测试跑在修复前代码上
+cp latest/tests/run_phase10_w4b.ts orig/tests/
+tsc -p tsconfig.json --outDir .build_orig      # 报 10 处"方法不存在"——正好是新增 API
+node .build_orig/.../run_phase10_w4b.js        # 通过 35 项，失败 36 项  ← 与对方自述一致
+
+# 2. 行为对拍（旧实现 vs 新实现）
+- fov perimeter 重构：5 墙型 × 5 半径，25 场景逐格比对 → 0 差异
+- reddot activePaths：300 条随机路径，activePaths + get() 对拍 → 0 差异
+- fov compute：explored / visible 计数 + 有墙场景逐格 → 0 差异
+
+# 3. 传送带场景（发现标红问题的那一步）
+- 每帧 addImpulse(0.5 / 1.0 / 2.0) × 600 帧，对比 knocked 帧数
+```
+
+---
+
+## 附：全库校验结果（在远程最新 `main` 上）
+
+```
+bash build.sh                        → TSC OK（产物校验通过：227 个 .js）
+node .build/tests/run.js             → 通过 3696 项，失败 1 项   ← 见下方说明
+W4-B 独立运行（71 项）                → 通过 71 项，失败 0 项 ✓
+node scripts/check-deps.js           → [✗] 6 条未登记（i18n/gameflow/curse/rarity/rebind/accessibility → _core）
+node scripts/check-links.js          → 断链 0 处 ✓（W3-B 已修好 check-links 的误判）
+python3 scripts/scan-dt-guard.py     → 命中 0 处 ✓
+python3 scripts/scan-num-guard.py    → 命中 0 处 ✓
 python3 scripts/check-random-source.py → [OK] ✓
-python3 scripts/check-dup-exports.py   → [OK] ✓
+python3 scripts/check-dup-exports.py → [OK] ✓
 ```
 
-⚠️ 提醒总审：`check-links.js` 那处失败是 `audit/handoff_W3-B.md` 代码块里
-一段形如 `this._derived[id](省略号)` 的调用被误判成 markdown 链接，
-属**校验脚本的误报**（代码里的 `](` 不是链接），且该文件属 W3-B 窗口，本窗口未触碰。
-建议让 `check-links.js` 跳过反引号内的内容，
-否则 16 个窗口交付时它会一直红着，掩盖真正的断链。
+⚠️ **全量回归的 1 项失败不属于 W4-B**：
+
+```
+✗ 第九批 › BinarySerializer · 位级序列化 › ⚠️ float 会 clamp 而不是溢出回绕
+   [Binary] float 越界：999（范围 -10..10）
+```
+
+这是 `binary` 单元（**W8-B 窗口**）与第九批老测试的冲突：老测试期望越界静默 clamp，
+W8-B 改成了抛错。与 W4-B 的 7 个单元无关，**请总审在合并时裁定**（我的意见是
+W8-B 的方向对——README §6③ 明确写了"越界值绝不静默截断"，老测试才是该改的那个）。
+
+⚠️ **check-deps 的 6 条未登记是全库级并发问题**，其中 `i18n` / `gameflow` 来自我（W4-A）、
+`rebind` 来自 W4-B，其余来自其它窗口。W4-B 报告第四节的判断我完全同意：
+**16 个窗口各自 `--fix` 会被下一次提交冲掉，只能由总审统一 fix 一次**。
+本窗口同样不执行 `--fix`。
