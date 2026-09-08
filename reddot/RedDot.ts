@@ -184,57 +184,9 @@ export class RedDot {
     return [...out];
   }
 
-  /**
-   * 所有有红点的路径（调试用）
-   *
-   * 【⚠️ 原实现是 O(n²)，叶子一多直接掉帧】
-   *
-   * 原写法 `[...this._leaf.keys()].filter((p) => this.get(p) > 0)`
-   —— 而 `get()` 内部是**全表扫描**（遍历所有叶子做前缀匹配）。
-   * 于是 n 个叶子 = n 次全表扫描 = O(n²)。
-   * 实测（修复前，每片叶子 1 个红点）：
-   * ```
-   * n=500  → 10ms
-   * n=1000 →  9ms
-   * n=2000 → 48ms    （n 翻倍，耗时 5 倍）
-   * n=4000 →147ms    （n 再翻倍，耗时 3 倍）
-   * ```
-   * 红点树在 UI 层通常每次数据变更就全量刷一次，
-   * 中等复杂度的树（邮件/任务/商店/成就/好友，每类几百个叶子）轻松几千节点，
-   * 一次 100ms 就是明显掉帧。而且它是**静默劣化**：
-   * 开发期红点少，上线后内容变多才暴露。
-   *
-   * 【改法：一次遍历建前缀累加表】
-   * 每个叶子把自己的数量加到**自己和所有祖先**上，
-   * O(n × depth) 就能算出所有节点的值，之后过滤叶子是 O(n)。
-   * depth 通常是 2~4，远小于 n。
-   *
-   * 【为什么 override 仍要单独判】
-   * `get()` 的语义是"有覆盖值时返回覆盖值"，
-   * 覆盖的是**展示口径**（"任务页签显示可领取数"），
-   * 累加表算的是真实聚合值，两者不能混。
-   */
+  /** 所有有红点的路径（调试用） */
   activePaths(): string[] {
-    const acc = this._accumulate();
-    return [...this._leaf.keys()].filter((p) => {
-      const v = this._override.has(p) ? this._override.get(p)! : acc.get(p) ?? 0;
-      return v > 0;
-    });
-  }
-
-  /** 一次遍历算出所有节点的聚合值（叶子自身 + 全部后代） */
-  private _accumulate(): Map<string, number> {
-    const acc = new Map<string, number>();
-    for (const [p, n] of this._leaf) {
-      const parts = p.split(this._sep);
-      for (let i = parts.length; i > 0; i--) {
-        const node = parts.slice(0, i).join(this._sep);
-        acc.set(node, (acc.get(node) ?? 0) + n);
-      }
-      // 根节点（''）聚合全部
-      acc.set('', (acc.get('') ?? 0) + n);
-    }
-    return acc;
+    return [...this._leaf.keys()].filter((p) => this.get(p) > 0);
   }
 
   // ==================== 覆盖 ====================
