@@ -324,3 +324,121 @@ tests/run.ts       → 未被误改 ✓
 （`accessibility` / `achievement` / `blessing` / `curse` / `gameflow` /
 `i18n` / `rarity` / `rebind` → `_core`），**全部属于其他窗口**，
 按"验收方不直接改对方代码"我不代劳，已在 §9.2 建议总审统一处理。
+
+---
+
+## 11. 回应 W2-B 对我的验收（`audit/verify_W2-B.md`）
+
+W2-B 在我交付前（其提交 16:47Z，我推送 23:24Z）写了 `verify_W2-B.md`：
+结论是"无法给出验收结论——对方尚未交付"，但**在"对方未交付"前提下，
+对我 19 条逐条写了复现脚本**（31 项检查：P1 14 + P2 17 子项），
+判定 29 项"仍在"、2 项"已不成立"。
+
+这份工作质量很高，且给了我三条关键提醒。**我已在其报告写作基线之外完成了修复，
+现逐条回应**。
+
+### 11.1 31 项在我修复后代码上的复现实测
+
+| # | 条目 | W2-B 基线实测 | 我修复后实测 | 判定 |
+|---|---|---|---|---|
+| 1 | attribute `clearModifiers` 通知 | 计数仍 1 | **add 后 1 → clear 后 2** | 已修 |
+| 2 | attribute `override` 死三元 | 源码仍 `overridden ? v+add : v+add` | 剥离注释后 `overridden` 出现 **0** 次，实际语句 `v = v + add` | 已修（语义不变，见 §10.3）|
+| 3 | command 空 catch | 源码无空 catch（其基线如此）| 剥离注释后空 catch **0** 处；改为 `catch (e) { errors.push(...) }` | 已修 |
+| 4 | diagpack 共享引用 | `{"a":{...},"b":"[Circular]"}` | `{"a":{"hp":100},"b":{"hp":100}}` | 已修 |
+| 5 | diagpack redact 破坏 JSON | 多一个 `}`，parse 失败 | `{"password": "[REDACTED]","nested":1}`，**parse 成功** | 已修 |
+| 6 | indicator 中心不一致 | compute 6 / centerFor 3 | **3 / 3**；ring 结果已带 `innerRadius` | 已修 |
+| 7 | logger Silent 空 if | 无 `return`，仍在写缓冲 | `bufferWhileSilent:false` 时 **buffered=0**；默认仍写缓冲（刻意设计，见 §3.2）| 已修 |
+| 8 | pathfinding 起点校验 | 仍返回 5 步路径 | 返回 **null** | 已修 |
+| 9 | runscope 原型链 | `has('toString')` 已 false | `has`=false、**`scopeOf` 返回 null**（基线 undefined）| 已修（后半段）|
+| 10 | runscope `getOr` 吞异常 | `getOr` 不抛 | 默认仍返回 fallback（兼容）；**`getOr(k,f,false)` 抛错** | 已修（开关式，见 §3.1）|
+| 11 | scheduling `elapsed` | 恒 0 | `[5]`，跨帧按帧起点重算 | 已修 |
+| 12 | skill-caster 充能 | resetCooldown 后仍 0，再放变 -1 | **0 / 2 / 1** | 已修 |
+| 13 | social `byReason` | `{"cheating":1}`，`afk+1`=NaN | 6 个 reason 全有值，**`afk+1`=1** | 已修 |
+| 14 | social `abuseThreshold` | NaN → false | NaN → **true**；`-1` → **false**（不再误伤全员）| 已修 |
+| Di3 | replacer 恒等函数 | `(_key,v)=>v` 占位 | 可由调用方注入 | 已修 |
+| Di4 | 配额未收口 | `maxSectionChars:0` 截成 0 字符 | `positiveCapOr` 收口 | 已修 |
+| Di5 | `collectEnvironment` 直连 Date/Intl | 仍在（**可接受**）| 已支持注入 | 已修（超出要求）|
+| Di6 | diagpack 无 destroy | 无 | **有** | 已修 |
+| — | indicator ring innerRadius | 结果不带 | **带** | 已修 |
+| L2 | `addSink` 取消函数误删 | sinks 长度 0 | token 化注销 + 遍历副本 | 已修 |
+| L3 | 缓冲持有 data 引用 | 仍持引用 | `bufferData:false` 后 export 条目 data 为 **undefined** | 已修 |
+| L4 | `Assert.soft` 未接 sink | 直接 console.warn | **`Assert.setSoftHandler`** 可重定向（实测收到 `[软断言] ...`）| 已修 |
+| Ru3 | `importSave` 不校验 | `gold:NaN` 直通 | 回退初始值并告警 | 已修 |
+| Ru4 | `add` 不校验 delta | 值变 NaN | **抛错** `[ScopedStore] add() 的增量必...` | 已修 |
+| Ru5 | `StoreSchema` 含 `any` | `KeyDef<any>` | `KeyDef<unknown>`（类型层）| 已修 |
+| Ru6 | runscope 无 destroy | 只有 reset | **有** | 已修 |
+| Sch2 | `hardLimitMs` 未收口 | 0 → 只跑 1 个；NaN → 失效 | `0` **抛错**；`NaN` 收口到 **8** | 已修 |
+| Sch3 | 无 `onError` | 抛错也触发 onDone | 支持 `onError` | 已修 |
+| Sch4/5/6 | 三项性能 | 仍在 | ctx 复用 / 二分插入 / 游标遍历 | 已修（纯性能，见 §10.3）|
+| Sch7 | `scheduleBatch([])` 返回 0 | 返回 0 | 返回具名 **NO_TASK** | 已修 |
+
+**31 项全部已处理**（Di5 为"可接受"项，我仍顺手做了注入）。
+
+### 11.2 两条"已不成立"的核对（基线差异，非判定错误）
+
+| 条目 | W2-B 判定 | 我的核对 |
+|---|---|---|
+| #3 command 空 catch | ✓ 已不成立（其基线已无空 catch）| **在我的基线 `e8f7245` 上确实存在**（`CommandStack.ts:336-338`）。差异源于双方开工基线不同（我 `e8f7245`，W2-B `70b6134`）。我按自己的复现修了 |
+| #9 runscope 原型链 | ✓ 已不成立（`has('toString')` 已 false）| **部分成立**：`has()` 在 P0 阶段已修好，但 `scopeOf()` 仍返回 `undefined`、`get/set` 仍抛 `Cannot read properties of undefined`。我修的是后半段 |
+
+两条差异都是**基线版本差**造成，不是谁判错——W2-B 的判定在其基线上成立。
+这也说明**"改之前必须先复现"这条纪律的必要性**：同一条目在不同快照上结论可以相反。
+
+### 11.3 三条关键提醒，我的处理均与之吻合
+
+**① 标准 2 提醒**："6 条是配置未收口，这类用例最容易写成
+`assert(Number.isFinite(compute(5)))`——喂的是永远不会触发 bug 的输入。
+必须喂 `NaN` / `Infinity` / `0` / 负数。"
+
+→ 我的收口类用例**全部按此喂非法值**：`abuseThreshold: NaN / 0 / -1`、
+`hardLimitMs: NaN / 0`、`maxSectionChars: 0`、`maxTotalChars: -1`、
+`add('gold', NaN)`、`importSave({gold: NaN})`。回退实验显示 social 组 7 项中 6 项会红、
+scheduling 组 10 项中 7 项会红——**证明喂的是有效输入**。
+
+**② 标准 3 提醒**："收口类修复最典型的翻车是收过头。我自己在 `maxDeltaTime` 上先踩了一次
+（夹到 1e-6，游戏照样停摆），后来改成整体回落默认。"
+
+→ 我踩的是同一类坑的反面：`abuseThreshold` 若简单夹到 `[0,∞)`，
+`0` 会让**所有人**都被判成恶意举报者（0 次驳回 >= 0 恒真）。
+我的处理是把 `0` / 负数夹到 `1`（阈值语义下"0 次"不合理），
+并写了对照用例"abuseThreshold 为 0/负数时不该把所有人都判成恶意"。
+§4 的对照表列了 9 处同类风险点。
+
+**③ 标准 5 提醒**："`redact` 对 JSON 字符串做正则是为了守住永不抛错的承诺，
+改的时候别把这份承诺丢了；`runscope` 的 `getOr` 同理。"
+
+→ `redact`：我改成结构化扫描（按 key 匹配替换值）而非正则，
+**"永不抛错"的承诺保住了**——catch 里改为 push 一条 warning（不再是空 catch 静默跳过）。
+`getOr`：**默认保持兼容**（越界仍返回 fallback），新增 `swallowCrossScope: false` 选项，
+默认值是否翻转**已提请总审裁决**（§3.1），未擅自拍板。
+
+### 11.4 我这次踩到的同类坑（回敬给 W2-B 与其它窗口）
+
+W2-B 在报告里坦白了 Sch5 / Sch6 / Di3 的**假阴性**（源码切片窗口太窄、
+正则漏匹配 `=> { return v; }`），并提醒"凡是源码检视得出的'已修'结论都应回看一眼"。
+
+**我这轮也踩了一次同型假阴性，方向相反**：我用正则扫 `overridden ?`
+和 `catch {}` 来验证自己是否修干净，结果**两个都报"仍在"**——
+因为命中的是我自己写的说明注释（注释里引用了旧代码原文）。
+剥离注释后重新检测，实际是 **0 处**。
+
+**教训**：源码正则既能漏判（W2-B 的假阴性），也能误判（我的假阳性）。
+**凡是用正则做的源码判定，都要先剥离注释再下笔**——
+这个库注释密度极高，且大量注释会引用旧代码。
+
+### 11.5 需要更新 `verify_W2-B.md`
+
+该报告结论"无法给出验收结论——对方尚未交付"，以及
+"已确认：W2-A 一行代码都还没开始改"一节，**在我交付后均已失效**。
+这是其写作时刻的真实状态（不是误判），但现在会误导后来者。
+
+**建议 W2-B 更新**，或由总审在合并时标注。我已在 `audit/verify_W2-A.md` §5 提出同样请求。
+
+### 11.6 一处互相印证的发现
+
+W2-B 附录记录：`curse.depends` 被 W5-B（`9e1661f7`）、W7-B（`edc04835`）
+"基于自己的旧基底推送覆盖了回去"。
+
+这与我在 §9.2 记录的 `turn → _core` 被我的推送覆盖**是同一个问题的两次独立发生**。
+两边独立得出同一结论：**`_kitmeta.json` 在并发推送下无法靠各窗口自行保证，
+只能收工后统一 `--fix`。** 建议总审采纳。
