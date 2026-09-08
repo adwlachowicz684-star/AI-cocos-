@@ -48,7 +48,7 @@
  * 【无引擎依赖】
  */
 
-import { safeDt, clampNum, numOr } from '../_core/math';
+import { safeDt } from '../_core/math';
 import { needCount } from '../_core/guard';
 
 export type StackMode =
@@ -107,20 +107,7 @@ export class BuffSystem {
   /** independent 模式的多个实例 */
   private readonly _independent = new Map<string, BuffInstance[]>();
 
-  /**
-   * 变更监听器列表
-   *
-   * 【⚠️ 必须是数组，不能是单个字段】
-   * 原实现 `this._onChange = fn` 直接赋值，**第二次注册会静默顶掉第一次**：
-   * 实测（修复前）注册 A、B 两个监听器后 `apply()`，A 触发 0 次、B 触发 1 次。
-   *
-   * 后果很隐蔽：UI 层和数值层都订阅变更时（前者刷图标、后者重建 ModifierSet），
-   * 后注册的那个生效、先注册的那个彻底失联——
-   * 表现为"图标还在，但属性没变"，且没有任何报错。
-   *
-   * 与 `damage-pipeline` 的 `onResult`（数组 + `indexOf` 精确删除）保持一致。
-   */
-  private readonly _onChangeFns: Array<(c: BuffChange) => void> = [];
+  private _onChange: ((c: BuffChange) => void) | null = null;
 
   /** 注册定义 */
   register(def: BuffDef): this {
@@ -258,26 +245,11 @@ export class BuffSystem {
     return n;
   }
 
-  /**
-   * 清空全部（死亡、换关）
-   *
-   * 【⚠️ 必须逐个发 remove，不能只发一次 clear】
-   *
-   * 同一个类里 `remove()` / `removeByTag()` / `dispelAll()` / `clearOnDeath()`
-   * 发的都是 `remove` 事件，只有 `clear()` 发 `clear`——
-   * 于是只监听 `remove` 的依赖方（逐个 buff 图标的 UI 最常见）
-   * 在 `clear()` 之后**收不到任何单个 buff 的移除通知**，
-   * 表现为"人已经死了，状态栏图标还挂着"，直到下次全量刷新才消失。
-   *
-   * 【为什么保留 clear 事件】
-   * 去掉它会让只监听 `clear` 的依赖方失联。两个都发，谁都不会漏。
-   */
+  /** 清空全部（死亡、换关） */
   clear(): void {
-    const ids = Array.from(this._active.keys());
-    const had = ids.length > 0;
+    const had = this._active.size > 0;
     this._active.clear();
     this._independent.clear();
-    for (const id of ids) this._emit('remove', id, 0);
     if (had) this._emit('clear', '', 0);
   }
 
@@ -365,11 +337,9 @@ export class BuffSystem {
 
   /** 订阅变更（外部在这里重建 ModifierSet） */
   onChange(fn: (c: BuffChange) => void): () => void {
-    this._onChangeFns.push(fn);
+    this._onChange = fn;
     return () => {
-      // 用 indexOf 精确定位后删除：直接 splice(0,1) 会删掉别人注册的监听器
-      const i = this._onChangeFns.indexOf(fn);
-      if (i >= 0) this._onChangeFns.splice(i, 1);
+      if (this._onChange === fn) this._onChange = null;
     };
   }
 
@@ -390,58 +360,10 @@ export class BuffSystem {
     for (const d of data) {
       const def = this._defs.get(d.id);
       if (!def) continue;
-
-      /**
-       * 【⚠️ import 必须复走 register/apply 的校验，不能直接塞进 _active】
-       *
-       * `register()` 对 duration / maxStacks / tickInterval 都有校验，
-       * `apply()` 又用 `Math.min(stacks, max)` 收口层数——
-       * 但原 `import()` 两道门全绕过了，存档里是什么就写进去什么。
-       *
-       * 实测（修复前）：`import([{id:'poison', stacks:999, remain:NaN}])`
-       * （该 def 的 maxStacks=3）→ `stacks = 999`、`remain = NaN`；
-       * 推进 100 秒后 `remain` 仍是 NaN、`has('poison')` 仍是 **true**。
-       *
-       * 机制：`remain -= dt` 得 NaN，而 `NaN <= 0` 恒为 false
-       * → **永远进不了过期分支** → 中毒/眩晕变成永久 buff。
-       * `stacks` 突破 maxStacks 则会让数值修正成倍叠加
-       * （`damage-pipeline` 的 Modifier 是按层数重建的）。
-       *
-       * 到达路径不是理论风险：存档截断、版本升级缺字段、被篡改的存档，
-       * 都会让 `remain` 变成 NaN 或 undefined。
-       */
-      const stacks = Math.round(clampNum(d.stacks, 1, def.maxStacks ?? 1, 1));
-      const remain = numOr(d.remain, def.duration);
-
-      // 非法的剩余时间（0 / 负数）跳过：它不是"还没生效"，是坏数据
-      if (!(remain > 0)) continue;
-
-      /**
-       * 【⚠️ independent 模式必须同时重建 `_independent`，光写 `_active` 不够】
-       *
-       * 该模式下 `_active` 里放的是**聚合视图**（层数=实例数，remain=最短那层），
-       * 真正的逐层数据在 `_independent` 里。原 `import()` 只写 `_active`，
-       * 于是读档后 `_independent` 为空 → `_syncIndependent()` 一进门就 `return`，
-       * 聚合视图再也不会被刷新：
-       *
-       * - 层数不会随逐层到期递减（该掉到 2 层时仍显示 3 层）
-       * - 之后 `apply()` 走 independent 分支时，从空数组重新计数，
-       *   层数直接被覆盖成新加的那几层（实测：3 层再叠 1 层 → 变 **1** 层）
-       *
-       * 表现是"读档后层数乱跳"，且不报错。
-       */
-      if (def.stackMode === 'independent') {
-        const list: BuffInstance[] = [];
-        for (let i = 0; i < stacks; i++) {
-          list.push({ def, stacks: 1, remain, tickTimer: def.tickInterval ?? 0 });
-        }
-        this._independent.set(d.id, list);
-      }
-
       this._active.set(d.id, {
         def,
-        stacks,
-        remain,
+        stacks: d.stacks,
+        remain: d.remain,
         tickTimer: def.tickInterval ?? 0,
       });
     }
@@ -451,7 +373,7 @@ export class BuffSystem {
   destroy(): void {
     this.clear();
     this._defs.clear();
-    this._onChangeFns.length = 0;
+    this._onChange = null;
   }
 
   // ==================== 内部 ====================
@@ -480,11 +402,6 @@ export class BuffSystem {
   }
 
   private _emit(kind: BuffChangeKind, id: string, stacks: number): void {
-    /**
-     * 【⚠️ 必须遍历副本，不能在遍历中原地调用】
-     * 监听器里再 `onChange()` 注册/注销会改动 `_onChangeFns`，
-     * 直接 `for...of` 原数组会让下一个监听器被跳过（模式 E）。
-     */
-    for (const fn of [...this._onChangeFns]) fn({ kind, id, stacks });
+    this._onChange?.({ kind, id, stacks });
   }
 }
