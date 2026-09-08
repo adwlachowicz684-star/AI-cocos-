@@ -28,8 +28,6 @@
  * 【无引擎依赖】
  */
 
-import { numOr } from '../_core/math';
-
 // ==================== 类型 ====================
 
 /** 祝福的效果运算 */
@@ -121,24 +119,8 @@ export class BlessingSystem {
       throw new Error(`[Blessing] 祝福 "${d.id}" 的 maxStacks 必须是正整数`);
     }
     if (d.softCap !== undefined && d.falloff === undefined) {
-      /**
-       * 【⚠️ 这里原本是一个空 if】
-       *
-       * 检测到了"给了 softCap 却没给 falloff"，然后什么都不做：
-       * 实际行为由 `effectiveStacks` 里的 `falloff ?? 0.5` 悄悄决定。
-       * 实测：softCap=3、8 层 → effective = 5.5（按 0.5 折算）。
-       *
-       * 数值是对的，但**配表的人不知道自己触发了一个隐式默认值**，
-       * 于是"我明明配了 softCap=3，为什么 8 层只有 5.5 的效果"变成一个
-       * 没有入口可查的问题——链路上每一处单独看都成立。
-       *
-       * 不抛错（配表疏忽不该让游戏起不来，这点原注释是对的），
-       * 但必须让人看见。
-       */
-      console.warn(
-        `[Blessing] 祝福 "${d.id}" 给了 softCap=${d.softCap} 但没有 falloff，` +
-        `超过 softCap 的部分将按 0.5 折算（显式写 falloff 可消除此告警）`
-      );
+      // 给了 softCap 没给 falloff：默认 0.5，而不是抛错
+      // 这是常见疏忽，抛错太苛刻
     }
     for (const e of d.effects) {
       if (!Number.isFinite(e.perStack)) {
@@ -178,23 +160,10 @@ export class BlessingSystem {
       // coexist：什么都不做
     }
 
-    /**
-     * 【⚠️ NaN 层数会污染整条属性链路，且全程不报错】
-     *
-     * 原写法 `Math.min(n, cap - cur)`：`n = NaN` 时 `Math.min(NaN, x)` = NaN，
-     * 于是 `actual <= 0` 为 false（NaN 比较恒 false）→ 直接写进 `_stacks`。
-     * 实测（修复前）：`add(b, NaN)` 后 stacks = NaN、effectiveStacks = NaN、
-     * `effectsOf` 给出 `perStack * NaN` = NaN —— 玩家属性直接变 NaN。
-     *
-     * 【为什么也 floor】层数是整数语义；`add(b, 2.5)` 会留下 0.5 层的
-     * "看不见的残片"，在 UI 上显示 3 层却按 2.5 层算伤害。
-     */
-    const k = this._safeCount(n);
     const cur = this._stacks.get(id) ?? 0;
     const cap = def.maxStacks ?? Infinity;
-    const actual = Math.min(k, Math.max(0, cap - cur));
-    // 【模式 A】肯定式：NaN 进来 k = 0，这里也能拦住
-    if (!(actual > 0)) return 0;
+    const actual = Math.min(n, Math.max(0, cap - cur));
+    if (actual <= 0) return 0;
 
     this._stacks.set(id, cur + actual);
     this._onChange?.(id, cur + actual);
@@ -205,41 +174,12 @@ export class BlessingSystem {
   remove(id: string, n = Infinity): number {
     const cur = this._stacks.get(id) ?? 0;
     if (cur === 0) return 0;
-    /**
-     * 【⚠️ 负数参数让 remove 变成 add】
-     *
-     * 原写法 `Math.min(cur, n)`：n = -5 时 actual = -5，
-     * `next = cur - (-5)` = cur + 5 —— **移除变成了加层**。
-     * 实测（修复前）：add 3 层后 `remove(b, -5)` → stacks = **8**。
-     *
-     * 这个坑之所以危险，是因为调用方最常见的写法就是算差值：
-     * `remove(id, cur - target)`，target > cur 时差值为负，
-     * 于是"想削到 3 层"变成"加到 8 层"，方向完全相反。
-     */
-    const k = this._safeCount(n);
-    const actual = Math.min(cur, k);
-    // 【模式 A】actual 为 0/负数/NaN 都不该走下去：
-    // 既不改状态，也不该触发一次"没变化"的 onChange。
-    if (!(actual > 0)) return 0;
+    const actual = Math.min(cur, n);
     const next = cur - actual;
     if (next <= 0) this._stacks.delete(id);
     else this._stacks.set(id, next);
     this._onChange?.(id, next);
     return actual;
-  }
-
-  /**
-   * 层数参数收口：非有限 → 0，负数 → 0，小数 → 向下取整
-   *
-   * 【⚠️ 为什么 `Infinity` 要单独放行】
-   * `remove(id)` 的默认参数是 `Infinity`，语义是"全部移除"。
-   * `numOr` 会把非有限值（含 Infinity）兜成 fallback，
-   * 一刀切地收口会让 `remove(id)` 变成"什么都不做"——
-   * 用兜底工具的时候必须先看清楚默认参数本身是不是一个合法哨兵值。
-   */
-  private _safeCount(n: number): number {
-    if (n === Infinity) return Infinity;
-    return Math.max(0, Math.floor(numOr(n, 0)));
   }
 
   /** 清空（死亡 / 开新局） */
@@ -299,18 +239,7 @@ export class BlessingSystem {
     return def.effects.map((e) => ({
       stat: e.stat,
       op: e.op,
-      /**
-       * 【⚠️ `set` 曾被当成 `add` 一样按层数缩放】
-       *
-       * `set` 的语义是"覆盖为固定值"，与层数无关。
-       * 修复前它走 `perStack * eff`：
-       * 实测 2 层的 "set maxHp 100" 给出 **200**，5 层就是 500。
-       *
-       * 这个 bug 不会崩、也不会报 NaN，只是"血上限比配表高了一截"，
-       * 于是平衡表对不上、QA 复现不出来。
-       * `curse` / `meta` 是同款写法（见报告"跨单元共性问题"）。
-       */
-      value: e.op === 'set' ? e.perStack : e.op === 'mul' ? Math.pow(e.perStack, eff) : e.perStack * eff,
+      value: e.op === 'mul' ? Math.pow(e.perStack, eff) : e.perStack * eff,
     }));
   }
 
@@ -408,17 +337,13 @@ export class BlessingSystem {
       if (pool.length === 0) break;
 
       let total = 0;
-      // 【模式 B】`?? 1` 只挡 null/undefined，NaN 权重会让 total 变 NaN，
-      // 于是 `total <= 0` 为 false（NaN 比较恒 false），循环里 `r -= NaN`
-      // 让 `r < 0` 也恒为 false → idx 停在 pool.length - 1 →
-      // **永远抽池子最后一个**，权重表静默失效。与 affix 同源。
-      for (const d of pool) total += Math.max(0, numOr(d.weight ?? 1, 0));
+      for (const d of pool) total += d.weight ?? 1;
       if (total <= 0) break;
 
       let r = rng.next() * total;
       let idx = pool.length - 1;
       for (let j = 0; j < pool.length; j++) {
-        r -= Math.max(0, numOr(pool[j].weight ?? 1, 0));
+        r -= pool[j].weight ?? 1;
         if (r < 0) { idx = j; break; }
       }
 
@@ -435,8 +360,6 @@ export class BlessingSystem {
   }
 
   importState(s: Readonly<Record<string, number>>): void {
-    // 记下导入前持有哪些，用于给"导入后消失的"补一次 0 通知
-    const before = [...this._stacks.keys()];
     this._stacks.clear();
     for (const [id, n] of Object.entries(s)) {
       /**
@@ -446,32 +369,7 @@ export class BlessingSystem {
        */
       if (!this._defs.has(id)) continue;
       const cap = this._defs.get(id)!.maxStacks ?? Infinity;
-      /**
-       * 【⚠️ 存档是外部输入，且原实现完全不校验】
-       *
-       * `Math.min(n, cap)` 对 -3 和 NaN 都照单全收：
-       * 实测（修复前）`importState({ b: -3 })` → stacks = **-3**；
-       * `importState({ b: NaN })` → stacks = NaN → effectiveStacks = NaN。
-       * 篡改过的存档或版本迁移的残留字段能写进任何值，
-       * 进来的 NaN 与 `add(b, NaN)` 是同一条污染链路（只是更难查——
-       * 因为"我什么都没操作，一读档属性就 NaN 了"）。
-       *
-       * 走与 `add` / `remove` 相同的收口：非有限 → 0，负数 → 0。
-       */
-      this._stacks.set(id, Math.min(this._safeCount(n), cap));
-    }
-
-    /**
-     * 【⚠️ 导入后不通知，UI 会一直显示旧层数】
-     *
-     * 实测（修复前）：`importState({ b: 4 })` 之后 onChange **一次都没触发**。
-     * 读档后数据是对的，但 UI 停留在读档前的画面，
-     * 直到玩家下一次拾取才突然"补上"——表现为"读档后属性没生效"。
-     *
-     * 对 before ∪ after 全量通知一次：新增的报新值、消失的报 0。
-     */
-    for (const id of new Set([...before, ...this._stacks.keys()])) {
-      this._onChange?.(id, this._stacks.get(id) ?? 0);
+      this._stacks.set(id, Math.min(n, cap));
     }
   }
 
