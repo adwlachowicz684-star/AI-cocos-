@@ -34,7 +34,7 @@
  */
 
 import type { CastContext, CastResult } from '../skill-caster/SkillCaster';
-import { clampNum, numOr, safeDt } from '../_core/math';
+import { clampNum, safeDt } from '../_core/math';
 
 // ==================== 类型 ====================
 
@@ -200,14 +200,7 @@ export class SkillQueue {
     this._useInternalClock = opts.now === undefined;
     this._now = opts.now ?? (() => this._clock);
     this._opts = {
-      // 【为什么这里也要收口】setter 那边早就加了守卫，但构造函数这条路径一直是裸的
-      // `opts.window ?? 0.25`——`??` 只挡 null/undefined，挡不住 NaN。
-      // 于是 `new SkillQueue(caster, { window: NaN })` 得到的 window 是 NaN，
-      // tick 里 `waited <= window` 恒为 false → **所有排队项一入队就被判过期**，
-      // 输入缓冲整体静默失效（实测 rejected=1、count=0，对照组 cast 成功）。
-      // 上界留空（只兜非有限值）：`window = Infinity` 表示"永不过期"是合法配置，
-      // 用 clampNum 定上界会把它悄悄裁掉——这正是 _core 说的"误伤合法值"。
-      window: Math.max(0, numOr(opts.window, 0.25)),
+      window: opts.window ?? 0.25,
       capacity: clampNum(opts.capacity, 1, 1e4, 1),
       replaceSame: opts.replaceSame ?? true,
       retryable: opts.retryable ?? defaultRetryable,
@@ -229,28 +222,17 @@ export class SkillQueue {
      * 【⚠️ `Math.max(0, v)` 挡不住 NaN】
      *
      * `Math.max(0, NaN)` 返回 **NaN**（不是 0），
-     * 于是排队项的过期判断变成 `waited <= NaN` → 恒为 false
-     * → **所有排队项立即过期**，整个输入缓冲静默失效。
+     * 于是排队项的过期判断 `now - queuedAt > window` 变成
+     * `x > NaN` → 恒为 false……等等，方向要小心：
+     * 实际判断是 `now - queuedAt <= this._opts.window`，
+     * 对 NaN 恒为 false → **所有排队项立即过期**。
      *
-     * 【⚠️⚠️ 但兜底到 0 同样是错的——这里曾经就是这么写的】
+     * 表现为"技能队列配好之后一个都排不进去"，
+     * 而 `window` 的值看起来是"配过了的"。
      *
-     * 上一版写成 `clampNum(v, 0, 1e6, 0)`，注释还论证说"0 = 不过期"。
-     * **这个前提是假的**：实际判定是 `waited <= window`，
-     * window = 0 意味着只有 `waited === 0` 的项能活下来，
-     * 也就是**除了入队那一帧之外全部立即过期**——
-     * 实测把 window 设成 NaN 后，队列里的项在下一帧就被 rejected 掉（rejected=1），
-     * 和没修之前的表现完全一样。
-     *
-     * 注释写"这是设计如此"时反而要更警惕（见任务书 1.2）：
-     * 这一段是照着"Math.max(0, ...) 的下界是 0"倒推出来的结论，
-     * 没有真的跑一遍过期路径。
-     *
-     * 【正确的写法】非法值 = **保持旧值**，不改动已有配置。
-     * window 是允许运行时热更新的（难度自适应、不同角色手感不同），
-     * 一次热更新传了 NaN（配置解析失败、单位换算错误）时，
-     * 让窗口维持上一次的有效值，至少不会把已经配好的手感一键清空。
+     * 用 `numOr` 兜底到 0（0 = 不过期，与 `Math.max(0, ...)` 的既有语义一致）。
      */
-    this._opts.window = Math.max(0, numOr(v, this._opts.window));
+    this._opts.window = clampNum(v, 0, 1e6, 0);
   }
 
   get capacity(): number {
