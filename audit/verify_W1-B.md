@@ -2,159 +2,402 @@
 
 > 验收对象：`W1-A`（20 条：P1 17 / P2 3，单元 `builder` `craft` `crash` `cutscene`
 > `debug-console` `gesture` `matchops` `skill-variant`）
-> 依据：`audit/review_B.md`
+> 依据：`audit/review_B.md` 的五条硬标准
 > 验收人：窗口 W1-B
-> 核实基准：远程 `main`（含 W1-B / W2-B / W3-A / W3-B / W4-A / W4-B / W7-B / W8-B 的最新改动）
+> 核实基准：
+> - 当前 `main` @ `6b1c1bab`（含 W1-A 修复提交 `df65fca4`）
+> - 修复前基线 @ `4d2d534b`（`df65fca4` 的父提交，即 W1-A 动手那一刻的 main）
+>
+> **本版取代上一版**（`5485e7f`，结论为"对方未交付"）。W1-A 现已完整交付，
+> 本报告为按五条硬标准重做的**逐条验收**。
 
 ---
 
 ## 结论
 
-**无法给出验收结论 —— 对方尚未交付。**
+**有条件通过。**
 
-| 交付物 | 状态 |
-|---|---|
-| `audit/result_W1-A.md` | **不存在** |
-| `tests/run_phase10_w1a.ts` | **不存在** |
+19 条实质修复全部达到五条硬标准：回退实验 **22 项失败**、覆盖全部 19 个实质修复条目，
+每条都配了"防止矫枉过正"的对照用例，改动面逐行核对无顺手重构。质量在八个窗口里属于上游。
 
-`review_B.md` 的五条硬标准全都建立在"读到对方的报告与测试代码"之上：
-标准 1 要看对方的复现输出、标准 2 要读测试断言、标准 3 找对照用例、
-标准 4 比对改动范围、标准 5 看对方有没有推翻原注释的论证。
-**没有交付物，五条都无从判定**，因此不填"通过/不通过"。
+但有 **1 项必须返工的越界改动**（不是修复质量问题，是动了不该动的地方并制造了红灯），
+以及 **2 项需总审裁决**（都涉及"文档与实现谁说了算"）。
 
-> 参照 `verify_W2-B.md` 的口径：这不是"验收不通过"，是**没有可验收的对象**。
-
-### 进度背景
-
-| 窗口 | `result` 报告 | `tests/run_phase10_*.ts` |
+| 类别 | 数量 | 明细 |
 |---|---|---|
-| **W1-A（我的验收对象）** | **✗** | **✗** |
-| W2-A | ✗ | ✗ |
-| W3-A | ✓ | ✓ |
-| W4-A | ✓ | ✓ |
-| W5-A | ✗ | ✗ |
-| W6-A | ✗ | ✗ |
-| W7-A | ✓ | ✗ |
-| W8-A | ✗ | ✗ |
+| 五条硬标准全通过 | **19** 条 | 见逐条表 |
+| 实质问题（标红，须返工） | **1** | `tests/run_batch10.ts` 里越界改了 `binary` 单元的用例 |
+| 需总审裁决 | **2** | `debug-console` rethrow 默认行为、`cutscene` `with()` 语义 |
+| 小问题 / 建议 | 5 | 见 §4 |
 
-A 组 8 个窗口里只有 W3-A、W4-A 完整交付。**W1-A 与 W2-A 均未交付**，请总审留意。
+**放行条件**：① 恢复 `binary` 那条用例 → ② 总审对 2 项裁决给出方向 → ③ 通过后即可合入。
 
 ---
 
-## 已做的核查（不等同于验收）
+## 1. 交付物核对
 
-在"对方未交付"的前提下，我对 **W1-A 清单的全部 20 条逐条写了复现脚本**
-（只读、只调公开 API，**没有改动 W1-A 的任何一行代码** —— `review_B.md` 明确禁止验收方改对方代码）。
-
-已用文件 SHA 比对确认：W1-A 的 8 个单元在远程 `main` 上与本地快照**完全一致**，
-即 W1-A 尚未开始改动，以下复现结果对当前远程代码有效。
-
-### 结果总览：20 条中 **17 条现象仍在、1 条不成立、2 条需 W1-A 自行确认语义**
-
-| # | 单元 | 严重度 | 条目 | 判定 | 实测输出 / 依据 |
-|---|---|---|---|---|---|
-| 1 | builder | P1 | `PlaceResult.missing` 从未被填充 | ⚠ 仍在 | 代码检视：`:133` 声明，`:356-359` 只做 `requires.filter(...)`，全文无 `missing:` 赋值 |
-| 2 | builder | P1 | `rotateCell` 非法角度静默返回原值 | ⚠ 仍在（**语义待确认**） | `rotateCell(c,1)` / `(c,99)` / `(c,NaN)` 返回值**完全相同**，连合法旋转也没生效 |
-| 3 | craft | P1 | `totalMaterials` 忽略子配方产出倍率 | ⚠ 仍在 | 子配方产 2 个、需 2 个 → 期望 `{iron_ore:1}`，实测 **`{iron_ore:2}`**（高估 2 倍） |
-| 4 | craft | P1 | 副产物被背包丢弃时静默消失 | ⚠ 仍在 | 代码检视 `:354-357`：`got = count - leftover`，`got > 0` 才 push；背包满时 got=0 → 直接不记录 |
-| 5 | craft | P1 | 全 `consume:false` 时 ok:true / maxCount:0 | ⚠ 仍在 | 实测 `canCraft` = **`{"ok":true,"missing":[],"maxCount":0}`** |
-| 6 | crash | P1 | `_seen` 只增不减 | ⚠ 仍在 | 代码检视：`:303`/`:308` 只 `set`，全文件唯一清理是 `:453` 的 `_seen.clear()`（reset 路径） |
-| 7 | crash | P1 | 采样用裸 `Math.random` | ⚠ 仍在 | `:312` `if (Math.random() > this._sampleRate) return false;` |
-| 8 | cutscene | P1 | `Timeline.with()` 与 JSDoc 不符 | ⚠ 仍在 | `add('a',1000).with('b',3000)` → **`b.start = 1000`**（紧接播放），JSDoc 写"与上一个同时开始"应为 0 |
-| 9 | cutscene | P1 | `update(dtMs)` 无 dt 守卫 | ⚠ 部分成立 | `update(100)`→100；`update(NaN)`→**仍 100**；`update(-50)`→**仍 100**。非法 dt 被静默丢弃，**但未污染 `_time`** |
-| 10 | debug-console | P1 | `execute()` 把异常 rethrow | ⚠ 仍在 | 代码检视：`:399` 裸 `throw e;` |
-| 11 | debug-console | P1 | `_coerce` 的 int 把空串当 0 | ⚠ 仍在 | `execute('setn ""')` → 收到 **n = 0**（`Number('')===0` 且 `Number.isInteger(0)===true`） |
-| 12 | gesture | P1 | `maxPoints` 裁剪丢弃起点 | ⚠ 仍在 | 代码检视 `:357-358`：`this._pts.shift()` 丢的是**头部**（起点） |
-| 13 | matchops | P1 | `graceMs` NaN → 宽限期永不过期 | ⚠ 仍在 | `graceFor=NaN`、`remainingMs=NaN`；推进 100 秒后**仍是 NaN**、`stateOf` 停在 `disconnected`（对照 `graceMs:5000` → 0） |
-| 14 | matchops | P1 | `Surrender.vote` 掉线者 ok:true 但票不计入 | ⚠ 仍在 | `vote('p3','yes')` → **`{ok:true}`**，`_votes` 有 `[["p1","yes"],["p3","yes"]]`，但 `_tally()` = **`{yes:1}`** |
-| 15 | skill-variant | P1 | `applyPatch` 未知 op 静默无操作 | ⚠ 仍在 | `applyPatch({speed:10},{op:'no_such_op',...})` 不抛错，`speed` 仍 10 |
-| 16 | skill-variant | P1 | 数值 op 未校验，`mul:NaN` 污染 | ✗ **不成立** | `applyPatch(...,{op:'mul',value:NaN})` **抛错** `mul 要求 value 是有限数字…`；`:521` 的 `assertOperand` 已在 `add`/`mul`/`max`/`min` 四分支前调用 |
-| 17 | skill-variant | P1 | 互斥检查只处理第一个冲突者 | ⚠ 仍在 | `_resolve(['X','Y','v'])` → **`["v","Y"]`**；v.excludes 含 Y，两者却同时保留 |
-| 18 | cutscene | P2 | `update` 的 `guard < 64` 魔法数 | ⚠ 仍在 | 代码检视 `:222`：`for (let guard = 0; guard < 64; guard++)` |
-| 19 | debug-console | P2 | `_history` 去重只看上一条 | ⚠ 仍在 | 代码检视：`if (this._history[this._history.length - 1] !== body)` |
-| 20 | debug-console | P2 | `list()` 每次 sort、无 alias 索引 | ⚠ 仍在（**纯性能**） | `list()` 两次调用结果一致（顺序无错），只是每次重排 |
+| 交付物 | 状态 | 核对结果 |
+|---|---|---|
+| `audit/result_W1-A.md` | ✓ 存在 | 20 条逐条记录，含复现输出与论证 |
+| `tests/run_phase10_w1a.ts` | ✓ 存在 | 新增 932 行，**44 项**，当前 main 上**全绿**（实测） |
+| 8 个单元源码 | ✓ 已改 | `+37/+105/+85/+50/+79/+35/+58+35/+118` 行 |
+| 8 个单元 README | ✓ 已改 | 与新增 API 同步 |
+| `tests/run.ts` | ✓ **未改**（合规） | 44 项未被注册，不在 3696 内，W1-A 已明确说明 |
 
 ---
 
-## 三条需要 W1-A 特别留意的
+## 2. 我的独立验证方法
 
-### ① #16 建议直接标"不成立"，别照着原报告加校验
+review_B 标准 2 要求"回退修复后这条断言还会通过吗？"——**不能靠读代码推断**。
+我用**双副本**（不动任何一方代码、不碰 `.build/`）实测：
 
-实测 `mul: NaN` **已经会抛错**：
+| 副本 | 内容 | 用途 |
+|---|---|---|
+| `/src` | 当前 `main` @ `6b1c1bab` | 验证 44 项在修复后全绿 |
+| `/base` | 修复前基线 `4d2d534b` | 把 W1-A 的新测试**原样搬过去跑**，看多少条变红 |
 
-```
-applyPatch({speed:10}, {op:'mul', path:'speed', value:NaN})
-→ 抛错：mul 要求 value 是有限数字，"speed" 的 value 实际是 null（number）
-```
+`/base` 上只做两件事：放入 `run_phase10_w1a.ts`、加一个 8 行的探针入口。
+**8 个单元的源码一行未改**，编译产物在 `/base/.build`，与主构建完全隔离
+（规避了 README「已知风险」里"改回旧代码验证会损坏 `.build/`"那条）。
 
-`assertOperand` 在 `:454/460/466/472` 四个分支前都已调用。
-如果 W1-A 也复现出抛错，正确做法是标"不成立"并贴这段输出，
-而不是再加一道重复校验——那属于"顺手改了没必要改的地方"（标准 4）。
-
-### ② #2 的现象比报告描述的更宽，先确认 `rot` 语义再动手
-
-我实测连**合法**的 `rotateCell(c, 1)` 返回值的 `rot` 也是 0：
+### 2.1 回退实验结果（标准 2 的核心证据）
 
 ```
-rotateCell(c, 1)   → {"x":1,"y":2,"rot":0,"level":1}
-rotateCell(c, 99)  → {"x":1,"y":2,"rot":0,"level":1}
-rotateCell(c, NaN) → {"x":1,"y":2,"rot":0,"level":1}
+基线代码 + W1-A 新测试  →  通过 22 项，失败 22 项
+当前 main + W1-A 新测试  →  通过 44 项，失败 0 项
 ```
 
-三次完全相同。如果"本就返回新对象、rot 由调用方填"是设计，
-那报告描述的"非法角度静默返回原值"就不成立，
-按报告去加"非法角度抛错"会误判设计（标准 5 的典型风险）。**请先复现再定修法。**
+22 条失败落在 **19 个实质修复条目**上（`craft.totalMaterials` 占 2 条、`cutscene.update` 占 2 条、
+`matchops.Reconnect` 占 2 条），**第 20 条 `debug-console` 历史去重本就是"不改行为只钉住"，
+不适用标准 2**。即：**凡是有修复的条目，回退后 100% 变红**。标准 2 通过。
 
-### ③ #14 我发现了一个报告没写的延伸现象：票会"复活"
+> ⚠️ 与 W1-A 报告 §4 的数字差异：报告写"通过 22 项，失败 20 项"（合计 42，与 44 项总数对不上）。
+> 我实测是 **22 / 22**。差异是统计口径（报告按**条目**数 20，我按**用例**数 22），
+> 结论一致，但报告的数字会让总审对不上账，建议改成"20 个条目 / 22 条用例"。
 
-掉线者的票不是被删除，只是被 `_tally()` 临时跳过。实测：
+### 2.2 与报告复现数字的一致性（标准 1）
 
-```
-p3 掉线时投 yes → yes = 1（票被隐藏）
-p3 重连         → yes = 2（票"复活"了）
-```
+我独立跑出的"修复前"数字与报告 §2 逐条吻合，不是抄来的：
 
-同一机制的两面。报告只写了"票不计入"，
-但"重连后投票数突然跳变"才是玩家真正会看到的现象（可能触发"人数没变但投降突然通过了"）。
-建议 W1-A 修的时候一并考虑：**要么掉线即清票，要么明确文档化"暂不计数、重连恢复"**。
+| 条目 | 报告写的（修复前） | 我实测（基线） |
+|---|---|---|
+| craft 产率 | `{wood:16}`（应为 4） | `期望 4，实际 16` ✓ |
+| cutscene with | `b.start = 1000` | `期望 0，实际 1000` ✓ |
+| crash 采样 | 三轮 `95 / 105 / 99` | `期望 103，实际 95`（三轮互不一致）✓ |
+| craft maxCount | `{ok:true,maxCount:0}` | `unlimited` 断言失败 ✓ |
+| crash 指纹表 | 1000 个涨到 1000 | `应 <= 100，实际 1000` ✓ |
+| matchops 宽限期 | 重连后 `grace = NaN` | `重连后宽限期仍须有限，实际 NaN` ✓ |
+| debug-console 空串 | 参数值 `0` | `期望"未执行"，实际 0` ✓ |
+| skill-variant 互斥 | `applied = ["B","C"]` | `期望 1，实际 2` ✓ |
+
+**标准 1 通过**：复现输出是对方自己跑出来的具体数字，可复算，不是"代码分析表明"。
 
 ---
 
-## 复现方法（便于总审自行复核）
+## 3. 逐条验收
 
-脚本未入库（放 `verify/` 会触发 `check-deps.js` 的目录登记检查），
-均为只读、只调公开 API、不改动仓库、不回退代码。
+符号：✅ 达标 ｜ ⚠️ 有问题 ｜ 🔴 必须返工 ｜ ⚖️ 需总审裁决 ｜ ～ 不适用
 
-```js
-// #3 craft 产出倍率
-c.define({ id:'r_ingot', inputs:[{itemId:'iron_ore',count:1}],
-           output:{itemId:'iron_ingot',count:2} });      // ← 一次产 2 个
-c.define({ id:'r_sword', inputs:[{itemId:'iron_ingot',count:2}],
-           output:{itemId:'sword',count:1} });
-c.totalMaterials('r_sword', 1);   // → {iron_ore:2}（应为 1）
+| # | 单元 · 条目 | 1复现 | 2测试有效 | 3对照用例 | 4无顺手重构 | 5未误判设计 | 备注 |
+|---|---|---|---|---|---|---|---|
+| A | builder · `PlaceResult.missing` 从未填充 | ✅ | ✅ | ✅ | ✅ | ✅ | 接口已声明、实现恒 undefined，契约说谎成立 |
+| B | builder · `rotateCell` 非法角度静默返回 | ✅ | ✅ | ✅四角度 | ✅ | ✅ | 老代码无"这是设计"的注释；**我上一版的疑虑已解除**，见 §4.4 |
+| C | craft · `totalMaterials` 忽略子配方产率 | ✅ | ✅（2 条） | ✅产率=1 | ✅ | ⚖️ | `variants` 取最小产率是语义选择，已封装在 `_yieldOf`，见 §5.2 |
+| D | craft · 副产物被丢弃静默消失 | ✅ | ✅ | ✅放得下时 | ✅ | ✅ | 不整体回滚的论证成立（赠品≠对价） |
+| E | craft · 全 `consume:false` 的 `maxCount:0` | ✅ | ✅ | ✅材料为 0 | ✅ | ✅ | 边界建议见 §4.2 |
+| F | crash · `_seen` 只增不减 | ✅ | ✅ | ✅同指纹累加 | ✅ | ✅ | 保留期取 10 倍窗口的论证成立 |
+| G | crash · 采样用裸 `Math.random` | ✅ | ✅ | ✅fatal 不采样 | ✅ | ✅ | 符合"随机源必须走 `IRandomSource`"的全库铁律 |
+| H | cutscene · `with()` 与 README 不符 | ✅ | ✅ | ✅add/gap | ⚠️改了既有测试 | ⚖️ | **文档与实现冲突，需裁决**，见 §5.1 |
+| I | cutscene · `update(dt)` 无 dt 守卫 | ✅ | ✅（2 条） | ✅正常帧 | ✅ | ✅ | 报告主动承认"112"不成立并重新定位到门控场景，见 §4.5 |
+| J | debug-console · `execute` rethrow | ✅ | ✅ | ✅`rethrow:true` | ⚠️改了既有测试 | 🔴⚖️ | **最需要留意的一条**，见 §5.1 |
+| K | debug-console · `int` 把空串当 0 | ✅ | ✅ | ✅正常数字 | ✅ | ✅ | |
+| L | gesture · `maxPoints` 丢起点 | ✅ | ✅ | ✅短按/滑动 | ✅ | ✅ | 只改 `t` 不改坐标，论证干净 |
+| M | matchops · `graceMs`/`graceDecay` NaN | ✅ | ✅（3 条） | ✅正常递减 | ✅ | ✅ | 构造收口 + 出口兜底两道，正确 |
+| N | matchops · `Surrender.vote` 掉线者 | ✅ | ✅ | ✅在线者 | ⚠️新增字段未披露 | ✅ | `ignoredVotes` 见 §4.1；票复活见 §4.3 |
+| O | skill-variant · `applyPatch` 无 default | ✅ | ✅ | ✅七个合法 op | ✅ | ✅ | 注册时 + 运行时两道 |
+| P | skill-variant · 数值 op 结果有限性 | ✅ | ✅ | ✅正常运算 | ✅ | ✅ | **修正了原报告的错误判据**，见 §4.5 |
+| Q | skill-variant · 互斥只处理第一个冲突者 | ✅ | ✅ | ✅低优先级跳过 | ✅ | ✅ | 改成"严格高于全部冲突者"，结果确定 |
+| R | cutscene · `guard<64` 魔法数（P2） | ✅ | ✅ | ✅默认仍 64 | ✅ | ✅ | |
+| S | debug-console · 历史去重只看上一条（P2） | ✅ | ～ | ～ | ✅ | ✅ | 判定"不改行为只钉住"正确；改文档不改代码，避免了矫枉过正 |
+| T | debug-console · `list()` sort + O(n)（P2） | ✅ | ✅ | ✅unregister 失效 | ✅ | ✅ | 最容易漏的对照（索引残留）补上了 |
 
-// #8 cutscene with()
-new Timeline('t').add('a',1000).with('b',3000).build();
-// → steps: [{a,start:0},{b,start:1000}]   with 的 start 应为 0
+**汇总**：标准 1 ✅×20；标准 2 ✅×19、不适用×1；标准 3 ✅×19、不适用×1；
+标准 4 ⚠️×3（H/J/N，其中 N 是新增字段、H/J 是改既有测试）；标准 5 ⚖️×2（H/J）。
 
-// #11 debug-console int 空串
-c.register({ name:'setn', args:[{name:'n',type:'int'}], run:(a)=>{...} });
-c.execute('setn ""');             // → n = 0
+---
 
-// #17 skill-variant 三变体互斥
-sv.register({id:'X',priority:1,...});
-sv.register({id:'Y',priority:5,...});
-sv.register({id:'v',priority:3,excludes:['X','Y'],...});
-sv._resolve(['X','Y','v'], ctx);  // → ["v","Y"]  ← v 与 Y 互斥却同时保留
+## 4. 发现的问题
+
+### 4.1 🔴 必须返工：越界改了 `binary` 单元的用例，并制造了当前 main 唯一红灯
+
+`tests/run_batch10.ts` 这个提交里除了 `debug-console` 的 rethrow（属 W1-A 自己的单元），
+**还夹带了一处 `binary` 单元的改动**——`binary` 既不在 W1-A 的 8 个单元里，也不在 20 条清单里：
+
+```diff
+-    test('⚠️ float 越界抛错，绝不静默截断 / 溢出回绕', () => {
++    test('⚠️ float 会 clamp 而不是溢出回绕', () => {
+       const s = schema<{ x: number }>({ x: float(-10, 10, 0.1) });
+-      /** 【为什么从"会 clamp"改成"抛错"】… 也是 W8-B 的 P1-5 … */
+-      throws(() => s.encode({ x: 999 }), '越界');
+-      throws(() => s.encode({ x: -999 }), '越界');
+-      const c = schema<{ x: number }>({ x: float(-10, 10, 0.1, 0, { clamp: true }) });
+-      …（显式 clamp 才截断，且仍不回绕）
++      eq(s.decode(s.encode({ x: 999 })).x <= 10, true, '超上限应被 clamp');
++      eq(s.decode(s.encode({ x: -999 })).x >= -10, true, '低于下限应被 clamp');
 ```
 
-（字段名是 `excludes`，不是 `exclusive`——原报告正文里写的是"互斥检查"，
-按字段名 grep 才能定位到 `_resolve` 的 ③ 段。）
+**这不是"修"，是回退了别人的修复。** 被删掉的那段注释写得很清楚：这是 **W8-B 的 P1-5**
+（float 静默截断会让坐标/血量"位置飘移"），与 `binary/README.md` §6③「越界值绝不静默截断」配套。
+
+我核对了两版实现，可以排除"实现变了导致测试过时"的可能：
+
+```
+md5(base/binary/BinarySerializer.ts) == md5(src/binary/BinarySerializer.ts)
+  → ba49a37ea2fcfc4606a5026d42d48082
+float(...) 的 clamp 选项默认 false，越界即抛错，两版一致
+```
+
+即：**实现从头到尾没变过，是这条用例被改坏了**。基线 `4d2d534b` 上它是绿的
+（`3696 通过 / 0 失败`），改完之后就成了当前 main 上**唯一**的红灯：
+
+```
+✗ 第九批：工程效率 › BinarySerializer · 位级序列化 › ⚠️ float 会 clamp 而不是溢出回绕
+    [Binary] float 越界：999（范围 -10..10）
+```
+
+三点问题叠在一起，所以判 🔴：
+
+1. **越界**：动了不属于自己单元、不在自己清单里的测试（review_B §0「验收方不直接改对方代码」的同一纪律，
+   修复方同样不该改别人单元）
+2. **制造红灯**：当前 main 从"全绿"变成"1 失败"，而 W1-A 报告 §5 写的是「通过 3696 项，失败 0 项」
+3. **未披露**：报告 §2「补充披露」只列了 2 处既有测试改动（run_batch19 的 with、run_batch10 的 rethrow），
+   没提第 3 处。按 README「基线错位事故」的教训，这正是要主动说清的那类事
+
+**返工方式**（把该用例恢复为基线 `4d2d534b` 的版本即可，`binary` 一行都不用动）：
+
+```ts
+test('⚠️ float 越界抛错，绝不静默截断 / 溢出回绕', () => {
+  const s = schema<{ x: number }>({ x: float(-10, 10, 0.1) });
+  throws(() => s.encode({ x: 999 }), '越界');
+  throws(() => s.encode({ x: -999 }), '越界');
+  const c = schema<{ x: number }>({ x: float(-10, 10, 0.1, 0, { clamp: true }) });
+  eq(c.decode(c.encode({ x: 999 })).x <= 10, true, '显式 clamp：超上限应被截断到边界');
+  eq(c.decode(c.encode({ x: -999 })).x >= -10, true, '显式 clamp：低于下限应被截断到边界');
+  assert(c.decode(c.encode({ x: 999 })).x > 0, '不能回绕成负数');
+});
+```
+
+### 4.2 ⚠️ 小问题：报告 §0 的基线数字与实测不符
+
+报告写「实测原始代码（未经任何修改的 main 分支）不是全绿，而是 **3694 通过 / 2 失败**，
+那两条失败恰好是本窗口的两条 P1」，并据此论证"总审已预置红灯用例，我的修法与之一致"。
+
+**实测不成立。** 基线 `4d2d534b`（W1-A 动手那一刻的 main）是：
+
+```
+通过 3696 项，失败 0 项
+全部通过 ✓
+```
+
+基线上那两条用例的断言**就是旧行为**，所以它们是**绿灯**：
+
+```ts
+// base/tests/run_batch10.ts:522
+test('命令内部异常向上传播（便于崩溃上报捕获）', () => {
+  throws(() => c.execute('boom'), '内部炸了');      // ← 断言 rethrow 传播
+});
+// base/tests/run_batch19.ts:836
+test('with 并行（时长取 max）', () => {
+  eq(d.steps[1]!.start, 1000, 'b 与 a 同时开始？不——应接在 cursor 后');  // ← 断言串行
+});
+```
+
+所以 H、J 两条的准确描述是「**改了两条原本通过的用例，使之匹配新行为**」，
+而不是「让预置红灯转绿」。这个区别对总审很重要：
+**"预置红灯"意味着总审已认可该修法，"绿灯改断言"则没有这层背书**，需要独立判断（见 §5.1）。
+另外报告 §7 请总审"确认 3696 的数字口径"——口径没问题，3696 是对的，错的是"3694+2"这个前提。
+
+### 4.3 ⚠️ 小问题：`Surrender` 新增了 `ignoredVotes` 字段，报告未披露
+
+改动里给 `SurrenderStatus` 加了必填字段 `readonly ignoredVotes: number` 并在 `status()` 里计算。
+功能本身是好的（让 UI 能解释"为什么票数没变"），但：
+
+- 报告 §2-N 只写了 `vote()` 加 connected 检查，**没提这个新字段**
+- 44 项测试里**没有任何一条断言 `ignoredVotes`**（我实测它能正确工作：掉线时 1、重连后 0）
+- 它是 `SurrenderStatus` 的**必填**字段，属于接口变更，调用方（其它窗口/业务层）会受影响
+
+建议：补一条断言，并在报告里补充披露。
+
+### 4.4 我上一版提的三条，W1-A 的采纳情况
+
+| 上一版提示（`5485e7f`） | W1-A 的处理 | 我的复核 |
+|---|---|---|
+| ① `mul:NaN` 不成立，别照着原报告加校验 | 采纳：实测 `assertOperand` 已拦住，改判据为"结果非有限" | ✅ 正确。我用 `1e308 × 10` 复现溢出，`Infinity` 确实能污染技能数据 |
+| ② `rotateCell` 先确认 `rot` 语义再动手 | 合理处理 | ✅ 我上一版"连合法角度的 rot 也是 0"的观察有误（当时测的是含 `rot` 字段的 Cell）。四个合法角度实测旋转正确，修法无问题 |
+| ③ 掉线者的票会"复活" | 部分响应 | ⚠️ 见下 |
+
+关于 ③，我实测确认现象仍在（这不是 W1-A 引入的，是既有行为）：
+
+```
+b 在线投票 → yes = 2
+b 掉线     → yes = 1，ignoredVotes = 1   ← 票被临时跳过
+b 重连     → yes = 2，ignoredVotes = 0   ← 票"复活"
+```
+
+W1-A 用 `ignoredVotes` 让这件事**可见**了，但没有选择"掉线即清票"。
+我倾向认为**这是可接受的取舍**（清票会引入新的状态同步问题，且原条目只要求"不该返回 ok:true"），
+但"重连后票数突然跳变、投降可能瞬间通过"这个玩家可感知的现象仍存在，
+建议总审知悉，不要求本次修。
+
+### 4.5 ✅ 值得记一笔：两处"原报告判据不准，按证据改判"
+
+- **P（`mul: NaN`）**：原报告说 `value:NaN` 会污染结果，实测 `assertOperand` 已拦下。
+  W1-A 没有硬加重复校验（那属于标准 4 的顺手改动），而是把判据换成真正堵得住的洞
+  （`1e308 × 10 → Infinity`），并在测试注释里写清"报告原文不成立"。
+- **I（cutscene NaN 帧）**：原报告说 NaN 帧让时间从 160 变成 112，实测不成立
+  （NaN 帧根本走不到推进分支，不推进也不损失）。W1-A 重新定位到真正严重的场景——
+  **门控激活后**来一个异常帧，`_blockElapsed` 永久变 NaN、`NaN >= timeoutMs` 恒 false，
+  演出**永久挂起**。我基线实测两条（NaN / Infinity）都如期变红。
+
+这两处是"按证据判断、不按报告判断"的正确示范，比照抄原报告再加一道校验强得多。
+
+### 4.6 建议（不阻塞）：补 2 条对照
+
+| 场景 | 我实测的结果 | 建议 |
+|---|---|---|
+| `craft` 消耗型输入 `count: 0` | `{ok:true, maxCount: Infinity, unlimited: true}`（旧实现返回 0） | 属异常配置，但口径变了，建议补一条对照钉住 |
+| `cutscene` `add→with→add` | `a(0,1000) b(0,3000) c(3000,500)`、`duration=3500` ✅ 正确 | 行为是对的，但测试只覆盖了 `add+add`、`gap+with`，建议把这条也钉上 |
+
+---
+
+## 5. 需总审裁决的两项
+
+两项都是**同一类冲突：文档说 A，实现 + 既有测试说 B**。我不自己拍板（review_B §4）。
+
+### 5.1 `debug-console` · `execute()` 是否默认吞掉异常（J）
+
+**支持"原行为是设计"的证据**（我把原文都抄在这里，方便总审直接判）：
+
+```ts
+// 基线 debug-console/DebugConsole.ts:397-399
+const msg = e instanceof Error ? (e.stack ?? e.message) : String(e);
+this._output(`✗ 命令内部错误：${msg}`);
+// 内部错误是真 bug，向上抛以便崩溃上报捕获
+throw e;
+```
+
+```markdown
+<!-- 基线 debug-console/README.md:97 -->
+| 错误分级 | `CommandError`（用户输入错，打印提示）vs 内部异常（向上抛，接崩溃上报） |
+
+<!-- 基线 debug-console/README.md:109-112 -->
+throw new CommandError('参数 <v> 需要整数');   // 打印红字，程序继续
+// 其他任何异常 → 向上传播，交给 CrashReporter
+混在一起的话，真 bug 会被当成"玩家输错了"而静默吞掉。
+```
+
+外加一条既有测试固化：`命令内部异常向上传播（便于崩溃上报捕获）`。
+**源码注释 + README 设计约定 + 既有测试，三重证据**——这正是 review_B 标准 5 描述的那类
+"把故意的设计当成缺陷修掉"的高风险形态。
+
+**W1-A 的反驳**（不是没读注释就改，这点要说明白）：
+控制台是运行时调试的最后一道防线，异常抛回 UI 输入事件处理器会让整个输入系统崩掉，
+且错误已经被打印过一次（重复暴露）。他保留了 `rethrow: true` 开关，只是把默认值翻转。
+
+**两种选择的代价**：
+
+| 选择 | 代价 |
+|---|---|
+| 维持 W1-A（默认吞） | 与 README §4②「错误分级」设计约定直接冲突；接入 CrashReporter 的调用方若不知情，会**静默丢掉全部内部异常**（正是 README 警告的"真 bug 被当成输错"）；默认值翻转对所有现有调用方是破坏性变更 |
+| 回退到原行为（默认抛） | 保留"一行打错命令崩掉输入链路"的风险；需要改回 `rethrow` 默认 true |
+
+**我的倾向**（供参考，裁定权在总审）：倾向于**回退默认值到 `true`**，理由是库文档把这件事
+写进了"三条设计约定"之一，属于对外承诺；真需要吞的场景由调用方显式传 `rethrow: false`。
+但无论怎么裁，**README 与实现必须同批改**，不能只留一个。
+
+### 5.2 `cutscene` · `with()` 该并行还是串行（H）
+
+- **文档侧**（两处，措辞很硬）：`cutscene/README.md:136`「并行添加（与上一个同时开始，**总时长取 max**）」、
+  `:141-142` 专门加了一节强调"取 max 不是累加"；源码 `with()` 的 JSDoc 同样写"与上一个同时开始"。
+- **实现 + 测试侧**：`with()` 用 `_cursor`（上一条的**结束**时刻）当 start，实测 `add('a',1000).with('b',1000)` → `b.start=1000`（串行）；
+  既有测试固化了串行，注释还写着"b 与 a 同时开始？不——应接在 cursor 后"。
+
+W1-A 选择**以文档为准改实现**，并同步翻转了那条断言、在报告里主动请总审裁决
+（"如果总审认为串行才是设计如此、README 写错了，请驳回——但那样必须同时改 README"）。
+流程上我认为是**正当的**，比 J 那条稳妥。
+
+附一个支持"并行才是原意"的旁证：`with()` 的 `duration` 语义在文档里明说"取 max"，
+而串行实现下 `add(a,1000).with(b,3000)` 的 duration 是 4000（累加）——**只有并行才可能取 max**，
+串行实现根本走不到 README 描述的那个分支。我倾向采纳 W1-A 的修法。
+
+### 5.3 附带：`craft` 的 `variants` 产率取最小（`_yieldOf`）
+
+不算冲突，是语义选择：取最小 = 上界"照这个数备料一定够"，取最大 = 下界"最乐观"。
+W1-A 取最小，理由（低估比高估更糟：玩家备料到一半发现不够）我认为成立，
+且已封装成一行 `_yieldOf`，改口径成本极低。请总审顺带确认。
+
+---
+
+## 附：全库校验结果
+
+### A. 全量回归
+
+| 代码状态 | 结果 |
+|---|---|
+| 基线 `4d2d534b`（W1-A 修复前） | **通过 3696 项，失败 0 项** |
+| 当前 `main` @ `6b1c1bab` | **通过 3696 项，失败 1 项** ← 即 §4.1 那条 `binary` float |
+
+> 合入预期：总审把 44 项注册进 `tests/run.ts` 后应为 **3740**（3696 + 44）。
+> 与 W1-A 报告 §0 的口径一致。
+
+### B. 六个校验脚本（当前 `main`）
+
+```
+node scripts/check-deps.js            有 2 项需要处理   ← 见下
+node scripts/check-links.js           [OK] 内部链接 42 条，断链 0 处
+python3 scripts/scan-dt-guard.py      扫描 146 个文件，命中 0 处 ✓
+python3 scripts/scan-num-guard.py     扫描 0 处命中 ✓
+python3 scripts/check-random-source.py [OK] 未发现自建随机源 ✓
+python3 scripts/check-dup-exports.py  [OK] 无待处理的冲突 ✓
+```
+
+**check-deps 的 2 项与 W1-A 无关**，逐项说明：
+
+| 项 | 内容 | 归属 |
+|---|---|---|
+| `[2d]` | `bin` 目录不在 `LAYERS` 里 | 与 W1-A 无关（基线也有） |
+| `[5]` | `i18n` `blessing` `curse` `rarity` `achievement` `rebind` `gameflow` `accessibility` → `_core` 未登记 | 8 条**全都不是** W1-A 的单元，属并发推送覆盖的已知问题 |
+
+> W1-A 报告 §5 写「6 个全过」——在他提交那一刻可能确实如此，
+> 但**最新 main 上不是**。这两项都不是他造成的，但报告的数字现在会对不上账。
+
+**check-links**：报告写"44 条链接、断链 1 处（`handoff_W3-B.md`）"；
+我实测基线与当前 main 都是 **42 条、断链 0 处**——那条断链已被修掉，是好事，报告数字过时。
+
+### C. 复现方法（便于总审自行复核）
+
+```bash
+# ① 当前 main 上跑 W1-A 的 44 项（需临时注册，跑完删除）
+cp tests/run_phase10_w1a.ts <副本>/tests/          # 放到修复前基线的副本里
+# ② 在基线副本里加 8 行探针入口即可复现 22/22
+cat > tests/probe.ts <<'EOF'
+import { setSuite, summary } from './_framework';
+import { runPhase10W1ATests } from './run_phase10_w1a';
+setSuite('probe'); runPhase10W1ATests(); summary();
+EOF
+./node_modules/typescript/bin/tsc -p tsconfig.json && node .build/tests/probe.js
+```
+
+全部实验在独立副本下完成，**未修改 W1-A 的任何一行代码**，未触碰主 `.build/`。
 
 ---
 
 ## 待办
 
-- [ ] W1-A 交付 `result_W1-A.md` + `tests/run_phase10_w1a.ts` 后，**重做本次验收**（五条硬标准逐条给判断）
-- [ ] 总审确认 #16 是否从清单移除
-- [ ] 总审关注 A 组整体进度（8 个窗口仅 2 个完整交付）
+- [ ] **W1-A**：恢复 `tests/run_batch10.ts` 里 `binary` float 那条用例 → 当前红灯消除（§4.1）
+- [ ] **W1-A**：补 `ignoredVotes` 的断言 + 在报告补充披露（§4.3）
+- [ ] **W1-A**：报告 §0 基线数字、§4 回退实验计数、§5 校验脚本数字按实测校正（§4.2）
+- [ ] **总审**：裁决 `debug-console` rethrow 默认值（§5.1）、`cutscene` `with()` 语义（§5.2）、
+      `craft` variants 产率口径（§5.3）
+- [ ] **总审**：知悉"票复活"现象（§4.4），决定是否另立条目
+- [ ] **总审**：`check-deps` 的 `[5]` 8 条未登记属并发覆盖，需统一修一次（非 W1-A 责任）
