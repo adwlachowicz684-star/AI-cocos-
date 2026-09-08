@@ -126,32 +126,10 @@ crash.install();     // 接管全局异常
 同一个 bug 被 1000 个玩家触发，你不该收到 1000 封报告。
 用「错误类型 + 首个堆栈帧」做指纹，窗口内只上报首次，之后只累加计数。
 
-> ⚠️ **指纹表有容量上限（`maxFingerprints`，默认 1000）**
-> 指纹数在线上可以上万，而表里每条还带着 `{count, lastSent}`，
-> 崩溃风暴时会持续膨胀；`stats()` 每次全表排序，也随指纹数线性劣化。
-> 超限后按**最久未上报**淘汰（LRU），并顺带清掉窗口早已过期的陈旧条目。
-> 保留期取 `dedupeWindow × 10`（不是窗口本身）——
-> 窗口一过就删的话，下次复发时计数从 1 重新开始，
-> 服务端就丢了"这个 bug 累计发生过多少次"——那正是不做全局去重也要累加的意义。
-
 ### 采样
 
 高频崩溃会打爆服务器。`sampleRate` 只对非致命错误生效——
 **崩溃（fatal）永远上报**。
-
-采样用**注入的随机源**（`opts.random`，默认 `MathRandomSource`）。
-老实现用的是裸 `Math.random()`，比例对但每次运行结果都不同：
-`sampleRate` 相关的单测只能写"大致 50%"，
-线上也无法用固定种子复现"为什么这条崩溃没上报"。
-
-```typescript
-import { FixedRandomSource } from '../_core/types';
-
-new CrashReporter({
-  sampleRate: 0.5,
-  random: new FixedRandomSource([0.1, 0.9]),   // 第一条发、第二条丢
-});
-```
 
 ## 4. 指纹：一个修了三次才对的地方
 
