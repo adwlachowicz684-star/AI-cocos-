@@ -55,9 +55,6 @@ function update(realDt: number) {
 | **震屏取 max 不是 sum** | 两个 0.6 叠加成 1.2 会让画面糊掉 |
 | **payload 只在触发帧可取** | 否则会重复生成飘字 |
 | **自定义 profile 未覆盖的层为 0** | 不是沿用预设——写了 `{hitstop}` 就只有顿帧 |
-| **`update` 的 dt 走 `safeDt`** | `Infinity` 的 dt 会把所有实例的 elapsed 推到 Infinity，打击反馈**同一帧集体消失**。切后台再回来、断点续跑都会产出这种 dt |
-| **`popup` 是强度不是进度** | 它在整个 duration 内恒定（= `intensity × scale`），不是从 1 递减到 0。按进度做淡出会看到"飘字永不淡出、结束瞬间突降为 0" |
-| **`maxIntensity` 非有限值回落 1.5** | NaN 会让各层强度变 NaN，宿主拿去做位移算出 NaN 坐标：整个表现层静默失效 |
 
 ## 完整接口
 
@@ -70,8 +67,7 @@ function update(realDt: number) {
 | `lastKnockback()` | 上一次的击退量 |
 | `activeCount()` | 当前活跃的实例数 |
 | `takePopupPayloads()` | 取出本帧的飘字数据（**取走即清空**） |
-| `clear()` | 全部清空（**游戏内**语义：暂停、切场景后还要继续用） |
-| `destroy()` | 卸载：断开 payload 引用并 `clear()` |
+| `clear()` | 全部清空 |
 
 > ⚠️ **`takePopupPayloads()` 是"取走"，不是"读取"。**
 > 调一次后队列就空了——
@@ -97,21 +93,11 @@ function update(realDt: number) {
 ```typescript
 {
   timeScale: number;   // 本帧的时间缩放
-  shake: number;       // 震屏强度 0~1
-  flash: number;       // 闪白强度 0~1
-  popup: number;       // 飘字**强度** 0~1（不是进度，见下）
-  inHitstop: boolean;
+  shake: number;       // 震屏强度
+  flash: number;       // 闪白强度
+  /* ... */
 }
 ```
-
-> ⚠️ **`popup` 是强度，不是进度。**
-> 实测 `play('heavy', 0.5)` 之后连续 40 帧采样，它恒为 `0.50`，
-> 到 duration 结束那一帧才直接掉到 0。
-> 需要"进度"的宿主请自己按 duration 算：`1 - elapsed / duration`。
->
-> 为什么不直接把它改成真进度：那是 breaking change——
-> 已按强度接的宿主会突然看到淡出。
-> 这里选择把文档改成真实的语义（实现与文档冲突时，二者至少要对齐一个）。
 
 > ⚠️ **`shake` 取的是多个实例的 max，不是 sum**（见坑表格）。
 > 想自己叠加的话拿 `shake` 去乘，别改这个模块。
