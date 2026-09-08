@@ -155,7 +155,20 @@ const BUILTIN: Record<string, (...a: number[]) => number> = {
  *
  * 【为什么默认静默，不直接 console.warn】
  * 表达式是**每帧**求值的，默认打印会在一秒内刷满日志，
- * 结果就是没人看日志。宿主主动接才输出，且每个表达式每个键只报一次（见 `_warned`）。
+ * 结果就是没人看日志。宿主主动接才输出，且每个表达式每个键只报一次。
+ *
+ * 【⚠️ handler 是模块级全局，去重却是按实例的——两个粒度不一样】
+ * `_warnHandler` 是模块级变量：**整个进程只有一个**，
+ * 所有 `Expression` 实例共享它（这是有意的：宿主本来就该全局装一个 Logger）。
+ * 但去重的 `_warned` 集合是**每个实例一份**（见类的 `_warned` 字段），
+ * 所以"同一个键只报一次"指的是**同一个表达式对象**内只报一次，
+ * 不是全进程只报一次——三个表达式用了同一个拼错的变量名，会各报一次。
+ *
+ * 【由此带来的一个已知边界】
+ * 如果有"每帧 `new Expression(...)`"的用法（比如把公式当临时对象建），
+ * 去重就会失效：每帧都是新实例，`_warned` 每帧都是空的，日志照样刷屏。
+ * 真到那一步再改成"按表达式源码去重"（把 `_warned` 提到模块级、以源码为 key）。
+ * 现在不改：本库的用法是"配置期编译一次、运行期反复 evaluate"，实例是长命的。
  *
  * 【为什么只告警不改返回值】
  * 把"未定义变量"改成抛错会让既有配置全线加载失败，属于 breaking；
@@ -163,6 +176,12 @@ const BUILTIN: Record<string, (...a: number[]) => number> = {
  */
 export type ExpressionWarnHandler = (message: string) => void;
 
+/**
+ * 模块级 handler（**全局唯一**，所有实例共享）
+ *
+ * 【为什么不是实例字段】宿主只需要一个 Logger 出口，
+ * 每个表达式各设一个反而要处处记得卸载。代价见上面的"粒度不一致"说明。
+ */
 let _warnHandler: ExpressionWarnHandler | null = null;
 
 /**
@@ -178,7 +197,7 @@ export function setExpressionWarningHandler(h: ExpressionWarnHandler | null): vo
 interface EvalContext {
   readonly vars: Record<string, unknown>;
   readonly strict: boolean;
-  /** 已告警过的键（去重：同名问题只报一次） */
+  /** 已告警过的键（去重：**按实例**，不是全局——见 `setExpressionWarningHandler` 的说明） */
   readonly warned: Set<string>;
 }
 
