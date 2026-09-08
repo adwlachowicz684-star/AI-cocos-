@@ -79,20 +79,6 @@ const finalAtk = sys.compute(rolled, 'atk', 20);
 
 `validateAffixPool` 会对"标记了 percent 但 precision=0"发警告。
 
-### 区间窄于一个精度单位时，**范围优先于精度**
-
-```
-min=1.2  max=1.4  precision=0   → [1.2, 1.4] 里没有任何整数
-```
-
-此时"取整"和"落在 [min, max] 内"不可能同时满足。
-本模块的选择是**保范围、弃精度**：roll 出的值可能是 1.3（不满足 precision=0），
-但一定在 [1.2, 1.4] 内。
-
-【为什么这样选】策划配的数值范围是平衡性分析的依据，
-precision 只是取整偏好——数值被悄悄改小（比如恒为 1.0）会让整张配表失真。
-`validateAffixPool` 会为这种情况出一条 warning，配置期就能发现。
-
 ## 稀有度：权重 + 倍率
 
 ```typescript
@@ -106,10 +92,6 @@ const DefaultRarities = [
 
 - **weight** 决定"抽到什么品质"
 - **valueScale** 决定"数值放大多少"
-
-> ⚠️ **两者都会校验**：`weight` 为负数或 NaN 时**构造即抛错**
-> （NaN 权重会让整个权重表静默失效——实测修复前 200 次抽取全部落在最后一个稀有度）；
-> `valueScale` 为负数或 NaN 时按 **1（不放大不缩小）** 处理并出一条 warning。
 
 有了 valueScale，同一个词条定义（min=5, max=10）在 legendary 版本会变成 7.5~15，
 **不需要为每个稀有度重复配一遍词条表**。
@@ -192,9 +174,6 @@ if (sys.lastRerollDegraded) showConfirm('品质下降，保留吗？');
 | 某槽位可选词条 < maxAffixes | 该槽位永远凑不满词条 |
 | 所有稀有度权重为 0 | 永远只出 common |
 | 标记 percent 但 precision=0 | 可选值太少 |
-| 区间窄于一个精度单位 | roll 值不满足 precision（范围优先） |
-| 稀有度 weight 为负 / NaN | 权重表静默失效（**error**） |
-| 稀有度 valueScale 为负 / NaN | 值反向或变 NaN，按 1 处理 |
 | 冲突组只有 1 个成员 | 限制形同虚设（可能是笔误） |
 
 前两条是 `warning` 不是 `error`——有时是刻意设计。
