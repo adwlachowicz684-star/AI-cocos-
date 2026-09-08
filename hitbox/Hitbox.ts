@@ -232,47 +232,6 @@ export function boundingRadius(s: Shape): number {
   return r + Math.hypot(s.offsetX ?? 0, s.offsetY ?? 0);
 }
 
-/**
- * 采样密度配置
- *
- * 【⚠️ 曾经的 bug：采样数是硬编码的 8 / 6，违反 rule4（配置驱动）】
- *
- * 扇形参与的复杂组合（sector × rect / capsule / sector）走采样近似，
- * 而采样点数写死在 `samplePoints` 里。后果是：
- *
- *   - 窄扇形（6°）打细长胶囊，采样点可能全部落在缝隙里 → **漏检**
- *   - 想提高精度只能改源码，**使用者拷走目录后改 0 行**这条铁律被破坏
- *
- * 默认值与修复前完全一致（弧 8、胶囊 6），所以既有行为不变；
- * 需要更高精度时由调用方配置。
- */
-export interface SampleCounts {
-  /** 扇形弧上的采样段数（默认 8，越大越精确越慢） */
-  readonly arc?: number;
-  /** 胶囊轴线上的采样段数（默认 6） */
-  readonly capsule?: number;
-}
-
-const DEFAULT_ARC_SAMPLES = 8;
-const DEFAULT_CAPSULE_SAMPLES = 6;
-/** 采样数上界：防止配置里写 1e9 把一次判定变成卡死 */
-const MAX_SAMPLES = 256;
-
-function sampleCountOf(v: unknown, fallback: number): number {
-  const n = typeof v === 'number' ? v : NaN;
-  // 【模式 A】肯定式判断：NaN / 0 / 负数都回落到默认值
-  if (!(n >= 1)) return fallback;
-  return Math.min(MAX_SAMPLES, Math.floor(n));
-}
-
-function arcSamples(opts?: SampleCounts): number {
-  return sampleCountOf(opts?.arc, DEFAULT_ARC_SAMPLES);
-}
-
-function capsuleSamples(opts?: SampleCounts): number {
-  return sampleCountOf(opts?.capsule, DEFAULT_CAPSULE_SAMPLES);
-}
-
 /** 采样：把形状离散成一组测试点（用于 sector 参与的近似检测） */
 export function samplePoints(
   s: Shape,
@@ -280,7 +239,6 @@ export function samplePoints(
   cy: number,
   rotDeg: number,
   out: Array<{ x: number; y: number }> = [],
-  opts?: SampleCounts,
 ): Array<{ x: number; y: number }> {
   out.length = 0;
   const pushLocal = (lx: number, ly: number) => {
@@ -310,7 +268,7 @@ export function samplePoints(
       const half = ((s.angleDeg ?? 90) / 2) * (Math.PI / 180);
       pushLocal(0, 0);
       // 弧上采样（含两端点）
-      const N = arcSamples(opts);
+      const N = 8;
       for (let i = 0; i <= N; i++) {
         const a = -half + (2 * half * i) / N;
         // 局部坐标：0° 朝 +X
@@ -326,7 +284,7 @@ export function samplePoints(
 
     case 'capsule': {
       const h = (s.height ?? 0) / 2;
-      const N = capsuleSamples(opts);
+      const N = 6;
       for (let i = 0; i <= N; i++) {
         pushLocal(-h + (2 * h * i) / N, 0);
       }
@@ -474,13 +432,12 @@ const _pts: Array<{ x: number; y: number }> = [];
 function sampleOverlap(
   a: Shape, ax: number, ay: number, aRot: number,
   b: Shape, bx: number, by: number, bRot: number,
-  samples?: SampleCounts,
 ): boolean {
-  samplePoints(a, ax, ay, aRot, _pts, samples);
+  samplePoints(a, ax, ay, aRot, _pts);
   for (const p of _pts) {
     if (containsPoint(b, bx, by, bRot, p.x, p.y)) return true;
   }
-  samplePoints(b, bx, by, bRot, _pts, samples);
+  samplePoints(b, bx, by, bRot, _pts);
   for (const p of _pts) {
     if (containsPoint(a, ax, ay, aRot, p.x, p.y)) return true;
   }
@@ -496,7 +453,6 @@ function sampleOverlap(
 export function shapesOverlap(
   a: Shape, ax: number, ay: number, aRot: number,
   b: Shape, bx: number, by: number, bRot: number,
-  samples?: SampleCounts,
 ): boolean {
   // 包围圆快速排除
   const ra = boundingRadius(a);
@@ -532,14 +488,14 @@ export function shapesOverlap(
     case 'capsule|sector':
     case 'rect|sector':
     case 'sector|sector':
-      return sampleOverlap(A, Ax, Ay, ARot, B, Bx, By, BRot, samples);
+      return sampleOverlap(A, Ax, Ay, ARot, B, Bx, By, BRot);
 
     case 'circle|sector':
       // 圆 vs 扇形有精确解，但为了统一走采样（扇形采样点足够密）
-      return sampleOverlap(A, Ax, Ay, ARot, B, Bx, By, BRot, samples);
+      return sampleOverlap(A, Ax, Ay, ARot, B, Bx, By, BRot);
 
     default:
-      return sampleOverlap(A, Ax, Ay, ARot, B, Bx, By, BRot, samples);
+      return sampleOverlap(A, Ax, Ay, ARot, B, Bx, By, BRot);
   }
 }
 
@@ -554,13 +510,6 @@ export interface HitboxWorldOptions {
    * 太大 → 一格几百个框，退化成线性扫描。
    */
   cellSize?: number;
-  /**
-   * 采样密度（仅影响 sector / capsule 参与的近似检测）
-   *
-   * 默认 `{ arc: 8, capsule: 6 }`，与历史行为一致。
-   * 窄扇形或细长胶囊漏检时调大它。
-   */
-  sampleCounts?: SampleCounts;
 }
 
 /**
@@ -575,42 +524,10 @@ export interface HitboxWorldOptions {
 export class HitboxWorld {
   private _boxes = new Map<string, Hitbox>();
   private _cells = new Map<number, Set<string>>();
-  /**
-   * 每个 id **当前登记在索引里**的格子
-   *
-   * 【⚠️ 为什么要额外记这份账】
-   *
-   * 原实现 `remove(id)` 是"按当前坐标重算一遍该删哪些格子"：
-   *
-   * ```ts
-   * for (const k of this._cellsFor(b.x, b.y, boundingRadius(b.shape))) { ... }
-   * ```
-   *
-   * 而 `Hitbox` 是**可变对象**——`x` / `y` / `rotation` 都是可写字段，
-   * 调用方直接写 `b.x = 100` 再 `remove()` 是被 API 允许的写法
-   * （`update()` 只是"更便宜"的路径，不是唯一路径）。
-   *
-   * 于是这条路径上：重算出来的是**新位置**的格子（那里本来就没登记过），
-   * 旧位置那几个格子里的 id **永远留着**。实测：
-   * `add` 后直接 `b.x=100; b.y=100` → `remove('z')` →
-   * `_boxes` 里已经没有它了，但仍有 4 个格子持有 id `'z'`。
-   *
-   * 后果有两层：
-   *   1. `query` 遍历到这些格子时 `this._boxes.get(id)` 返回 undefined，
-   *      被 `if (!b) continue` 挡住——**不崩，但持续浪费遍历**
-   *   2. 这些 Set 因为 `size !== 0` 而**永远不会被回收**，
-   *      与「SpatialHash 空桶不回收」同构，是一次性的、不可逆的泄漏
-   *
-   * 修法：以"登记时实际写入了哪些格子"为准，而不是以"现在算出来该是哪些"为准。
-   */
-  private _cellsOf = new Map<string, number[]>();
   private _cellSize: number;
-
-  private readonly _samples: SampleCounts | undefined;
 
   constructor(opts: HitboxWorldOptions = {}) {
     this._cellSize = opts.cellSize ?? 4;
-    this._samples = opts.sampleCounts;
   }
 
   /** 空间哈希 key（支持负坐标） */
@@ -672,23 +589,13 @@ export class HitboxWorld {
   remove(id: string): boolean {
     const b = this._boxes.get(id);
     if (!b) return false;
-
-    /**
-     * 【⚠️ 按"登记账本"清理，而不是按当前坐标重算】
-     *
-     * 只有账本里查不到时（理论上不该发生：见 `_insert` 一定写账），
-     * 才退回按当前坐标算——那至少不会比修复前更差。
-     */
-    const recorded = this._cellsOf.get(id);
-    const keys = recorded ?? this._cellsFor(b.x, b.y, boundingRadius(b.shape));
-    for (const k of keys) {
+    for (const k of this._cellsFor(b.x, b.y, boundingRadius(b.shape))) {
       const set = this._cells.get(k);
       if (set) {
         set.delete(id);
         if (set.size === 0) this._cells.delete(k);
       }
     }
-    this._cellsOf.delete(id);
     this._boxes.delete(id);
     return true;
   }
@@ -741,16 +648,13 @@ export class HitboxWorld {
     }
 
     if (!same) {
-      // 同理走账本：坐标被外部改过时，oldCells 可能并不是真正登记过的那些
-      const recorded = this._cellsOf.get(id);
-      for (const k of recorded ?? oldCells) {
+      for (const k of oldCells) {
         const set = this._cells.get(k);
         if (set) {
           set.delete(id);
           if (set.size === 0) this._cells.delete(k);
         }
       }
-      this._cellsOf.delete(id);
       b.x = x;
       b.y = y;
       if (rotation !== undefined) b.rotation = rotation;
@@ -779,10 +683,7 @@ export class HitboxWorld {
   }
 
   private _insert(b: Hitbox): void {
-    const keys = this._cellsFor(b.x, b.y, boundingRadius(b.shape));
-    // 每次插入都刷新账本，保证"账本 === 实际登记过的格子"
-    this._cellsOf.set(b.id, keys);
-    for (const k of keys) {
+    for (const k of this._cellsFor(b.x, b.y, boundingRadius(b.shape))) {
       let set = this._cells.get(k);
       if (!set) {
         set = new Set();
@@ -840,7 +741,6 @@ export class HitboxWorld {
           shapesOverlap(
             shape, qx, qy, rotation,
             b.shape, _center.x, _center.y, b.rotation,
-            this._samples,
           )
         ) {
           const dx = _center.x - qx;
@@ -879,7 +779,6 @@ export class HitboxWorld {
   clear(): void {
     this._boxes.clear();
     this._cells.clear();
-    this._cellsOf.clear();
   }
 
   destroy(): void {
