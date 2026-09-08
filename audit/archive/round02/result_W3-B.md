@@ -304,7 +304,7 @@ OK  audit/verify_W3-B.md
 单反引号 `](./nope-single.md)`    忽略        ✓ 忽略
 双反引号 ``](./nope-double.md)``  忽略        ✓ 忽略
 ```js 围栏内 ](./nope-fence.md)   忽略        ✓ 忽略
-真链接 [README](../README.md)     通过        ✓ 通过
+真链接 [README](../../README.md)     通过        ✓ 通过
 → 断链 1 处（只有注入的那条真断链）
 ```
 

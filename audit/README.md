@@ -6,6 +6,25 @@
 
 ---
 
+## 📦 归档状态（2026-09-08）
+
+**第二轮（16 窗口交叉验收）已全部审结归档。** 本目录只留活文档，
+`handoff_W*.md` / `result_W*.md` / `verify_W*.md` 这些窗口代号**已释放，下轮可直接复用同名文件**。
+
+| 位置 | 内容 | 份数 |
+|---|---|---|
+| `archive/round01/` | 第一轮精审：`batch1~5.md`、`round01.md`、`PHASE0_DONE.md`、`CHIEF_VERDICT.md` | 8 |
+| `archive/round02/` | 第二轮 16 窗口全套：`handoff_W*.md`×16、`result_W*.md`×16、`verify_W*.md`×16、`review_A.md`、`review_B.md` | 50 |
+| 本目录（保留） | `README.md`（本台账）、`CHIEF_FINAL_VERDICT.md`（第二轮终审 + 12 项待办） | 2 |
+
+**归档 = 移动，不是删除**，证据链完整。归档规则：一轮审结即归档，
+下轮开工时本目录应只有台账与在办裁决。
+
+下方"分批"与"第二次精审"两节是**历史记录**，保留供追溯；
+其中的文件路径均已迁至 `archive/`，引用时请加上对应前缀。
+
+---
+
 ## 分批（按代码量均衡 + 同模块聚合）
 
 | 批次 | 任务书 | 单元数 | 代码行 | 层级分布 | 报告落盘 |
@@ -147,19 +166,19 @@
 ## 文档清单
 
 ### 修复任务书（16 份）
-`audit/handoff_W1-A.md` ~ `audit/handoff_W8-A.md`
-`audit/handoff_W1-B.md` ~ `audit/handoff_W8-B.md`
+`audit/archive/round02/handoff_W1-A.md` ~ `handoff_W8-A.md`
+`audit/archive/round02/handoff_W1-B.md` ~ `handoff_W8-B.md`
 
 ### 验收任务书（2 份）
-- `audit/review_A.md` —— 第 A 组用（验收 B 组）
-- `audit/review_B.md` —— 第 B 组用（验收 A 组）
+- `audit/archive/round02/review_A.md` —— 第 A 组用（验收 B 组）
+- `audit/archive/round02/review_B.md` —— 第 B 组用（验收 A 组）
 
 ### 产出物命名
 | 类型 | 命名 |
 |---|---|
 | 测试 | `tests/run_phase10_w{1..8}{a,b}.ts`，导出 `runPhase10W{n}{A,B}Tests()` |
-| 修复报告 | `audit/result_W{n}-{A,B}.md` |
-| 验收报告 | `audit/verify_W{n}-{A,B}.md` |
+| 修复报告 | `audit/archive/round02/result_W{n}-{A,B}.md` |
+| 验收报告 | `audit/archive/round02/verify_W{n}-{A,B}.md` |
 
 ## 验收五条硬标准
 
@@ -169,7 +188,12 @@
 4. **有没有顺手重构** —— 改动是否超出必要范围
 5. **有没有把"设计如此"误判成 bug** —— 本项目最易复发的一类（相切语义、display 单位元、prewarm 契约）
 
-详见 `review_A.md` / `review_B.md` 第 2 节。
+详见 `archive/round02/review_A.md` / `review_B.md` 第 2 节。
+
+## 第二轮结案
+
+**16 个窗口全部通过验收**，956 项新增测试全绿，全库 4,653 项 0 失败。
+终审裁决与 12 项待办见 `CHIEF_FINAL_VERDICT.md`。
 
 ## 总审合并时的注意点
 
