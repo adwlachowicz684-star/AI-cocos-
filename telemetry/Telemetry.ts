@@ -1,4 +1,4 @@
-import { clampNum, numOr } from '../_core/math';
+import { clampNum } from '../_core/math';
 import { hasOwn } from '../_core/guard';
 /**
  * telemetry/Telemetry.ts —— 埋点上报
@@ -111,8 +111,7 @@ const DEFAULTS = {
 };
 
 export class Telemetry {
-  // 不是 readonly：destroy() 要显式断开它（见文件末尾 destroy 的注释）
-  private _sender?: TelemetrySender;
+  private readonly _sender?: TelemetrySender;
   private readonly _batchSize: number;
   private readonly _flushIntervalMs: number;
   private readonly _commonProps: Readonly<Record<string, unknown>>;
@@ -140,27 +139,9 @@ export class Telemetry {
   constructor(opts: TelemetryOptions = {}) {
     this._sender = opts.sender;
     this._batchSize = clampNum(opts.batchSize, 1, 1e6, DEFAULTS.batchSize);
-    /**
-     * 【⚠️ flushIntervalMs 为 NaN 时"永远该发送"】
-     * shouldFlush 里是 `now - lastFlushAt < this._flushIntervalMs`，
-     * NaN 参与 `<` 恒为 false → **每次轮询都返回 true**。
-     * 实测：NaN 时 shouldFlush() = true，对照组（5000ms）= false。
-     * 后果是每条事件都触发一次网络请求——流量与电量上升，
-     * 而"埋点很频繁"看起来只是玩家活跃，不会有人怀疑配置项。
-     * 这里按库口径收口；不设上界是因为"一小时发一次"是合法配置。
-     */
-    this._flushIntervalMs = Math.max(0, numOr(opts.flushIntervalMs, DEFAULTS.flushIntervalMs));
+    this._flushIntervalMs = opts.flushIntervalMs ?? DEFAULTS.flushIntervalMs;
     this._commonProps = opts.commonProps ?? {};
-    /**
-     * 【⚠️ sampleRate 必须经 numOr，不能只靠 clamp01】
-     * clamp01 是用 `Number.isNaN` 判的，而 `Number.isNaN('abc')` 是 **false**
-     * ——字符串不是 NaN 这个值。于是 'abc' 一路穿过 clamp01 原样返回：
-     *   - `'0.5'`（数字串）能正常工作，因为 JS 的 `<` 会隐式转换 → 50 次采中 30 次；
-     *   - `'abc'` 则让 `hash < 'abc'` 恒为 false → **全量静默丢失**（实测 50 次采中 0 次）。
-     * 也就是说"配置错一点"和"配置错很多"的表现完全不同，前者看起来是对的，
-     * 后者则是整条埋点链路静默归零。先 numOr 收口再 clamp01，两种都回落到默认值。
-     */
-    this._sampleRate = clamp01(numOr(opts.sampleRate, DEFAULTS.sampleRate));
+    this._sampleRate = clamp01(opts.sampleRate ?? DEFAULTS.sampleRate);
     this._eventSampleRates = opts.eventSampleRates ?? {};
     /**
      * 【⚠️ 必须用 clampNum 而不是 `??`】
@@ -231,12 +212,9 @@ export class Telemetry {
      * 事件名虽然通常来自代码常量，但也可能来自配置表或埋点平台下发，
      * 属于外部输入，必须守。用 `hasOwn` 挡一层后未命中即回退全局采样率。
      */
-    // 命中自有属性还不够：表里存的值本身也可能是 'abc' / null / NaN，
-    // 同样会让 `hash < rate` 恒为 false。按全局采样率回落，而不是静默丢弃。
-    const rawRate = hasOwn(this._eventSampleRates, name)
+    const rate = hasOwn(this._eventSampleRates, name)
       ? this._eventSampleRates[name]
-      : undefined;
-    const rate = clamp01(numOr(rawRate, this._sampleRate));
+      : this._sampleRate;
     if (rate >= 1) return true;
     if (rate <= 0) return false;
     return hashString(`${this._sessionId}:${name}`) < rate;
@@ -327,16 +305,6 @@ export class Telemetry {
 
       if (this._retries <= this._maxRetries) {
         this._buffer = [...batch, ...this._buffer];
-      } else {
-        /**
-         * 【⚠️ 丢弃必须计入 dropped，否则丢了多少永远查不到】
-         * `_stats.dropped` 原先只统计"缓冲满时丢弃最旧的"，
-         * 这种"重试超限后整批丢弃"却只记 `failed`——
-         * 于是看统计的人会以为数据只是"发送失败、还在重试"，
-         * 实际它已经永久没了。埋点缺口表现为"某天数据突然少一截"，
-         * 而 stats 里找不到对应的计数，无法回溯。
-         */
-        this._stats.dropped += batch.length;
       }
       return false;
     } finally {
@@ -354,30 +322,9 @@ export class Telemetry {
     this._buffer = [];
   }
 
-  /**
-   * 页面关闭前调用：尽力发一次
-   *
-   * 【⚠️ 这个名字是历史遗留：它其实是 async，返回 Promise】
-   * 叫 Sync 是因为它表达的是"现在就发"，不是"同步返回"。
-   * 改名（比如 `flushNow`）会 breaking 掉现有调用方，所以这里只更正文档，
-   * 行为保持不变；调用方请务必 `await`（或在 `pagehide` 里 fire-and-forget）。
-   */
+  /** 页面关闭前调用：尽力发一次 */
   async flushSync(): Promise<void> {
     await this.flush();
-  }
-
-  /**
-   * 卸载（铁律 5：有 install 就必须有对应的卸载）
-   *
-   * 之前本类只有 `clear()`，没有 `destroy()`，于是卸载插件时
-   * 埋点实例只能靠 GC——而 `_sender` 闭包常常持有页面级对象，
-   * 引用不断就一直驻留。这里显式断开 sender 与缓冲。
-   */
-  destroy(): void {
-    this._buffer = [];
-    this._sender = undefined;
-    this._flushing = false;
-    this._retries = 0;
   }
 }
 
