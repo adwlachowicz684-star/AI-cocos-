@@ -170,20 +170,6 @@ export interface IndicatorResult {
   /** 吸附到的目标 id（未吸附则 undefined） */
   snappedTo?: string;
 
-  /**
-   * `ring` 类型的内半径（仅 ring 有此字段）
-   *
-   * 【为什么必须外露】
-   * 配置里的 `innerRadius` 被 API 收下却在 `_buildShape()` 里被丢弃——
-   * 形状只返回外圆。于是直接把 `toQueryArgs(result)` 喂给
-   * `HitboxWorld.query()` 得到的是**实心圆**判定：环形技能打中心的人。
-   *
-   * 调用方要正确过滤，就必须手上有 innerRadius。
-   * 以前它只能自己回配置里取（而 result 里没有，等于要再持有 cfg），
-   * 这条多余的路径就是误用来源。所以这里随结果一起给出。
-   */
-  innerRadius?: number;
-
   /** 是否可以施放（落点合法） */
   valid: boolean;
   /** 无效原因（UI 提示用） */
@@ -280,17 +266,6 @@ export class SkillIndicator {
     return this._finish(cx, cy, rotation, cx, cy, clamped, undefined, casterX, casterY);
   }
 
-  /**
-   * 本配置的形状中心是否需要"从施法者脚下向前延伸"
-   *
-   * 【为什么抽成方法】`compute` 与 `centerFor` 必须共用同一个判据。
-   * 判据一旦在两处各写一份，就会出现"加了新类型只改了一边"的静默不一致。
-   */
-  private _extendsFromCaster(): boolean {
-    const k = this._cfg.kind;
-    return k === 'line' || k === 'direction';
-  }
-
   private _finish(
     cx: number, cy: number, rotation: number,
     aimX: number, aimY: number, clamped: boolean, snappedTo: string | undefined,
@@ -298,38 +273,10 @@ export class SkillIndicator {
   ): IndicatorResult {
     const shape = this._buildShape();
 
-    /**
-     * 【⚠️ 曾经的 bug：`compute()` 与 `centerFor()` 给出两个不同的中心】
-     *
-     * 对 `line` / `direction` 这类"从脚下向前延伸"的形状：
-     * - `compute()` 返回的是**瞄准点**（射程末端，实测 `x === 6`）
-     * - `centerFor()` 返回的是**线段中点**（前方半长处，实测 `x === 3`）
-     *
-     * 两个 API 对同一套配置给出相差 `length/2` 的两个答案，而 README
-     * 没有说明二者语义不同。于是"用 centerFor 画、用 compute 判定"（或反之）
-     * 的代码，画的圈和实际打中的位置**整整错开半个长度**——
-     * 正是本单元开篇列为头号原则要防的那种"看着能躲开却被打中"。
-     *
-     * 【以哪个为准】README 第 40 行明确写了"形状中心应在前方半个长度处，
-     * 用 centerFor 算"，且物理上自洽：矩形 `halfW = length/2`，
-     * 中心只有前移半长，覆盖区间才正好是 [caster, caster + length]。
-     * 所以统一到 `centerFor`，并让 `compute` 直接复用它（不再各写一份）。
-     *
-     * 【瞄准点语义不变】`aimX` / `aimY` 仍表示"钳制并吸附后的目标点"，
-     * 保持原有含义，便于渲染层画准星。
-     */
-    let shapeCx = cx;
-    let shapeCy = cy;
-    if (this._extendsFromCaster()) {
-      const c = this.centerFor(casterX, casterY, rotation);
-      shapeCx = c.x;
-      shapeCy = c.y;
-    }
-
     const r: IndicatorResult = {
       shape,
-      x: shapeCx,
-      y: shapeCy,
+      x: cx,
+      y: cy,
       rotation,
       aimX,
       aimY,
@@ -337,11 +284,6 @@ export class SkillIndicator {
       valid: true,
     };
     if (snappedTo !== undefined) r.snappedTo = snappedTo;
-
-    // 【ring 必须把 innerRadius 交出去】见 IndicatorResult.innerRadius 的说明
-    if (shape.kind === 'circle' && this._cfg.kind === 'ring') {
-      r.innerRadius = this._cfg.innerRadius ?? 0;
-    }
 
     const cfg = this._cfg;
 
@@ -355,7 +297,7 @@ export class SkillIndicator {
     }
 
     // 落点校验（墙里 / 悬崖外等）
-    if (r.valid && this._placement && !this._placement.isValid(shapeCx, shapeCy, shape)) {
+    if (r.valid && this._placement && !this._placement.isValid(cx, cy, shape)) {
       r.valid = false;
       r.invalidReason = 'blocked';
     }
