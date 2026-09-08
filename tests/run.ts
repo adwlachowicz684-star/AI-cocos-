@@ -58,22 +58,6 @@ import { runWeakTests } from './run_weak';
 import { runWeak2Tests } from './run_weak2';
 import { runFixRegressTests } from './run_fixregress';
 import { runDtGuardTests } from './run_dtguard';
-import { runPhase10W1ATests } from './run_phase10_w1a';
-import { runPhase10W1BTests } from './run_phase10_w1b';
-import { runPhase10W2ATests } from './run_phase10_w2a';
-import { runPhase10W2BTests } from './run_phase10_w2b';
-import { runPhase10W3ATests } from './run_phase10_w3a';
-import { runPhase10W3BTests } from './run_phase10_w3b';
-import { runPhase10W4ATests } from './run_phase10_w4a';
-import { runPhase10W4BTests } from './run_phase10_w4b';
-import { runPhase10W5ATests } from './run_phase10_w5a';
-import { runPhase10W5BTests } from './run_phase10_w5b';
-import { runPhase10W6ATests } from './run_phase10_w6a';
-import { runPhase10W6BTests } from './run_phase10_w6b';
-import { runPhase10W7ATests } from './run_phase10_w7a';
-import { runPhase10W7BTests } from './run_phase10_w7b';
-import { runPhase10W8ATests } from './run_phase10_w8a';
-import { runPhase10W8BTests } from './run_phase10_w8b';
 import { runDtGuard2Tests } from './run_dtguard2';
 import { runNumGuardTests } from './run_numguard';
 import { runGuardTests } from './run_guard';
@@ -86,6 +70,7 @@ import { runPhase6Tests } from './run_phase6';
 import { runPhase7Tests } from './run_phase7';
 import { runPhase8Tests } from './run_phase8';
 import { runPhase9Tests } from './run_phase9';
+import { runPhase11Tests } from './run_phase11';
 
 async function main(): Promise<void> {
   setSuite('第一批：核心插件（EventBus / Pool / RNG / Damage / Skill / Joystick）');
@@ -209,53 +194,8 @@ async function main(): Promise<void> {
   setSuite('精审修复回归 · 第九批（第二次精审 · 数据损坏 / 经济 / 统计正确性）');
   runPhase9Tests();
 
-  setSuite('精审修复回归 · 第十批 W1-A（第二次精审 · 第 A 组（builder/craft/crash/cutscene/debug-console/gesture/matchops/skill-variant））');
-  runPhase10W1ATests();
-
-  setSuite('精审修复回归 · 第十批 W1-B（第二次精审 · 第 B 组（anticheat/audio/buff/collision/condition/skill-player/spatial））');
-  runPhase10W1BTests();
-
-  setSuite('精审修复回归 · 第十批 W2-A（第二次精审 · 第 A 组（attribute/command/diagpack/indicator/logger/pathfinding/runscope/scheduling/skill-caster/social））');
-  runPhase10W2ATests();
-
-  setSuite('精审修复回归 · 第十批 W2-B（第二次精审 · 第 B 组（config/curse/hitbox/leaderboard/minimap/save/scheduler/subtitle/telegraph））');
-  runPhase10W2BTests();
-
-  setSuite('精审修复回归 · 第十批 W3-A（第二次精审 · 第 A 组（attack-token/card/combo/damage-pipeline/element/gacha/loot/quest/skill-queue））');
-  runPhase10W3ATests();
-
-  setSuite('精审修复回归 · 第十批 W3-B（第二次精审 · 第 B 组（cheatcode/currency/daily/inventory/ranking/room-graph/snapshot/stats/wave-spawner））');
-  runPhase10W3BTests();
-
-  setSuite('精审修复回归 · 第十批 W4-A（第二次精审 · 第 A 组（behavior-tree/di/grid/quest-log/rebind-ext/skill/skill-target/steering/team-mmr））');
-  runPhase10W4ATests();
-
-  setSuite('精审修复回归 · 第十批 W4-B（第二次精审 · 第 B 组（dialogue/fov/joystick-mover/mover/rebind/reddot/shop））');
-  runPhase10W4BTests();
-
-  setSuite('精审修复回归 · 第十批 W5-A（第二次精审 · 第 A 组（autoquality/camera/craft-ext/difficulty/fog/i18n/input-ext/navmesh/perception））');
-  runPhase10W5ATests();
-
-  setSuite('精审修复回归 · 第十批 W5-B（第二次精审 · 第 B 组（accessibility/analytics/feedback/input/mmr/rarity/scenerouter））');
-  runPhase10W5BTests();
-
-  setSuite('精审修复回归 · 第十批 W6-A（第二次精审 · 第 A 组（ai/animation/attack/blackboard/character/camera-ext/charge/collision-ext/cooldown））');
-  runPhase10W6ATests();
-
-  setSuite('精审修复回归 · 第十批 W6-B（第二次精审 · 第 B 组（adapters/dungeon/pathfind/replay））');
-  runPhase10W6BTests();
-
-  setSuite('精审修复回归 · 第十批 W7-A（第二次精审 · 第 A 组（dash/dialogue-ext/equipment/objective/progressbar/reddot-ext/save-ext/transition））');
-  runPhase10W7ATests();
-
-  setSuite('精审修复回归 · 第十批 W7-B（第二次精审 · 第 B 组（achievement/curve/expression））');
-  runPhase10W7BTests();
-
-  setSuite('精审修复回归 · 第十批 W8-A（第二次精审 · 第 A 组（settings/skill-tree/stat-growth/talent/telemetry/tutorial/upgrade/vfx））');
-  runPhase10W8ATests();
-
-  setSuite('精审修复回归 · 第十批 W8-B（第二次精审 · 第 B 组（affix/binary/blessing））');
-  runPhase10W8BTests();
+  setSuite('新增能力 · mover.turnRate 平滑转向');
+  runPhase11Tests();
 
   summary();
 }
