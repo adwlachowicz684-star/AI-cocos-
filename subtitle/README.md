@@ -125,20 +125,6 @@ interface ActiveSubtitle {
 这样它天然支持 seek、快进、倒退——因为倒退只是把 `time` 传小一点。
 自己维护计时器的实现在变速播放时会和音频漂移，而且无法跳转。
 
-## 示例
-
-可运行示例见 `examples/subtitle-usage.ts`（本单元原先是库里唯一没有示例的单元）：
-
-```bash
-npx tsc -p tsconfig.json && node .build/examples/subtitle-usage.js
-```
-
-它演示：SRT 解析与说话人提取、**毫秒**单位、重叠时刻的多条返回、
-打字机 progress、连点跳过、导出回 SRT，以及长字幕下的查询性能。
-
 ## 测试
 
 **31 项**，覆盖重叠、progress、边界、SRT 解析（点号/补位/说话人提取）与往返。
-
-此外 `tests/run_phase10_w2b.ts` 里有本单元精审修复的回归用例
-（长字幕 `at()` 的复杂度、二分+回溯与全量扫描的一致性）。
