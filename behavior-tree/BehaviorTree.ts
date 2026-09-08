@@ -137,20 +137,6 @@ export class BehaviorTree<C> implements IDisposable {
   /**
    * 记录节点状态（由节点或调试包装器调用）
    *
-   * 【⚠️ 内置节点**不会**自动记录：它是手动接口，不是自动追踪】
-   *
-   * 字段上方的注释曾经写"每个节点最近一次的状态（调试面板用）"，
-   * 让人以为 tick 之后 `trackedNodes` 会自动填满。
-   * 实测：跑完一次 tick，`trackedNodes.size = 0`——
-   * Selector / Sequence / Condition / Action / Wait **一个都不调用 recordNode**。
-   * 调试面板恒空，而注释措辞暗示它应该自动工作。
-   *
-   * 【为什么没有直接改成自动追踪】
-   * 节点接口 `IBTNode` 不暴露 children，运行器无法通用地遍历整棵树；
-   * 给每个内置节点加 tree 反向引用会破坏"节点是可独立复制的纯对象"这个前提。
-   * 需要调试面板时，请自己在 Action/Condition 的回调里调
-   * `tree.recordNode(name, status)`，或包一层调试节点。
-   *
    * 【用途】调试面板显示"AI 现在卡在哪个节点"。
    * 当 AI 行为异常时，这个比看日志快十倍。
    */
