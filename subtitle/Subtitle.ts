@@ -98,8 +98,6 @@ export interface ActiveSubtitle {
 export class SubtitleTrack {
   private readonly _lines: SubtitleLine[];
   private readonly _speakers: Readonly<Record<string, { name?: string; color?: string; data?: unknown }>>;
-  /** 前 i 行里最大的 end（见构造函数注释），长度 = 行数 + 1 */
-  private readonly _maxEndBefore: number[];
 
   constructor(opts: SubtitleTrackOptions) {
     this._speakers = opts.speakers ?? {};
@@ -114,25 +112,6 @@ export class SubtitleTrack {
           `[Subtitle] 第 ${i} 行的结束时间 ${l.end} 早于开始时间 ${l.start}`
         );
       }
-    }
-
-    /**
-     * `maxEndBefore[i]` = 前 i 行里最大的 end（前缀最大值）
-     *
-     * 【用途】`at()` 二分到命中点后要向前回溯，找那些"开始得更早、
-     * 但区间更长、此刻仍在播"的行（画外音压着好几条对话是常态）。
-     * 最坏情况要一路回溯到数组头，退化回 O(n)。
-     *
-     * 有了前缀最大值，回溯时一旦 `maxEndBefore[i] <= time`
-     * 就能立刻停：更早的行全都在这个时间之前结束了，不可能还在播。
-     * 于是回溯长度只取决于**真正重叠的行数**，而不是总行数。
-     */
-    this._maxEndBefore = new Array<number>(this._lines.length + 1);
-    this._maxEndBefore[0] = Number.NEGATIVE_INFINITY;
-    for (let i = 0; i < this._lines.length; i++) {
-      const prev = this._maxEndBefore[i];
-      const end = this._lines[i].end;
-      this._maxEndBefore[i + 1] = end > prev ? end : prev;
     }
   }
 
@@ -154,67 +133,22 @@ export class SubtitleTrack {
    */
   at(time: number): ActiveSubtitle[] {
     const out: ActiveSubtitle[] = [];
-
-    /**
-     * 【⚠️ 曾经的 bug：每次查询都从数组头扫到命中点】
-     *
-     * 字幕是**每帧查询**的（`at(playTimeMs)` 在渲染循环里），
-     * 而原实现从头遍历直到 `l.start > time` 才 break——
-     * 也就是每次都要走过**前面所有**已经播完的行。
-     *
-     * 电影级长字幕 3000+ 行时：
-     *   片尾那一段 = 每次查询走 3000 次迭代 × 60fps = 每秒 18 万次
-     * 而且越往后越慢——性能问题**只在长片尾出现**，
-     * 用几十行的样片自测完全测不出来。
-     *
-     * 实测（修复前）：3000 行、查询 290 万毫秒附近 600 次 = 10ms；
-     * 行数再翻十倍就是 100ms——足以在片尾看到掉帧。
-     *
-     * 修法：数组按 start 排序（构造时已排），
-     * 用二分找到"最后一条 start <= time"的位置，
-     * 再从那里**向前**回溯（重叠区间可能跨越很多行）。
-     */
-    const n = this._lines.length;
-    if (n === 0) return out;
-    if (!Number.isFinite(time)) return out;
-
-    // 二分：找最后一个满足 start <= time 的下标
-    let lo = 0;
-    let hi = n - 1;
-    let idx = -1;
-    while (lo <= hi) {
-      const mid = (lo + hi) >> 1;
-      if (this._lines[mid].start <= time) {
-        idx = mid;
-        lo = mid + 1;
-      } else {
-        hi = mid - 1;
-      }
-    }
-    if (idx < 0) return out;   // 还没到第一条
-
-    // 从 idx 向前回溯：更早的行可能区间更长、仍然在播
-    let i = idx;
-    while (i >= 0) {
+    for (let i = 0; i < this._lines.length; i++) {
       const l = this._lines[i];
-      // 已经不可能有更早的行覆盖到 time（行按 start 排序，
-      // 且这里额外用 maxEnd 前缀加速：见 _maxEndBefore）
-      if (this._maxEndBefore[i + 1] <= time) break;
-      if (time >= l.start && time < l.end) {
-        const sp = l.speaker ? this._speakers[l.speaker] : undefined;
-        const span = Math.max(1, l.end - l.start);
-        out.push({
-          line: l,
-          index: i,
-          speakerLabel: sp?.name ?? l.speakerName ?? (l.speaker ?? null),
-          speakerColor: sp?.color ?? null,
-          elapsed: time - l.start,
-          progress: Math.min(1, (time - l.start) / span),
-        });
-      }
-      i--;
+      if (l.start > time) break;              // 已排序，后面都不会命中
+      if (time < l.start || time >= l.end) continue;
+
+      const sp = l.speaker ? this._speakers[l.speaker] : undefined;
+      const span = Math.max(1, l.end - l.start);
+      out.push({
+        line: l,
+        index: i,
+        speakerLabel: sp?.name ?? l.speakerName ?? (l.speaker ?? null),
+        speakerColor: sp?.color ?? null,
+        elapsed: time - l.start,
+        progress: Math.min(1, (time - l.start) / span),
+      });
     }
-    out.reverse();   // 保持与修复前一致：按时间先后升序
     return out;
   }
 
