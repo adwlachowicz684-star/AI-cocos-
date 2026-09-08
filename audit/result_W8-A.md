@@ -2,7 +2,7 @@
 
 > 单元：`autoquality` / `loot` / `meta`
 > 条目：12（P1 9 / P2 3 组，P2 展开为 AQ4~AQ7、Lo5~Lo8、M5~M8 共 12 条）
-> 回归测试：`tests/run_phase10_w8a.ts`（导出 `runPhase10W8ATests()`，**41 项**）
+> 回归测试：`tests/run_phase10_w8a.ts`（导出 `runPhase10W8ATests()`，**42 项**）
 > 交叉验收：`audit/verify_W8-A.md`（验收 W8-B）
 
 ---
@@ -12,7 +12,7 @@
 | 项 | 结果 |
 |---|---|
 | 全量回归 `node .build/tests/run.js` | **通过 3696 项，失败 0 项**（开工前实测基线同为 3696，未下跌） |
-| 新增用例 | 41 项（独立跑法见下） |
+| 新增用例 | 42 项（独立跑法见下） |
 | 六个校验脚本 | `check-deps` ✓ / `check-links` ✓ / `scan-dt-guard` ✓ / `scan-num-guard` ✓ / `check-random-source` ✓ / `check-dup-exports` ✓ |
 
 新增用例的独立跑法（`tests/run.ts` 按第 6 节纪律未改，交总审合并注册）：
@@ -22,7 +22,7 @@ bash build.sh
 node -e "const m=require('./.build/tests/run_phase10_w8a.js');\
 const f=require('./.build/tests/_framework.js');\
 m.runPhase10W8ATests();f.summary();"
-# → 通过 41 项，失败 0 项
+# → 通过 42 项，失败 0 项
 ```
 
 **"修复前会失败"的验证方式**：按 `review_A.md` 标准 2 的要求，没有用"改回旧代码重跑"的办法
@@ -52,7 +52,7 @@ m.runPhase10W8ATests();f.summary();"
 | P1-4 | loot | P1 | 已修 | `setWeight('b',0)` 后 `pick()` 正常返回 `"a"`，但 `pickUnique(2)` 抛 **`[WeightedTable] 权重必须为正，实际 0`** | `pickUnique(2)` 返回 `["a","c"]`，零权重项被跳过 | › loot P1-4（2 条） |
 | P1-5 | loot | P1 | 已修 | 喂 5000 个不同概率后，静态缓存从 0 涨到 **5000** | LRU 上限生效，稳定在 **512**（`PRD.MAX_CACHE`）；命中不新增条目 | › loot P1-5（2 条） |
 | P1-6 | loot | P1 | 已修 | `importState({current:[0,7,-3]})` → `["sword",null,null]`，undefined 个数 = 2；`take(1)` 返回 `undefined` 而 state 已变 `taken` | 只保留 `["sword"]`，`lastDropped = [7,-3]`；`take(0)` 拿到 `"sword"` | › loot P1-6（2 条） |
-| P1-7 | meta | P1 | 已修（附说明，见 §3.1） | `requires: ['不存在的节点']` → 构造不报错、`canUnlock("need") = {"ok":true,"cost":10}`、start 未解锁也能 `unlock("need") = 1`；**对照**：货币名拼错是构造即抛错 | 行为不变（遵守 README 承诺），但构造期收集进 `unknownRequires`，笔误有了可查出口 | › meta P1-7（2 条） |
+| P1-7 | meta | P1 | 已修（附说明 + 构造期告警，见 §3.1 / §5.4） | `requires: ['不存在的节点']` → 构造不报错、`canUnlock("need") = {"ok":true,"cost":10}`、start 未解锁也能 `unlock("need") = 1`；**对照**：货币名拼错是构造即抛错 | 行为不变（遵守 README 承诺），但构造期收集进 `unknownRequires`，笔误有了可查出口 | › meta P1-7（2 条，含告警） |
 | P1-8 | meta | P1 | 已修 | Lv2 的 `set(50)` → `{"set":100}`；Lv3 → `{"set":150}`；`compute` 返回 150 | Lv1/Lv2/Lv3 恒为 `50`；`compute` 返回 50；`add`/`mul` 仍按等级缩放 | › meta P1-8（2 条） |
 | P1-9 | meta | P1 | 已修 | `level` = NaN、`isUnlocked` = **false**，但 `effectOf('atk') = {add: NaN}`、`compute('atk',100)` = **NaN** | NaN 回落为 0；未解锁就不产出效果；`compute` 返回 100（base） | › meta P1-9（2 条） |
 
@@ -67,7 +67,7 @@ m.runPhase10W8ATests();f.summary();"
 | Lo5 | loot | P2 | 已修 | `count: NaN` 时 `roll()` 产出 **0 个**选项（空宝箱，静默） | 回落默认 3 个；`count: Infinity` 也不再产出空宝箱；`count: 0` 仍夹到 1 | › loot Lo5（2 条） |
 | Lo6 | loot | P2 | 已修 | `destroy()` 后 `_options.owned` **仍指向调用方的同一个数组** | 引用置空；**不清空数组本身**（那是别人的数据） | › loot Lo6（2 条） |
 | Lo7 | loot | P2 | **不成立（附证据）** | 加权条目确实"每条独立判定"，单次可同时命中多条（实测 50 次里最多命中 ≥2 条） | 核对结论：**README 从未声明"只抽一条"**，源码里有"设计选择：每条独立判定 vs 只抽一条"的注释写明理由。属"文档没写"而非"文档与实现矛盾"，维持现状并固化语义 | › loot Lo7（2 条） |
-| Lo8 | loot | P2 | 已修（补文档） | `add('z')` 后 `remaining` 从 5 变成 **0**，袋中剩余被丢弃 | 行为不变（袋子内容变了，剩余序列本就失效），补注释说明"add 会重洗整袋"；重洗后新元素能出现 | › loot Lo8（2 条） |
+| Lo8 | loot | P2 | 已修（补文档 + 固化轮次语义，见 §5.2） | `add('z')` 后 `remaining` 从 5 变成 **0**，袋中剩余被丢弃 | 行为不变（袋子内容变了，剩余序列本就失效），补注释说明"add 会重洗整袋"；重洗后新元素能出现 | › loot Lo8（3 条） |
 | M5 | meta | P2 | 已固化（正面样本） | `restore()` 对本批是**做得最好**的反序列化：校验有限性、clamp 到 maxLevel、跳过/裁剪记进 `RestoreReport` | 未改实现；补 2 条用例把四条容错行为上锁（版本不一致、未知节点/货币记进 skipped、超限记进 clamped、null 是早退不清状态） | › meta M5（2 条） |
 | M6 | meta | P2 | 已修 | `respec(-1)` 后余额 500 → **300**（洗点反而扣钱）；`respec(NaN)` → 余额 **NaN**，之后 `canUnlock` 恒返回 insufficient-currency | 比例收口到 [0,1]：负 → 0（余额 500）、NaN → 1（余额 700）、>1 → 1（防刷资源） | › meta M6（2 条） |
 | M7 | meta | P2 | 已修 | `topoOrder` 用 `queue.shift()`，O(n²) | 改游标指针 `head`，O(n)；顺序与完整性实测不变 | › meta M7（2 条） |
@@ -83,7 +83,7 @@ m.runPhase10W8ATests();f.summary();"
 | `loot/WeightedTable.ts` | `pickUnique` 建临时表时跳过权重 ≤ 0 的项 | 8 行 |
 | `loot/PRD.ts` | 静态缓存改 LRU + `MAX_CACHE = 512`；命中提到队尾 | — |
 | `loot/Chest.ts` | `importState` 逐项校验索引并记录 `lastDropped`；`_count` 改用 `clampNum`；`destroy()` 断开 `owned` | — |
-| `meta/MetaProgression.ts` | 构造期收集 `unknownRequires` + 查询接口；`set` 不乘等级；`setLevel` 用 `clampNum + floor`；`respec` 收口比例；`topoOrder` 改游标；新增 `destroy()` | — |
+| `meta/MetaProgression.ts` | 构造期收集 `unknownRequires` + 查询接口 + `console.warn`；`set` 不乘等级；`setLevel` 用 `clampNum + floor`；`respec` 收口比例；`topoOrder` 改游标；新增 `destroy()` | — |
 | `_kitmeta.json` | `meta.depends` 加 `_core` | `check-deps.js` 要求登记与源码一致（本批开始 import `_core`） |
 | `tests/run_phase10_w8a.ts` | 新增 | 本批回归 |
 
@@ -194,3 +194,96 @@ $ python3 scripts/check-dup-exports.py  [OK] 无待处理的冲突 ✓
 
 本批因为 `meta` 开始 import `_core`（用了 `clampNum`），**必须**补 `meta → _core` 的登记，
 否则会变成 9 条。已补，现在仍是 8 条——与原始库一致，本窗口未让这个数字变差。
+
+---
+
+## 5. 对 W8-B 验收意见的回应（收尾）
+
+W8-B 验收 `W8-A` 时（`audit/verify_W8-B.md`）我尚未交付，它做了一个很有价值的替代动作：
+**写独立只读脚本把我这 12 条逐条自己复现了一遍**，并留下三条提醒 + 五条"待交付后补验"。
+本节逐条回应——这三条提醒我全部采纳，但有一条**归因需要澄清**。
+
+### 5.1 三条提醒：全部采纳
+
+| W8-B 的提醒 | 我的处理 |
+|---|---|
+| ① `loot` 子表循环不要按原报告返工，基线已有环检测 | ✅ 已采纳。我独立复现得到同样的 `[LootTable] 子表存在循环引用…`，判**不成立**（§3.2），未改动 `LootTable` 一行 |
+| ② `meta` 的 `set` 缩放与它在 `blessing` 修的 P1-7 同为模式 D，建议照抄口径 | ✅ 已采纳。`case 'set'` 直接用 `eff.value`，与 `blessing` 的 `op === 'set' ? e.perStack` 语义一致，两个单元不会出现两种口径 |
+| ③ `respec` 除了负数还要收口 NaN（NaN 会把余额整条毒化） | ✅ 已采纳且**验证过**：`clampNum(refundRatio, 0, 1, 1)` 同时挡住负数（夹到 0）与 NaN（回落 1）；实测 `respec(NaN)` 后余额 700 而非 NaN |
+
+> 提醒 ③ 值得单独说一句：它指出"NaN 比负数更难查"——余额一旦是 NaN，
+> `canUnlock` 里 `!(have >= cost)` 对 NaN 成立，**之后所有节点都解锁不了**，
+> 而玩家和日志都只会看到"解锁不了"，不会指向这次 `respec`。我为此单列了一条用例。
+
+### 5.2 一条需要澄清的归因：Lo8 不是"违反 README 承诺"
+
+W8-B 实测 `add x,y → draw → add z → draw,draw` 得到 `{"first":"y","second":"z","third":"y"}`，
+判断"**y 在一轮内出现了两次，违反 README 承诺的『一轮之内每个元素恰好出现一次』**"。
+
+我用不同随机序列复跑了同一构造（得到 `first=x / second=z / third=x`），**现象形态一致**，
+但归因不成立——`add()` **本身就是轮次边界**：
+
+```
+add 后 remaining = 0、capacity = 3
+add 之后连抽 3 次 = ["z","x","y"]，去重数量 = 3   ← 新一轮内仍然恰好一次
+```
+
+`first` 属于旧轮，`second`/`third` 属于新轮。跨过 `add` 这条边界看到重复是正常的，
+README 的承诺说的是"**一轮之内**"，而 add 之后已经换了一轮。
+
+所以本条的定性是 **"README 没说明这个边界"**，而不是"README 被违反"——
+两者对应的修法完全不同：后者要去改 `add()` 的实现，前者只需写清楚。
+我按前者处理（补注释 + 不改行为），并**新增一条用例**把"add 之后的新一轮内仍恰好一次"固化，
+防止有人按 W8-B 的归因去"修"一个根本没坏的性质。
+
+### 5.3 复杂度类的口径分歧：它建议"都判不成立"，我做了两条
+
+W8-B 建议 AQ5 / AQ6 / M7 三条复杂度类统一按"判不成立 + 留性能护栏，不要重构"处理。
+我做了其中两条（AQ5、AQ6）和 M7，理由如下——不是无视建议，是依据不同：
+
+| 条目 | W8-B 建议 | 我的处理 | 理由 |
+|---|---|---|---|
+| **AQ6**（两份重复实现） | 判不成立 | **已合并** | 任务书**明文指令**："应合并（AutoQuality 内部持有 FpsMeter 即可）"。这不是我主动要重构，是清单项。W8-B 看到的是"重构项，未实测"，未注意到任务书原文 |
+| **AQ5**（每帧多次排序） | 判不成立 + 护栏 | **加了排序缓存** | 未改算法结构与对外行为，只在 `tick()` 时写脏、两次 tick 之间复用排序结果。改动 ≤10 行，且**读数不变**（有用例断言两种口径一致） |
+| **M7**（`queue.shift()` O(n²)） | 判不成立 + 护栏 | **改游标指针** | 改动 3 行，输出顺序与完整性有用例锁住 |
+
+三条的性能实测我也认可 W8-B 的结论——**都在亚毫秒到毫秒级，确实构不成瓶颈**。
+我做它们的理由不是"它慢"，而是：
+
+- AQ6 是任务书要求，且**两份实现意味着修 bug 要修两遍**，是隐患不是性能问题；
+- AQ5 / M7 的改动量都极小且行为可验证，属于"顺手且安全"，不构成顺手重构。
+
+如果总审认为复杂度类应当统一按"不成立"处理，AQ5 / M7 可以回退（改动集中、易剥离），
+但 **AQ6 不建议回退**——它是任务书条目，回退等于该条交白卷。
+
+### 5.4 采纳它的折中方案：`unknownRequires` 补了构造期告警
+
+W8-B 对 `meta` 的 `requires` 那条特别提醒：源码注释明确论证"未知前置跳过而不阻塞"，
+建议标**需总审裁决**，或采用折中方案"**构造期出 warning，运行期保持跳过**"。
+
+它验收时我只做了"收集 + getter 查询"，**如果调用方不主动自检，笔误仍然完全静默**——
+这个批评是对的。收尾时补了构造期 `console.warn`（汇总一条，不是每处一条）：
+
+```
+[MetaProgression] 检测到 2 处前置配置笔误（need → 不存在的节点、need2 → 另一个拼错的）：
+这些前置会被当作"不存在"跳过，对应节点可以绕过前置链直接解锁。请修正配置，
+或查询 unknownRequires 获取完整清单。
+```
+
+行为仍然不变（不抛错、不影响解锁），合法配置不告警（已实测）。
+至此本条同时具备：**构造期可见**（warn）+ **可查询**（getter）+ **行为不 breaking**。
+是否升级为抛错仍待总审裁决（§3.1）。
+
+### 5.5 五条"待交付后补验"的自评
+
+W8-B 留下的五条硬标准"待交付后验"，我按它的表格自评如下，供总审复核：
+
+| 标准 | 自评 | 依据 |
+|---|---|---|
+| 1 复现 | ✅ | 12 条全部在原始源码上实跑，输出见 §1；且与 W8-B 的独立复现逐条对得上 |
+| 2 测试有效 | ✅ | 原始源码 + 新测试 = `通过 19 / 失败 22`（§0）；3 条因调用新增 API 而在旧代码上直接类型错误 |
+| 3 对照用例 | ✅ | 每条修复都配"正常输入不受影响"，且 P1-4 / P1-6 / AQ7 / M8 的对照特意覆盖了哨兵值与边界 |
+| 4 无顺手重构 | ✅ | 改动 6 个源文件，全部落在清单条目上；§2 有逐文件说明 |
+| 5 未误判设计 | ✅ | P1-3 与 Lo7 两处主动判"不成立"（未改本来正确的代码）；Lo8 只补注释不改行为；P1-7 不自行拍板 |
+
+---
