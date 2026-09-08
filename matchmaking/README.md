@@ -110,7 +110,6 @@ new Matchmaker({ teamSize: 5, balanceTeams: false });
 | `enqueue(...entries)` | **一个队伍**进队列（这批人必定同队） |
 | `enqueueAll(entries)` | 多个**独立**的人进队列 |
 | `dequeue(id)` / `clear()` | 取消排队 / 清空队列 |
-| `destroy()` | 卸载：清空队列并复位统计，行为与刚 new 出来一致 |
 | `tick(now)` | 推进（**撮合在内部自动发生**，没有单独的公开入口） |
 
 > ⚠️ **本模块没有公开的 `tryMatch()`。**
@@ -164,14 +163,6 @@ validateTeamAssignment(r.teams.map(t => t.players));   // 硬约束校验
 
 同 `partyId` 的人**必定同队**。这意味着均衡度会下降——
 两个 2000 分的人组队，对面必然吃亏。这不是算法不够好，是约束的代价。
-
-> ⚠️ **黑店不可拆 → 可能无解，无解时抛错，不会静默错分。**
-> 实测：10 人分 2 队（每队 5 人），组队规模 `[4, 3, 3]`
-> ——4+3+3 凑不出两个 5。此前会**静默返回 `[7, 3]`**（塞不下就硬塞第 0 队），
-> 表现为"这局莫名其妙 7 打 3"，而日志里没有任何异常。
-> 现在抛 `[TeamBalancer] 无法把 N 人的队伍塞进任何一队`。
-> 撮合侧要在开赛前用 `validateTeamAssignment` 之类的校验拦住这种组队组合，
-> 或者放宽 `teamCount`。
 
 ### metric 怎么选
 
@@ -237,7 +228,6 @@ l.beginStart();          // 条件不足时返回 false
 | `setReady(id, ready)` / `toggleReady(id)` / `resetReady()` | 准备状态 |
 | `canStart()` / `startBlockReason()` / `beginStart()` / `finishStart()` | 开局流程 |
 | `close()` / `reopen()` | 关闭 / 重开 |
-| `destroy()` | 卸载：清掉全部玩家数据并置为 `closed`（**不等于** `reopen()`） |
 | `setPassword(opId, password?)` | 设/清密码（传 `undefined` 清除） |
 
 > ⚠️ **`kick` 和 `transferHost` 都要求第一个参数是"操作者 id"。**
