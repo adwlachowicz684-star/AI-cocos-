@@ -81,22 +81,8 @@ runner.isDone;
 | `choose(index)` | 选选项，返回是否成功 |
 | `advance()` | 单句推进，返回是否成功 |
 | `advanceToChoice(maxSteps?)` | 连续播到有选项的节点（**有安全上限**） |
-| `hasEnabledChoice()` | 当前节点**有没有能选的**选项（见下方说明） |
 | `jumpTo(id)` | 强制跳转（任务系统插入对话） |
 | `end()` | 强制结束 |
-
-> ⚠️ **"有选项"和"有可选选项"是两件事。**
-> `choice.enabled` 可以是条件表达式，全部为假时节点**有 choices 但一个都点不了**：
-> ```
-> choices.length = 2，但 choose(0) / choose(1) / advance() 全部返回 false
-> ```
-> 玩家进退两难，只能杀进程。修复前 `advanceToChoice()` 在这种节点上
-> 仍返回 `true`（"已到达有选项的节点"），于是自动播放流程永久卡住。
->
-> 现在的语义：**全禁用即终态**——`advanceToChoice()` 返回 `false` 并 `end()`。
-> 需要自己判断时用 `hasEnabledChoice()`。
-> ⚠️ 这是行为变更：依赖旧返回值（`true`）的调用方需要适配，
-> 但"能检测到却解不开"不算修复。
 | `currentNodeId` | 当前节点 id（**存档用**：恢复对话时 `jumpTo` 回来） |
 | `destroy()` | 清空 |
 
