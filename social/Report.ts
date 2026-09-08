@@ -37,25 +37,6 @@ export type ReportReason =
   | 'inappropriate-name'
   | 'other';
 
-/**
- * 全部举报理由（**运行时**可用的清单）
- *
- * 【为什么需要它】
- * `ReportReason` 是编译期类型，运行时不存在。
- * 而"把所有 reason 初始化为 0"这种事必须在运行时做——
- * 以前只能靠字面量数组在别处再抄一遍，
- * 抄漏一个就退化成"某个 reason 读到 undefined"。
- * 这里把它固化成唯一来源，新增 reason 时改一处即可。
- */
-export const REPORT_REASONS: readonly ReportReason[] = [
-  'cheating',
-  'griefing',
-  'abusive-chat',
-  'afk',
-  'inappropriate-name',
-  'other',
-];
-
 export interface ReportTicket {
   readonly id: string;
   readonly reporterId: string;
@@ -165,37 +146,12 @@ export class ReportCenter {
   private _nextId = 1;
 
   constructor(cfg: ReportConfig = {}) {
-    /**
-     * 【⚠️ 七项阈值里只有 `maxTickets` 收了口（P1）】
-     *
-     * 其余六项全是裸 `??`——它只挡 `null / undefined`，**挡不住 NaN**。
-     * 实测：
-     * - `new ReportCenter({ abuseThreshold: NaN }).isAbusiveReporter('x')` → **false**
-     *   （`0 >= NaN` 恒为 false）→ 恶意举报识别**永久失效**；
-     * - `actionThreshold: NaN` → `needsAction` 恒 false → 自动处罚永不触发。
-     *
-     * 后果比"功能报错"严重得多：配置看起来是填了的，
-     * 运营看到的是"系统从不自动处理"，而没有任何一条日志说明为什么。
-     *
-     * 【为什么各字段的下界不同】
-     * - `cooldownMs` / `dailyLimit`：非正数等于"永不冷却 / 每天 0 次"，
-     *   都会让限流失效 → 下界取 0（允许显式关掉冷却是合理需求）。
-     * - `lowCredibilityThreshold`：信誉分是 0~100，越界没意义 → 夹到 0~100。
-     * - `minWeight` / `actionThreshold`：加权分阈值，负数等于"永远触发" → 下界 0。
-     * - `abuseThreshold`：这是"被驳回几次才算恶意"，
-     *   **0 和负数会让所有玩家一上来就被判为恶意举报者**（实测 `-1` → true），
-     *   误伤比漏判严重得多 → 下界 1。
-     *
-     * 【为什么用 clampNum 而不是 numOr】
-     * numOr 只处理非有限值，挡不住 0 / 负数这类"合法但荒谬"的配置；
-     * 上面每一条失效路径都来自它们。clampNum 同时处理两者。
-     */
-    this._cooldownMs = clampNum(cfg.cooldownMs, 0, 1e12, DEFAULTS.cooldownMs);
-    this._dailyLimit = clampNum(cfg.dailyLimit, 0, 1e6, DEFAULTS.dailyLimit);
-    this._lowCred = clampNum(cfg.lowCredibilityThreshold, 0, 100, DEFAULTS.lowCredibilityThreshold);
-    this._minWeight = clampNum(cfg.minWeight, 0, 1e6, DEFAULTS.minWeight);
-    this._actionThreshold = clampNum(cfg.actionThreshold, 0, 1e9, DEFAULTS.actionThreshold);
-    this._abuseThreshold = clampNum(cfg.abuseThreshold, 1, 1e6, DEFAULTS.abuseThreshold);
+    this._cooldownMs = cfg.cooldownMs ?? DEFAULTS.cooldownMs;
+    this._dailyLimit = cfg.dailyLimit ?? DEFAULTS.dailyLimit;
+    this._lowCred = cfg.lowCredibilityThreshold ?? DEFAULTS.lowCredibilityThreshold;
+    this._minWeight = cfg.minWeight ?? DEFAULTS.minWeight;
+    this._actionThreshold = cfg.actionThreshold ?? DEFAULTS.actionThreshold;
+    this._abuseThreshold = cfg.abuseThreshold ?? DEFAULTS.abuseThreshold;
     this._maxTickets = clampNum(cfg.maxTickets, 1, 1e6, DEFAULTS.maxTickets);
   }
 
@@ -333,28 +289,7 @@ export class ReportCenter {
   statsOf(targetId: string): ReportStats {
     const list = this._tickets.filter((t) => t.targetId === targetId);
 
-    /**
-     * 【⚠️ 曾经是 `{} as Record<ReportReason, number>`（P1）】
-     *
-     * `as` 断言骗过了类型检查：签名承诺"每个 reason 都有数字"，
-     * 实际只填了**出现过的**那些 key，其余读到 `undefined`。
-     *
-     * 实测：只有一条 cheating 举报时 `byReason = {"cheating":1}`，
-     * `byReason['afk'] + 1` → **NaN**。
-     *
-     * 后果是典型的"契约说谎"：调用方按签名直接做加法 / 比较 / 排序，
-     * 得到 NaN 或错误排序，而 TS 编译期**不会报错**。
-     * NaN 再往下传，`Math.max` 一类的聚合会把它吃掉，
-     * 最后表现为"举报统计页面某个数字是空的"。
-     *
-     * 【为什么补全而不是改返回类型为 Partial】
-     * 类型是 `Record<ReportReason, number>` 就已经向调用方承诺了
-     * "每个键都有值"。改成 `Partial` 只是把坑从运行时挪到编译期，
-     * 还要求所有调用方加判空——而"没被举报过的 reason 就是 0"
-     * 本来就是这里的自然语义。补全才是修契约，不是修文档。
-     */
     const byReason = {} as Record<ReportReason, number>;
-    for (const r of REPORT_REASONS) byReason[r] = 0;
     for (const t of list) {
       byReason[t.reason] = (byReason[t.reason] ?? 0) + 1;
     }
