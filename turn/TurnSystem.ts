@@ -51,8 +51,6 @@
  * 【无引擎依赖】
  */
 
-import type { IRandomSource } from '../_core/types';
-
 export interface TurnUnit {
   readonly id: string;
   /** 先攻值，大的先动 */
@@ -284,61 +282,16 @@ export class TurnSystem {
    * 用 id 做二级排序，保证**确定性**——
    * 否则同样的数据在不同 JS 引擎上可能顺序不同（Array.sort 不保证稳定），
    * 回放就对不上了。
-   *
-   * 【⚠️ `shuffleEqual = true` 曾经根本不打乱——参数名是假的】
-   * 老实现在先攻相同时 `return shuffleEqual ? 0 : a.id.localeCompare(b.id)`
-   * 依赖"sort 对返回 0 的一对会交换顺序"来打乱，
-   * 但 ES2019 起 `Array.prototype.sort` **保证稳定**，返回 0 就是保持原序。
-   * 实测：6 个同先攻单位，`start(true)` / `start(false)` / `start()` 三种调用
-   * 全部输出 u0,u1,...,u5（永远按添加顺序）。
-   *
-   * 后果不是"少了个功能"，而是**系统性的先手优势**：
-   * 回合制里同先攻谁先手往往决定胜负（先手秒杀），
-   * 配了 `shuffleEqual = true` 的游戏实际永远是"先加入的先打"，
-   * 玩家会投诉"为什么总是他先打我"。
-   *
-   * 【为什么不直接改成真随机】
-   * 本模块的确定性（同数据同顺序）是回放/录像的前提，
-   * 也是 README 里"用 id 做二级排序保证确定性"这条承诺。
-   * 内置随机等于把这个承诺悄悄改掉，现有调用方无法察觉。
-   *
-   * 所以拆成两条路，由调用方选：
-   * - 不传 `rng`：**行为与修复前完全一致**（保持添加顺序），不破坏任何既有用法；
-   * - 传 `rng`（`IRandomSource`，库内统一口径）且 `shuffleEqual = true`：
-   *   对同先攻的单位做 Fisher-Yates 真打乱，想要可复现就传带种子的 RNG。
-   *
-   * @param shuffleEqual 同先攻时是否打乱（需要配合 rng 才生效）
-   * @param rng 随机源。未注入时同先攻单位保持添加顺序
    */
-  start(shuffleEqual: boolean = false, rng?: IRandomSource): void {
+  start(shuffleEqual: boolean = false): void {
     if (this._entries.length === 0) throw new Error('[Turn] 没有单位，无法开始');
 
-    // 先按先攻降序 + id 升序排一次，保证"不打乱"时顺序完全确定
     this._entries.sort((a, b) => {
       const d = b.initiative - a.initiative;
       if (d !== 0) return d;
-      return a.id.localeCompare(b.id);
+      // 先攻相同：固定用 id 排序（确定性）
+      return shuffleEqual ? 0 : a.id.localeCompare(b.id);
     });
-
-    // 再把同先攻的连续段整体打乱（只有注入了随机源才做）
-    if (shuffleEqual && rng) {
-      let i = 0;
-      while (i < this._entries.length) {
-        let j = i + 1;
-        while (j < this._entries.length && this._entries[j].initiative === this._entries[i].initiative) {
-          j++;
-        }
-        for (let k = j - 1; k > i; k--) {
-          // Fisher-Yates：k 与 [i, k] 中随机一个交换
-          const span = k - i + 1;
-          const pick = i + Math.min(span - 1, Math.max(0, Math.floor(rng.next() * span)));
-          const tmp = this._entries[k];
-          this._entries[k] = this._entries[pick];
-          this._entries[pick] = tmp;
-        }
-        i = j;
-      }
-    }
 
     this._round = 1;
     this._cursor = -1;
@@ -495,23 +448,11 @@ export class TurnSystem {
     return e ? e.ap : 0;
   }
 
-  /**
-   * 花费行动点。不够时返回 false 且**不扣**
-   *
-   * 【⚠️ 必须是肯定式：`!(n > 0)`，不能写 `if (n <= 0)`】
-   * 老实现只有 `if (e.ap < n) return false`，漏了"n 本身不合法"这一支。
-   * 于是 `spendAP(-5)` 时 `3 < -5` 为 false → `ap -= -5` → **AP 从 3 变成 8**。
-   * 实测：初始 AP 3，spendAP(-5) 后 AP = 8。
-   * 这是"倒扣 AP 刷行动次数"的漏洞：技能费用配成负数（配表很容易写出）
-   * 就能无限行动。
-   * 顺带说明为什么连 NaN 也要一起挡：`3 < NaN` 恒为 false，
-   * 走 `ap -= NaN` 会把 AP 变成 NaN，之后 `ap <= 0` 恒为 false →
-   * `isOutOfAP` 永远 false → **回合永远不结束**。
-   */
+  /** 花费行动点。不够时返回 false 且**不扣** */
   spendAP(n: number): boolean {
     const e = this._entries[this._cursor];
     if (!e) return false;
-    if (!(n > 0) || !(e.ap >= n)) return false;
+    if (e.ap < n) return false;
     e.ap -= n;
     return true;
   }
@@ -522,19 +463,10 @@ export class TurnSystem {
     return e ? e.ap >= n : false;
   }
 
-  /**
-   * 补充行动点（某些技能效果）
-   *
-   * 【⚠️ n 为 NaN 时 `ap += NaN` → AP 变 NaN】
-   * 与 spendAP 是同一条契约的两侧，只修一侧会不一致：
-   * `spendAP` 已经拒绝非法值，这里若放任 NaN 进去，
-   * 之后 `isOutOfAP`（`ap <= 0`）对 NaN 恒为 false → 回合永不结束。
-   * 负数则按"扣 AP"处理是合理的（有些效果是减行动点），但 NaN 必须挡。
-   */
+  /** 补充行动点（某些技能效果） */
   grantAP(id: string, n: number): boolean {
     const e = this._byId.get(id);
     if (!e || e.dead) return false;
-    if (!Number.isFinite(n)) return false;
     e.ap += n;
     return true;
   }
