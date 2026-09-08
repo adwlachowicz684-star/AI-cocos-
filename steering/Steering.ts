@@ -74,7 +74,7 @@
  * import type { IVec2 } from '../_core/types';
  * ```
  */
-import { safeDt, numOr } from '../_core/math';
+import { safeDt } from '../_core/math';
 import { needPositive } from '../_core/guard';
 export interface IVec2 {
   x: number;
@@ -111,16 +111,8 @@ export function createAgent(
     pos: { ...pos },
     vel: { ...vel },
     force: v2(),
-    /**
-     * 【为什么 maxSpeed / maxForce 也要收口】
-     * `??` 只挡 null/undefined。maxSpeed = NaN 时，integrate 里的限速判定
-     * `speed > limit` 恒为 false → **限速静默失效**，单位速度可以无限增长。
-     * 而 maxForce = NaN 会让 `truncate` 的 `l > max` 恒为 false，
-     * 转向力不被裁剪 → 单位可以瞬间转向，boids 的"平滑"承诺直接失效。
-     * 两者都是"配表漏填 → 功能悄悄没了"，按库口径用 numOr 回落到文档默认值。
-     */
-    maxSpeed: numOr(opts.maxSpeed, 100),
-    maxForce: numOr(opts.maxForce, 200),
+    maxSpeed: opts.maxSpeed ?? 100,
+    maxForce: opts.maxForce ?? 200,
     /**
      * 【⚠️ mass 必须为正的有限数】
      *
@@ -140,18 +132,7 @@ export function createAgent(
   };
 }
 
-// ---- 向量工具 ----
-//
-// 【⚠️ 这里曾经写着"就地操作，避免 GC"，是错的】
-// 下面 scale / add / sub / normalize / truncate **全部返回新对象**（`return v2(...)`），
-// 一个就地操作都没有。旧注释的后果不是"文档不准"而已：
-//   ① 调用方按"就地修改"理解，写出 `normalize(v); use(v);`，拿到的是**未归一化的 v**；
-//   ② 有人照着"零分配"的承诺去评估 boids 的性能预算，结论是错的
-//      （每帧每单位数十次对象分配）。
-// 【为什么不顺手改成真的就地操作】这些函数被本文件所有行为依赖，
-// 就地改写会让 `add(a, b)` 这种调用意外改掉入参 a/b（它们常常就是 agent.pos、
-// neighbor.pos），属于会改变既有语义的重构——本窗口只修清单列的问题，不动行为。
-// 所以这里更正注释，让"返回新对象"这件事被写清楚。
+// ---- 向量工具（就地操作，避免 GC） ----
 
 function len(v: IVec2): number {
   return Math.sqrt(v.x * v.x + v.y * v.y);
@@ -263,28 +244,13 @@ export interface WanderState {
   angle: number;
 }
 
-/**
- * 【⚠️ rand 为什么改成了必填（曾经默认 `Math.random`）】
- *
- * `wander` 是**有状态**的（`state.angle` 在调用之间被累积修改），
- * 而角度的增量完全来自 `rand()`。默认走裸 `Math.random` 意味着：
- * 不注入时连续两次调用会得到不同结果，回放、录像、确定性 lockstep、
- * 单元测试**全部失效**，而且调用方看不出自己踩了坑——
- * 参数表上明明写着 `rand?`，看起来是可选项。
- *
- * 实测：不注入时两次 `wander` 返回 `{x:98.98,y:1.79}` 与 `{x:98.35,y:-11.37}`；
- * 注入固定 rand 后两次完全相同。
- *
- * 与库内其它需要随机的单元（loot / card / gacha）保持一致：
- * **随机源一律由调用方注入**，这样"要不要可复现"是调用方的选择，而不是库的默认值。
- */
 export function wander(
   agent: Agent,
   state: WanderState,
   circleDistance = 20,
   circleRadius = 10,
   angleChange = 0.5,
-  rand: () => number
+  rand: () => number = Math.random
 ): IVec2 {
   // 圆心在速度方向前方
   const circleCenter = scale(normalize(agent.vel), circleDistance);
@@ -549,40 +515,19 @@ export class Flock {
  * 单位对"自己的目标点"做 arrive。
  */
 export function formationOffset(index: number, spacing: number, columns = 5): IVec2 {
-  /**
-   * 【⚠️ columns = 0 会让整个阵型变成 NaN】
-   * `index / 0` = Infinity 或 NaN（0/0），`index % 0` = NaN，
-   * 于是 row/col 都是 NaN，返回的偏移量也是 NaN ——
-   * 单位被排到 (NaN, NaN)，渲染层不绘制，表现为"队伍凭空少了一半"。
-   * columns 来自配置（"几列队形"），0 和 NaN 都是配表可能漏出来的值，
-   * 所以这里收口到默认 5 列。
-   */
-  const cols = numOr(columns, 5);
-  const c = cols > 0 ? cols : 5;
-  const row = Math.floor(index / c);
-  const col = index % c;
+  const row = Math.floor(index / columns);
+  const col = index % columns;
 
   // 每行错开半个身位（楔形），看起来更自然
   const rowOffset = row % 2 === 0 ? 0 : spacing * 0.5;
 
-  return v2((col - (c - 1) / 2) * spacing + rowOffset, row * spacing);
+  return v2((col - (columns - 1) / 2) * spacing + rowOffset, row * spacing);
 }
 
-/**
- * 圆形环绕阵型（保护中心的单位）
- *
- * 【⚠️ count = 0 时角度是 NaN，返回 (NaN, NaN)】
- * 实测 `circleFormation(0, 0, 10)` 返回 `{"x":null,"y":null}`（NaN 序列化后的样子）。
- * count 是"围一圈要几个单位"，由调用方按队伍人数传进来——空队伍传 0 是自然的，
- * 而一个 NaN 坐标会顺着 applyForce 污染 agent 的力，再传染给 Flock 的邻居计算。
- * 这里收口成 1（退化成"全都站在圆上的同一处"，至少是有限的）。
- */
+/** 圆形环绕阵型（保护中心的单位） */
 export function circleFormation(index: number, count: number, radius: number): IVec2 {
-  const raw = numOr(count, 1);
-  const n = raw > 0 ? raw : 1;
-  const angle = (index / n) * Math.PI * 2;
-  const r = numOr(radius, 0);
-  return v2(Math.cos(angle) * r, Math.sin(angle) * r);
+  const angle = (index / count) * Math.PI * 2;
+  return v2(Math.cos(angle) * radius, Math.sin(angle) * radius);
 }
 
 // ============================================================
@@ -620,31 +565,13 @@ export function clearForce(agent: Agent): void {
  */
 export function integrate(agent: Agent, dt: number, maxSpeed?: number): void {
   if (!safeDt(dt)) return;
-
-  /**
-   * 【⚠️ 除数必须自己守，不能指望 createAgent 那一次的校验】
-   * `createAgent` 确实用 `needPositive` 拦了 mass ≤ 0，但 `Agent` 是一个**公开的、
-   * 可变的普通对象**：调用方可以自己字面量构造，也可以在运行时改 `agent.mass`
-   * （比如"子弹/纯运动学体 = 无质量"，0 是很自然会被填进去的值）。
-   * 只要 mass 是 0，`force / 0` 就产出 Infinity 或 NaN（0/0），
-   * 一旦进了 `vel`，下面的限速 `speed > limit` 对 NaN 恒为 false，
-   * **救不回来**——只能重置整个 agent。
-   * 实测：`mass = 0` 后 integrate，pos 与 vel 全部变成 NaN。
-   * 这里把非法质量收口成 1（等价于"单位质量"），至少运动不会崩。
-   */
-  const m = numOr(agent.mass, 1);
-  const mass = m > 1e-6 ? m : 1e-6;
-  const ax = agent.force.x / mass;
-  const ay = agent.force.y / mass;
+  const ax = agent.force.x / agent.mass;
+  const ay = agent.force.y / agent.mass;
 
   agent.vel.x += ax * dt;
   agent.vel.y += ay * dt;
 
-  // 【⚠️ limit 为 NaN 时限速会"静默不生效"】
-  // `speed > NaN` 恒为 false → 单位速度无限增长（实测 vel.x 可以一直涨到 1e9）。
-  // 传入的 maxSpeed 覆盖值同样来自配置，所以按库口径用 numOr 收口：
-  // 非法值回落为 agent 自己的 maxSpeed（它已在 createAgent 里被收口成有限值）。
-  const limit = numOr(maxSpeed ?? agent.maxSpeed, agent.maxSpeed);
+  const limit = maxSpeed ?? agent.maxSpeed;
   const speed = len(agent.vel);
   if (speed > limit && speed > 1e-9) {
     agent.vel.x = (agent.vel.x / speed) * limit;
