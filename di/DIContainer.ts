@@ -69,21 +69,6 @@ export interface RegisterOptions {
   readonly override?: boolean;
 }
 
-export interface DIContainerOptions {
-  /**
-   * 销毁某个服务失败时的回调
-   *
-   * 【为什么需要它】
-   * 销毁失败原先是直接 `console.error` 打出去的。库里写死 `console.error`
-   * 会打乱宿主项目的日志格式（宿主通常有自己的日志分级、上报、脱敏），
-   * 而且调用方拿到的是"打了日志但 `destroy()` 正常返回"——无法感知失败。
-   *
-   * 现在 `destroy()` 会返回收集到的错误消息数组；如果宿主想**立即**知道，
-   * 就用这个钩子。两者都不用也可以：错误不会消失，只是静静地躺返回值里。
-   */
-  readonly onDisposeError?: (key: string, err: unknown) => void;
-}
-
 type Factory<T> = (c: DIContainer) => T;
 
 interface Registration {
@@ -98,28 +83,10 @@ export class DIContainer {
   /** 正在解析的链（用于检测循环依赖） */
   private readonly _resolving: string[] = [];
 
-  /**
-   * 销毁函数表：key → 销毁函数（按注册顺序倒序执行）
-   *
-   * 【为什么用 Map 而不是数组】
-   * 数组按**注册顺序**索引，跟 key 无关。覆盖注册同一个 key 时，
-   * 旧 disposer 仍留在数组里，而它销毁时是"按 key 去 `_singletons` 里现取实例"——
-   * 取到的已经是被覆盖后的**新**实例（或 undefined），旧实例永远拿不到引用。
-   * 用 Map 才能在覆盖的那一刻精确定位并先销毁旧的那一个。
-   *
-   * 【为什么存"接收容器的函数"而不是闭包】
-   * 闭包会捕获注册时的 `this`（父容器）。`fork()` 把销毁函数复制给子容器后，
-   * 子容器销毁时会去**父容器**的 `_singletons` 里取实例来销毁——
-   * 于是"子容器销毁"变成"销毁父容器持有的实例"，父容器随后拿到的就是已销毁对象。
-   * 把容器作为参数传进来，同一份销毁逻辑在哪个容器上跑，就销毁哪个容器的实例。
-   */
-  private readonly _disposeFns = new Map<string, (c: DIContainer) => void>();
+  /** 销毁时调用的清理函数（按注册顺序倒序） */
+  private readonly _disposers: Array<() => void> = [];
 
-  private readonly _onDisposeError?: (key: string, err: unknown) => void;
-
-  constructor(public readonly name = 'root', opts: DIContainerOptions = {}) {
-    this._onDisposeError = opts.onDisposeError;
-  }
+  constructor(public readonly name = 'root') {}
 
   /**
    * 注册工厂
@@ -131,34 +98,6 @@ export class DIContainer {
     if (!opts.override && this._regs.has(key)) {
       throw new Error(`[DI] "${key}" 已注册。要覆盖请传 { override: true }`);
     }
-    /**
-     * 【⚠️ 覆盖注册前必须先把旧实例销毁掉，而不是丢掉引用】
-     *
-     * 销毁函数是"按 key 现取实例"的，不持有实例引用。
-     * 所以如果这里只 `this._singletons.delete(key)` 就把引用扔掉，
-     * 等到 `destroy()` 阶段它再去 `get(key)`，拿到的已经是被覆盖后写入的**新**实例——
-     * 结果是：旧实例一次都没被销毁，而销毁阶段看起来还"正常执行了一次"，
-     * 最有欺骗性。热重载 / 测试里覆盖注册一个持有事件监听或定时器的服务时，
-     * 旧实例连同它的监听一起泄漏。
-     *
-     * 实测（修复前）：注册 a（destroy +1）→ `override:true` 重新注册 a（destroy +10）
-     * → `destroy()` 后计数为 **10**，旧实例的 +1 从未发生。
-     */
-    if (opts.override && this._regs.has(key)) {
-      /**
-       * 【旧实例销毁失败要不要打断覆盖注册】不要。
-       * 覆盖注册是"我就要换掉它"，旧实例清理失败不该让新注册进不来。
-       * 有 `onDisposeError` 钩子就交给钩子；没有钩子时**抛出**——
-       * 静默吞掉会让"旧服务没被销毁"这件事彻底无人知晓，那正是本条要修的问题。
-       */
-      try {
-        this._disposeKey(key);
-      } catch (e) {
-        if (this._onDisposeError) this._onDisposeError(key, e);
-        else throw e;
-      }
-    }
-
     this._regs.set(key, {
       factory: factory as Factory<unknown>,
       lifetime: opts.lifetime ?? 'singleton',
@@ -194,38 +133,17 @@ export class DIContainer {
     factory: Factory<T>,
     opts: RegisterOptions = {}
   ): this {
-    /**
-     * 【⚠️ `disposable` + `transient` 是无效组合，直接拒绝注册】
-     *
-     * 容器根本不持有 transient 实例——`get()` 每次新建，从不写进 `_singletons`，
-     * 所以销毁阶段无从下手：销毁函数去 `_singletons` 里永远取不到它。
-     * 修复前这个组合被静默忽略（连销毁函数都不注册），
-     * 调用方写了 `disposable(..., { lifetime: 'transient' })`，
-     * 心理预期是"每次取的临时对象也会被回收"，实际一个都不会被销毁，
-     * 编译期和运行时都不报错。这是典型的**配置组合静默失效**。
-     *
-     * 【为什么不改成"记录每次创建的 transient 实例，destroy 时统一销毁"】
-     * 那要给每次 `get()` 追加一次数组写入，而 transient 的调用次数是无界的，
-     * 等于在热路径上放了一个只增不减的数组——正是本库反复在消除的"无界增长"。
-     * 与其让它静默失效，不如在注册这一刻就告诉调用方：这个组合不支持。
-     */
-    if ((opts.lifetime ?? 'singleton') !== 'singleton') {
-      throw new Error(
-        `[DI] disposable("${key}") 不支持 lifetime:'${opts.lifetime}'：` +
-          `容器不持有 transient 实例，销毁阶段无从下手。` +
-          `请改用 singleton（默认），或在调用方自己管理这批临时对象的生命周期。`
-      );
-    }
-
     this.register(key, factory, opts);
-    // 只有真的被创建过才需要销毁，所以销毁函数里再取一次
-    this._disposeFns.set(key, (c) => {
-      const inst = c._singletons.get(key);
-      if (inst && typeof (inst as { destroy?: unknown }).destroy === 'function') {
-        (inst as { destroy(): void }).destroy();
-      }
-      c._singletons.delete(key);
-    });
+    if ((opts.lifetime ?? 'singleton') === 'singleton') {
+      // 只有真的被创建过才需要销毁，所以销毁器里再取一次
+      this._disposers.push(() => {
+        const inst = this._singletons.get(key);
+        if (inst && typeof (inst as { destroy?: unknown }).destroy === 'function') {
+          (inst as { destroy(): void }).destroy();
+        }
+        this._singletons.delete(key);
+      });
+    }
     return this;
   }
 
@@ -296,23 +214,9 @@ export class DIContainer {
    * 可以覆盖其中任意一项，父容器不受影响。
    */
   fork(name = 'fork'): DIContainer {
-    const child = new DIContainer(name, { onDisposeError: this._onDisposeError });
+    const child = new DIContainer(name);
     for (const [k, v] of this._regs) child._regs.set(k, v);
     for (const [k, v] of this._singletons) child._singletons.set(k, v);
-    /**
-     * 【⚠️ 销毁责任也要一起继承】
-     *
-     * 以前只复制注册和单例，不复制销毁函数。于是按作用域 fork
-     * （关卡容器 / 战斗容器，这是 DI 的标准用法）时，
-     * 子容器现场创建的单例在 `child.destroy()` 时一个都不会被销毁，全部泄漏。
-     *
-     * 实测（修复前）：父容器 `disposable('svc', ...)` → `fork('child')`
-     * → `child.get('svc')` → `child.destroy()` → 销毁计数为 **0**（期望 1）。
-     *
-     * 复制是安全的：销毁函数接收容器作为参数，
-     * 在子容器上执行就销毁子容器 `_singletons` 里的实例，不会误伤父容器。
-     */
-    for (const [k, v] of this._disposeFns) child._disposeFns.set(k, v);
     return child;
   }
 
@@ -362,49 +266,22 @@ export class DIContainer {
    * 销毁：调用所有注册过的 disposer，然后清空
    *
    * 【顺序】倒序销毁——后创建的先销毁，符合直觉（依赖方先于被依赖方销毁）
-   *
-   * 【失败怎么处理】不再 `console.error`（库里写死 console 会打乱宿主的日志格式），
-   * 而是收集成消息数组返回；宿主想立即感知就传 `onDisposeError` 钩子。
-   * 单个服务销毁失败**不会**中断其余服务的销毁。
-   *
-   * @returns 销毁过程中收集到的错误消息（全部成功时为空数组）
    */
-  destroy(): string[] {
-    const errors: string[] = [];
-    // 快照后倒序遍历：销毁过程中会有 disposer 增删（覆盖注册、unregister）
-    const entries = Array.from(this._disposeFns.entries());
-    for (let i = entries.length - 1; i >= 0; i--) {
-      const [key, dispose] = entries[i];
+  destroy(): void {
+    for (let i = this._disposers.length - 1; i >= 0; i--) {
       try {
-        dispose(this);
+        this._disposers[i]();
       } catch (e) {
-        errors.push(
-          `[DI] 销毁 "${key}" 出错：${e instanceof Error ? e.message : String(e)}`
-        );
-        if (this._onDisposeError) this._onDisposeError(key, e);
+        console.error(`[DI] 销毁出错：${e}`);
       }
     }
-    this._disposeFns.clear();
+    this._disposers.length = 0;
     this._singletons.clear();
     this._regs.clear();
     this._resolving.length = 0;
-    return errors;
   }
 
   // ==================== 内部 ====================
-
-  /**
-   * 立即销毁某个 key 的单例（前提是它注册过销毁函数）
-   *
-   * 【为什么要有这个】覆盖注册时要在写入新注册**之前**把旧实例销毁掉，
-   * 否则旧实例的引用被 `_singletons.delete(key)` 丢掉后就再也找不回来了。
-   */
-  private _disposeKey(key: string): void {
-    const dispose = this._disposeFns.get(key);
-    if (!dispose) return;
-    this._disposeFns.delete(key);
-    dispose(this);
-  }
 
   /**
    * 找相似的 key，用于"你是不是想找 xxx"的提示
