@@ -54,24 +54,7 @@ export interface FieldDef<T = unknown> {
 
 /** 无符号整数：0 ~ (2^bits - 1) */
 export function uint(bits: number, def = 0): FieldDef<number> {
-  /**
-   * 【⚠️ `1 << bits` 在 bits ≥ 31 时是错的】
-   *
-   * JS 的位移量按 5 位掩码：`1 << 31` 不是 2^31 而是 **-2147483648**，
-   * `1 << 32` 绕回 `1 << 0` = 1。
-   *
-   * 实测（修复前）：
-   *   uint(31).describe → `uint31[0..-2147483649]`（上界是负数）
-   *   uint(32).describe → `uint32[0..0]`
-   *   uint(31).write(1) → THROW: uint31 越界：1（范围 0..-2147483649）
-   *
-   * 而 README §6① 明确写"位宽上限 32，schema 构造时就校验"、
-   * §8 声称测试覆盖"32 位边界（0xffffffff）"——
-   * 按文档去定义一个 32 位 ID / 哈希字段，运行期必然抛错。
-   *
-   * 修法：用乘方语义 `2 ** bits`，它在 31/32 位上仍是精确的（2^32 可精确表示）。
-   */
-  const max = Math.pow(2, bits) - 1;
+  const max = (1 << bits) - 1;
   return {
     kind: 'uint',
     bits,
@@ -102,14 +85,7 @@ export function uint(bits: number, def = 0): FieldDef<number> {
 
 /** 有符号整数：-2^(bits-1) ~ 2^(bits-1)-1 */
 export function int(bits: number, def = 0): FieldDef<number> {
-  /**
-   * 【⚠️ 同 uint：`1 << (bits-1)` 在 bits=32 时是 `1 << 31` = -2147483648】
-   *
-   * 实测（修复前）：`int(32).describe → int32[2147483648..-2147483649]`
-   * ——下界是正的、上界是负的，区间整个反过来，
-   * 于是 `int(32).write(0)` 都抛"越界：0（范围 2147483648..-2147483649）"。
-   */
-  const half = Math.pow(2, bits - 1);
+  const half = 1 << (bits - 1);
   return {
     kind: 'int',
     bits,
@@ -153,47 +129,12 @@ export function bool(def = false): FieldDef<boolean> {
  * 和 float32 一样了，还失去了 NaN/Infinity 的表示能力。
  * 判据：**量化误差要小于游戏里能感知的最小距离**。
  */
-export function float(
-  min: number,
-  max: number,
-  step: number,
-  def = 0,
-  /**
-   * 【`clamp`：显式声明"我就是想要截断"】
-   *
-   * 默认 **关闭**，越界抛错——与 uint / int 一致，也符合 README §6③
-   * "越界值绝不静默截断"。
-   *
-   * 坐标 / 血量这类字段一旦静默截断，调用方以为写成功了，
-   * 表现是"位置飘移"，能查一整天。
-   * 但确实存在"越界就取边界"的合法需求（比如网络包里的容错），
-   * 那种场景下请**显式打开**这个开关，让"这里会截断"写进代码里，
-   * 而不是让下一个读代码的人去猜。
-   */
-  opts?: { readonly clamp?: boolean },
-): FieldDef<number> {
+export function float(min: number, max: number, step: number, def = 0): FieldDef<number> {
   if (!(max > min)) throw new Error('[Binary] float 的 max 必须大于 min');
   if (!(step > 0)) throw new Error('[Binary] float 的 step 必须为正');
-  const clamp = opts?.clamp ?? false;
 
-  /**
-   * 【⚠️ 浮点误差让 levels 少算一档】
-   *
-   * `(max - min) / step` 在十进制下是整数，二进制浮点里常常不是：
-   * `(0.3 - 0) / 0.1 = 2.9999999999999996` → floor 之后少了一档。
-   * 加 1e-9 的相对容错再取整，只影响"差一点点就到整数"的情形。
-   */
-  const levels = Math.floor((max - min) / step + 1e-9) + 1;
+  const levels = Math.floor((max - min) / step) + 1;
   const bits = Math.max(1, Math.ceil(Math.log2(levels)));
-  /**
-   * 【可表示的档位上界 ≠ 位宽上界】
-   *
-   * `levels` 通常不是 2 的幂，于是 `2^bits - 1` 会大于实际档位数：
-   * 例 `float(0, 5, 2)` → levels=3（0/2/4）、bits=2 → 位宽能表示到 3 → **6 > max**。
-   * 修复前读端 `read()` 就这样能读出超出 `max` 的值，与写端不对称。
-   * 读写两端统一按 `maxLevel = levels - 1` 收口。
-   */
-  const maxLevel = levels - 1;
 
   return {
     kind: 'float',
@@ -204,39 +145,11 @@ export function float(
       if (!Number.isFinite(v)) {
         throw new Error(`[Binary] float 收到非有限值：${v}`);
       }
-      /**
-       * 【⚠️ 曾经静默 clamp：写 999 读回 10，没有任何报错】
-       *
-       * README §6③ 写的是"越界值绝不静默截断——存进去 300，读出来 44，
-       * 这种 bug 能查一天"，而 float 是本库最可能承载坐标 / 血量的类型：
-       * 写超范围值被悄悄改小，调用方以为写成功了，
-       * 表现就是"位置飘移"，且极难定位。
-       * 与 uint / int 对齐：越界即抛。
-       */
-      if (v < min || v > max) {
-        if (!clamp) {
-          throw new Error(`[Binary] float 越界：${v}（范围 ${min}..${max}）`);
-        }
-        // clamp 显式开启：调用方知情，落到这里是预期行为
-      }
       const clamped = Math.min(max, Math.max(min, v));
-      /**
-       * 【⚠️ 边界内的值也要收口：写 max 曾经抛错】
-       *
-       * `(max-min)/step` 不是整数时，max 本身无法由整数个 step 表示：
-       * 实测（修复前）`float(0, 1.8, 0.5)` 是 2 bit（q ∈ 0..3 → 0/0.5/1.0/1.5），
-       * `write(1.8)` 算出 q=4 → THROW "值 4 需要超过 2 位表示"。
-       * **配置的上界自己写不进去**，这是量化定义内部的矛盾，不该由调用方承担。
-       *
-       * 收口到 maxLevel：读端能表示的最大值 `min + maxLevel*step` 因此恒 ≤ max，
-       * 写读两端对称（修复前读端能表示到 2.0，超出 max）。
-       * 注意这是**量化误差**（量化的固有属性），不是越界截断——
-       * 越界在上面的分支已经抛错了。
-       */
-      const q = Math.min(maxLevel, Math.max(0, Math.round((clamped - min) / step)));
+      const q = Math.round((clamped - min) / step);
       w.writeBits(q, bits);
     },
-    read: (r) => min + Math.min(maxLevel, r.readBits(bits)) * step,
+    read: (r) => min + r.readBits(bits) * step,
   };
 }
 
@@ -475,15 +388,7 @@ export class BitWriter {
      * 这是"该通过的全被拒"。
      * 而 bits=32 时任何 uint32 都是合法的，本来就不该校验。
      */
-    /**
-     * 【⚠️ 阈值本身也要用乘方：`1 << 31` 是负数】
-     *
-     * 修复前 `v >= 1 << bits` 在 bits=31 时等价于 `v >= -2147483648` ——
-     * 对任何 ≥ -2147483648 的值都成立，于是 **bits=31 写任何值都抛错**
-     * （实测：`BitWriter.writeBits(1, 31)` → "值 1 需要超过 31 位表示"）。
-     * 这正是 uint(31)/int(31) 即使修好了上界也仍然写不进去的第二道锁。
-     */
-    if (bits < 32 && v >= Math.pow(2, bits)) {
+    if (bits < 32 && v >= 1 << bits) {
       throw new Error(`[Binary] 值 ${value} 需要超过 ${bits} 位表示`);
     }
 
@@ -648,23 +553,6 @@ export function utf8Encode(s: string): Uint8Array {
       }
     }
 
-    /**
-     * 【⚠️ 孤立代理项会输出 WTF-8（不被任何标准 UTF-8 解码器接受）】
-     *
-     * 上面的合成只在"高代理 + 紧跟低代理"时成功。
-     * 字符串里只剩半个代理对时（字符串被截断、`s[i]` 单取一个 char、
-     * 外部数据拼错），`c` 仍落在 0xd800..0xdfff，
-     * 修复前会走 `c < 0x10000` 分支输出三字节 **ed a0 80**——
-     * 这是 WTF-8，标准解码器会判为非法序列直接拒绝整段数据。
-     *
-     * 改成输出 U+FFFD（ef bf bd）：**同样是 3 字节**，
-     * 所以 `string(maxBytes)` 的字节数预算不变，但产出的是合法 UTF-8。
-     */
-    if (c >= 0xd800 && c <= 0xdfff) {
-      out.push(0xef, 0xbf, 0xbd);
-      continue;
-    }
-
     if (c < 0x80) out.push(c);
     else if (c < 0x800) out.push(0xc0 | (c >> 6), 0x80 | (c & 0x3f));
     else if (c < 0x10000) out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f));
@@ -690,23 +578,9 @@ export function utf8Decode(bytes: Uint8Array): string {
     else if ((b0 & 0xe0) === 0xc0) { cp = b0 & 0x1f; len = 2; }
     else if ((b0 & 0xf0) === 0xe0) { cp = b0 & 0x0f; len = 3; }
     else if ((b0 & 0xf8) === 0xf0) { cp = b0 & 0x07; len = 4; }
-    /**
-     * 【⚠️ 曾经静默跳过：`i++; continue;` 把一个字节丢了还不吭声】
-     *
-     * 实测（修复前）：`utf8Decode([0x41, 0xff, 0x42])` → `"AB"`。
-     * 0xff 被无声丢弃，调用方拿到一段"看起来正常"的短字符串——
-     * 存档里的乱码昵称、被截断的道具 id 就都长这样，
-     * 而且**没有任何痕迹**可以查（长度差 1 谁也不会注意）。
-     *
-     * 改成产出 U+FFFD 替换字符：字节数对得上，肉眼可见"这里坏过"。
-     */
-    else { out += '\ufffd'; i++; continue; }
+    else { i++; continue; }   // 非法首字节，跳过
 
-    if (i + len > bytes.length) {
-      // 数据被截断：同样要留痕，不能静默结束
-      out += '\ufffd';
-      break;
-    }
+    if (i + len > bytes.length) break;   // 数据被截断
 
     for (let k = 1; k < len; k++) {
       cp = (cp << 6) | (bytes[i + k] & 0x3f);
