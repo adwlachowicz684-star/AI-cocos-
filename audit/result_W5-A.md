@@ -158,15 +158,15 @@ Markdown 链接语法残缺（只剩右半边括号），被脚本解析成指�
 基线（我开工前第一次跑校验）时即存在，
 且该文件属于 **W3-B** 窗口的任务书，本窗口不修改它。建议总审通知 W3-B 窗口处理。
 
-## 七、推送后复核（在远端最新 main @ `ef2d264` 上重跑）
+## 七、推送后复核（在远端最新 main @ `8683604` 上重跑）
 
-推送时基准是 `df65fca`，此后 W2-A 等窗口又合入了改动。
+推送时基准是 `df65fca`，此后 W2-A、W6-A 等窗口又合入了改动。
 我在**远端最新 main 的完整副本**上重跑了一遍：
 
 ```
-bash build.sh                     # TSC OK（226 个 .js）
+bash build.sh                     # TSC OK（227 个 .js）
 W5-A 52 项独立跑                  # 通过 52 项，失败 0 项 ✓
-W5-A 源码改动完好性                # 9 个单元全部在（fixSeconds / _nextId /
+W5-A 源码改动完好性                # 8 个单元全部在（fixSeconds / _nextId /
                                   #   QUEST_STATUSES / turn 的 rng / fsm 的 _started /
                                   #   skill-queue 的 numOr / steering 的 rand 必填 /
                                   #   telemetry 的 destroy）✓
@@ -178,12 +178,13 @@ node scripts/check-links.js       # [OK] 42 条，断链 0 处 ✓（W3-B 那条
 其余 4 个脚本                      # 全过 ✓
 ```
 
-⚠️ **唯一被覆盖的是 `_kitmeta.json`**：我在 `8521b0c` 里用官方 `check-deps.js --fix`
-登记的 `turn → _core`，在最新 main 上又变成"未登记"了——
-有窗口在此之后推送了基于旧 base 的 `_kitmeta.json`。
-当前 main 上未登记的一共 9 条（含 `blessing` / `curse` / `i18n` 等），
+⚠️ **`_kitmeta.json` 在反复被覆盖**：我在 `8521b0c` 里用官方 `check-deps.js --fix`
+登记的 `turn → _core`，一度被覆盖掉、后来又被别的窗口的登记带了回来（现在已 OK）。
+但当前 main 上仍有 8 条未登记（`i18n` / `blessing` / `curse` / `rarity` /
+`achievement` / `rebind` / `gameflow` / `accessibility`），
+其中 `rarity` 与 `accessibility` 是 W5-B 声称已登记的——说明**又被覆盖了**。
 按并行纪律我不代改别人的，请总审统一 `check-deps.js --fix` 一次，
-并提醒各窗口**推送 `_kitmeta.json` 前先基于最新 main**。
+并提醒各窗口**推送 `_kitmeta.json` 前先 rebase 到最新 main**。
 
 ## 八、给总审的一句话
 
@@ -192,9 +193,11 @@ node scripts/check-links.js       # [OK] 42 条，断链 0 处 ✓（W3-B 那条
 
 **这句话在验收 W5-B 时立刻应验了**：他们在 `input/InputBuffer.ts` 的 `window` setter 上
 踩了同一个坑（`numOr(v, 0)` + 注释声称"与构造函数同口径"，但构造函数兜的是 0.15）。
-实测 `window = 0` 时输入缓冲除"同一时间戳"外全部失效，等于没修。
-详见 `audit/verify_W5-A.md` 的 🔴 返工项。
+我在最新 main 上拿到行为级铁证：`ib.window = NaN` 之后 `press` → 隔一帧 `consume` 返回
+**false**，缓冲依然不工作。详见 `audit/verify_W5-A.md` 的 🔴 返工项。
 
-> 另：本目录下的 `verify_W5-A.md`（我对 W5-B 的交叉验收）**已重写**。
-> 上一版误判"W5-B 尚未交付"，原因是我在陈旧的本地副本上 `ls audit/`——
-> 教训是**验收前必须先拉远端最新**，不能在开工时的快照上做判断。
+> 另：本目录下的 `verify_W5-A.md`（我对 W5-B 的交叉验收）**已重写到第三版**。
+> 第一版误判"W5-B 尚未交付"（在陈旧本地副本上 `ls audit/`）；
+> 第二版纠正了交付状态但反向验证采信对方结论。
+> **第三版是完整独立验收**：拉了两个副本（修复前 `81f05b0` + 最新 main `8683604`），
+> 两套构建，报告里 24 项"复现输出"逐条自己重跑，且独立跑出反向验证 25 过 / 28 失败。
