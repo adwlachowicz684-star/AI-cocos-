@@ -41,7 +41,7 @@
  *
  * 【无引擎依赖】
  */
-import { safeDt, numOr } from '../_core/math';
+import { safeDt } from '../_core/math';
 
 export interface NumberRollerOptions {
   /**
@@ -77,15 +77,7 @@ export class NumberRollerCore {
   private _duration = 0;
   private _rolling = false;
 
-  /**
-   * 过冲/下冲系数（1 = 不过冲，1.15 = 冲到 115% 再回落，0.85 = 先只到 85% 再补上）
-   *
-   * 【为什么 <1 也生效】
-   * 旧代码只在 `> 1` 时走特殊分支，于是 0.85 这种"下冲"被静默当成 1（不过冲），
-   * 而 JSDoc 只写了"1 = 不过冲"，让人以为 0~1 之间也是合法输入。
-   * 现在 `!== 1` 都走同一条插值公式，<1 时前半段只到 os 倍、后半段补到 1，
-   * 与 >1 完全对称。
-   */
+  /** 过冲系数（1 = 不过冲，1.15 = 冲到 115% 再回落） */
   private _overshoot = 1;
 
   private readonly _opts: Required<
@@ -93,26 +85,13 @@ export class NumberRollerCore {
   >;
 
   constructor(opts: NumberRollerOptions = {}) {
-    // 【为什么配置项要逐个收口，而不是 `?? 默认值` 了事】
-    // `??` 只挡 null/undefined，挡不住 NaN。而这几个值一旦是 NaN：
-    //   - duration.min = NaN  → _computeDuration 返回 NaN → `_rolling = NaN > 0` 为 false
-    //     → **滚动动画静默失效**，数字直接跳到终值（实测 display 从 0 直跳 5000）；
-    //   - bigDelta = NaN      → `bigDelta <= 0` 为 false，t = delta / NaN = NaN，同样静默失效；
-    //   - decimals = NaN      → `decimals > 0` 为 false，退化成 0 位，配置被无声吞掉。
-    // 三者的共同点是"不报错、不告警，只是功能悄悄没了"——排查时没人会怀疑配置对象。
-    // 所以这里统一用 numOr 收口，非法值回落到文档默认值。
-    const rawDuration = opts.duration;
-    const durMin = Math.max(0, numOr(rawDuration?.min, 0.25));
-    const durMax = Math.max(0, numOr(rawDuration?.max, 1.0));
     this._opts = {
-      // max < min 时（配表填反）按 min 走，避免算出负时长。
-      duration: { min: durMin, max: durMax < durMin ? durMin : durMax },
-      bigDelta: numOr(opts.bigDelta, 10000),
+      duration: opts.duration ?? { min: 0.25, max: 1.0 },
+      bigDelta: opts.bigDelta ?? 10000,
       easing: opts.easing ?? easeOutCubic,
       separator: opts.separator ?? '',
       showSign: opts.showSign ?? false,
-      // 负的 decimals 没有语义（且 `decimals > 0` 判定会静默把它当 0），夹到 0。
-      decimals: Math.max(0, numOr(opts.decimals, 0)),
+      decimals: opts.decimals ?? 0,
     };
   }
 
@@ -137,10 +116,7 @@ export class NumberRollerCore {
     this._from = this._current;
     this._target = value;
     this._elapsed = 0;
-    // overshoot 来自调用方（暴击时传 1.15 之类），NaN/负数都要收口：
-    // NaN 会让下面 `os + (1 - os) * easing(u)` 整个变成 NaN，
-    // 负数则会让 eased 变负，数字先往反方向跑一段再回来——两种都不是"过冲"。
-    this._overshoot = Math.max(0, numOr(opts?.overshoot, 1));
+    this._overshoot = opts?.overshoot ?? 1;
     this._duration = this._computeDuration(Math.abs(value - this._from));
     this._rolling = this._duration > 0;
 
@@ -149,22 +125,8 @@ export class NumberRollerCore {
     }
   }
 
-  /**
-   * 立即到目标（跳过动画）
-   *
-   * 【为什么这里必须和 set 一样校验】
-   * set() 在入口就 throw 掉非有限值，但 snapTo 曾经是"裸写"：
-   * 直接把 value 赋给 _current，然后 `_rolling = false`。
-   * 而 update() 开头是 `if (!this._rolling) return;`——
-   * **写入 NaN 之后再也没有任何路径能把它改回来**，
-   * UI 上永久显示 "NaN"，玩家截图投诉，开发去查伤害公式，
-   * 实际源头只是这个入口漏了校验（伤害/金币来自服务端返回，偶发 null 是常态）。
-   * 口径与 set 保持一致：非法值直接抛，让问题在调用点就暴露。
-   */
+  /** 立即到目标（跳过动画） */
   snapTo(value: number): void {
-    if (!Number.isFinite(value)) {
-      throw new Error(`[NumberRollerCore] 目标值必须是有限数，实际 ${value}`);
-    }
     this._current = value;
     this._target = value;
     this._from = value;
@@ -191,8 +153,8 @@ export class NumberRollerCore {
 
     let eased = this._opts.easing(t);
 
-    // 过冲：先冲过头，再回落（os < 1 时是下冲：先只到 os 倍，后半段补到 1）
-    if (this._overshoot !== 1) {
+    // 过冲：先冲过头，再回落
+    if (this._overshoot > 1) {
       const os = this._overshoot;
       // 前半段冲到 os 倍，后半段回到 1
       if (t < 0.6) {
@@ -237,16 +199,8 @@ export class NumberRollerCore {
    */
   get formatted(): string {
     const v = this._current;
+    const neg = v < 0;
     const abs = Math.abs(v);
-
-    // 【为什么要先算"展示值"再决定负号】
-    // 旧的写法是 `const neg = v < 0`，于是 -0.4 在 decimals = 0 时会输出 "-0"
-    // ——因为 Math.round(0.4) 是 0，负号却已经加上了。
-    // 玩家看到血量显示 "-0" 会以为数值系统坏了。
-    // 判据应该是"展示出来的这个数是不是 0"，而不是"内部值是不是负数"。
-    const shown =
-      this._opts.decimals > 0 ? Number(abs.toFixed(this._opts.decimals)) : Math.round(abs);
-    const neg = v < 0 && shown > 0;
 
     let body: string;
     if (this._opts.decimals > 0) {
@@ -283,13 +237,6 @@ export class NumberRollerCore {
    * 【为什么需要】
    * 肉鸽后期伤害是几十万，全写出来 UI 放不下。
    * 而且"1,234,567"这种长数字玩家根本不会读，缩写反而更易读。
-   *
-   * 【⚠️ 缩写的小数位数固定为 1，不受 opts.decimals 影响】
-   * 这是**故意**的，不是漏配：缩写单位（K/M/B）本身就是"粗略量级"的表达，
-   * `1.2M` 比 `1.23M` 更好读，也让列宽稳定。
-   * 曾考虑改成跟随 opts.decimals，但默认值 0 会把既有表现从 '1.2K' 变成 '1K'
-   * （精度反而不如现在），属于对既有使用方的静默破坏。
-   * 需要更精细的缩写时，请自己读 `display` 格式化。
    */
   get abbreviated(): string {
     const v = this._current;
