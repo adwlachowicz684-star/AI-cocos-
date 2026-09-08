@@ -53,9 +53,6 @@ function clamp01(v: number): number {
 export class Curve {
   private readonly _keys: { time: number; value: number }[] = [];
 
-  /** 是否已释放（see `destroy()` 与 `evaluate()` 里的守卫） */
-  private _destroyed = false;
-
   constructor(keys: readonly Keyframe[] = []) {
     for (const k of keys) this.addKey(k.time, k.value);
     this._sort();
@@ -107,34 +104,12 @@ export class Curve {
     return this._keys.length > 0 ? this._keys[this._keys.length - 1].time : 0;
   }
 
-  /**
-   * 最大值 / 最小值（调试与归一化用）
-   *
-   * 【⚠️ 空曲线返回 0，不返回 ∓Infinity】
-   *
-   * `reduce(fn, Infinity)` 在空数组上直接返回初始值，
-   * 于是空曲线上 `minValue === Infinity`、`maxValue === -Infinity`。
-   * 两个值各自都"像是有效数字"，直到被用起来：
-   *
-   * - 归一化 `(v - min) / (max - min)` → `0 / 0 = NaN`，静默污染整条数据链
-   * - 拿它们做 UI 坐标轴范围 → 得到一个 Infinity 轴，画不出任何东西
-   *
-   * "配置还没加载完就先 new 了一个 Curve" 是很常见的时序，
-   * 而这两行既不抛错也不告警。
-   *
-   * 【为什么返回 0 而不是 undefined】
-   * 返回 `number | undefined` 是更诚实的签名，但会让所有调用方多一层判空，
-   * 属于 breaking 变更（本批不改对外类型）。0 是"空曲线上唯一无争议的中性值"：
-   * 空曲线上 `min === max === 0`，归一化分母为 0 的情形调用方仍需自己挡，
-   * 但至少不会拿到 Infinity。
-   */
+  /** 最大值 / 最小值（调试与归一化用） */
   get minValue(): number {
-    if (this._keys.length === 0) return 0;
     return this._keys.reduce((m, k) => Math.min(m, k.value), Infinity);
   }
 
   get maxValue(): number {
-    if (this._keys.length === 0) return 0;
     return this._keys.reduce((m, k) => Math.max(m, k.value), -Infinity);
   }
 
@@ -149,44 +124,8 @@ export class Curve {
    * 抛错会让游戏在极偶然的情况下崩溃，这是最难复现的一类 bug。
    */
   evaluate(time: number, mode: InterpMode = 'linear'): number {
-    /**
-     * 【⚠️ destroy() 之后必须抛错，而不是静默返回 0】
-     *
-     * README 明确写了"destroy() 之后不能再 evaluate()"，
-     * 但实现上 destroy 只做了 `_keys.length = 0`，
-     * evaluate 于是走"空曲线返回 0"分支——**文档承诺了不可用，实现却在静默降级**。
-     *
-     * 静默返回 0 的后果：曲线值突然全变 0，而 0 是一个完全合法的输出值，
-     * 没有任何东西能区分"曲线本来就是 0"和"曲线已经被释放了"。
-     * 抛错把"用了已释放的曲线"这件事钉在调用点。
-     */
-    if (this._destroyed) {
-      throw new Error('[Curve] 曲线已 destroy()，不能再 evaluate()。如需复用请重新构造或 clone()');
-    }
-
     const keys = this._keys;
     if (keys.length === 0) return 0;
-
-    /**
-     * 【⚠️ NaN 必须单独挡，不能指望下面的 clamp】
-     *
-     * `Math.min(Math.max(NaN, lo), hi)` 的每一步都返回 NaN
-     * （NaN 与任何值比较都是 false，`Math.max(NaN, lo)` 仍是 NaN）。
-     * 本单元在 `addKey()` 里对关键帧做了 `Number.isFinite` 校验，
-     * 却在 `evaluate()` 的入参上漏了——同一个口子只堵了一半。
-     *
-     * 后果：上游时间轴一旦产出一次 NaN（`t / duration` 且 duration 为 0 是最常见的来源），
-     * 返回值变 NaN，接着污染坐标 / 伤害值，
-     * **一个 NaN 帧让后续所有帧永久为 NaN**。这类错误没有任何异常，只有一个错误的数。
-     *
-     * 【为什么只挡 NaN，不挡 ±Infinity】
-     * Infinity 有方向：+Inf 明确表示"远超末端"，−Inf 表示"早于起点"，
-     * clamp 到对应端点是唯一合理的解释。
-     * NaN 没有方向，clamp 到哪个端点都没有依据，
-     * 只能按"时间未定义"处理，返回起点值——这是唯一不引入新 NaN 的选择。
-     */
-    if (Number.isNaN(time)) return keys[0].value;
-
     if (keys.length === 1) return keys[0].value;
 
     const t = Math.min(Math.max(time, keys[0].time), keys[keys.length - 1].time);
@@ -256,20 +195,7 @@ export class Curve {
     return new Curve(this.toKeyframes());
   }
 
-  /** 是否已释放 */
-  get destroyed(): boolean {
-    return this._destroyed;
-  }
-
-  /**
-   * 释放
-   *
-   * 【⚠️ 之后不能再 evaluate()】
-   * 以前只清了关键帧数组，`evaluate()` 走"空曲线返回 0"分支静默返回 0。
-   * 现在置 `_destroyed`，`evaluate()` 会抛错——兑现 README 的承诺。
-   */
   destroy(): void {
     this._keys.length = 0;
-    this._destroyed = true;
   }
 }
