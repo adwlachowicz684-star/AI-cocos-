@@ -40,7 +40,6 @@ a.progressOf('kill100', ctx); // { current, target, done, locked }
 | **重复解锁** | `check()` 里跳过已解锁的，`onUnlock` 只调一次 |
 | **循环前置在构造时报错** | `a→b→a` 会无限递归，DFS 三色标记检测 |
 | **进度夹到 [0, target]** | 展示时不该显示 "1234/1000"，NaN 也要夹成 0 |
-| **`target` 被收口到 [1, 1e12]** | `target: 0` 会让成就秒达成（`0 >= 0`），`target: NaN` 会让进度变 NaN，两者都不报错；未填则回落 1 |
 | **隐藏成就仍占位** | `visible()` 返回全部，否则玩家能从"总数"察觉隐藏成就存在 |
 | **同批内前置与本体同时达成** | 按声明顺序遍历，前置声明在前才能过 |
 | **导入未知 id 静默跳过** | 旧存档兼容 |
@@ -55,15 +54,8 @@ a.progressOf('kill100', ctx); // { current, target, done, locked }
 | `checkOne(id, ctx)` | 只检查一个，返回**本次是否新解锁** |
 | `progressOf(id, ctx)` | 查进度，**不触发解锁**（做进度条用） |
 | `requirementsMet(id)` | 前置成就是否都达成了 |
-| `unlock(id, bypassRequires?)` | 手动解锁（**默认校验前置**；传 `true` 可绕过） |
+| `unlock(id)` | 手动解锁（任务/剧情给成就时用） |
 | `revoke(id)` | **撤销**解锁（调试 / 重置） |
-
-> ⚠️ **`unlock(id)` 默认校验 `requires`。**
-> `checkOne()` 校验前置，`unlock()` 曾经不校验——同一个"解锁"动作两条路径两套规则，
-> GM 命令 / 后台补发一调 `unlock('b')` 就造出违反依赖图的存档：
-> B 已解锁而 A 没有，`requirementsMet('b')` 却仍返回 `false`，
-> UI 出现"已解锁但前置未完成"的矛盾态。
-> 确实要绕过依赖时显式写 `unlock('b', true)`，让这件事在调用点看得见。
 
 > ⚠️ **`check` / `checkOne` 的返回值是"本次新解锁的"，不是"已解锁的"。**
 > 已经解锁过的**不会出现在返回值里**。
@@ -88,16 +80,8 @@ a.progressOf('kill100', ctx); // { current, target, done, locked }
 | 成员 | 说明 |
 |---|---|
 | `exportState()` | 导出**已解锁 id 的数组**（不是完整对象） |
-| `importState(ids)` | 导入（**替换**语义：先清空再写入；静默跳过未定义的 id） |
-| `mergeState(ids)` | **合并**导入（追加语义：不清空，只并入） |
+| `importState(ids)` | 导入（**静默跳过未定义的 id**） |
 | `reset()` | 清空全部解锁记录 |
-
-> ⚠️ **`importState` 是"替换"，不是"追加"。**
-> 存档是某一时刻的**完整快照**，不是增量补丁。
-> 早先版本只 `add` 从不 `clear`，于是换槽位、断线重连后重新载入存档，
-> 旧槽位的解锁状态被叠加进来（实测：导入 `['a']` 再导入 `['b']` → `unlockedCount === 2`），
-> 玩家看到"没达成的成就已点亮"，且 `points` 虚高——**整个过程不抛错**。
-> 需要取并集（多份存档合并）请用 `mergeState()`。
 
 > ⚠️ **`importState` 静默跳过配置里已删除的成就 id。**
 > 这是给"版本更新删了几个成就"用的——读档不该因为少一条就崩。
