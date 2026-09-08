@@ -126,16 +126,6 @@ export class StateMachine<C> {
    * 【什么时候调用】拿到 context 之后、第一次 update 之前。
    */
   start(ctx: C): void {
-    /**
-     * 【⚠️ start 必须幂等】
-     * 老实现每次调用都触发一次 enter。重复 start（生命周期管理里很常见：
-     *  resumed / onEnable 里再调一次）会让 enter 跑两遍——
-     *  实测两次 `start(ctx)` 后 enter 计数从 1 变 2。
-     * enter 里通常是"播放动画 / 重置计时器 / 申请资源"这类副作用，
-     * 跑两遍的表现是"动画从头播一次"或"资源申请两次"，不一定报错。
-     */
-    if (this._started) return;
-    this._started = true;
     this._states.get(this._current)?.enter?.(ctx, null);
   }
 
@@ -148,47 +138,11 @@ export class StateMachine<C> {
     return this._timeInState;
   }
 
-  /**
-   * 能否转换到目标状态
-   *
-   * 【⚠️ "配了转换表但当前状态缺项"必须按"一个都不许转"处理】
-   *
-   * 老实现是 `if (!allowed) return true` —— 缺项和"压根没配转换表"
-   * 走的是同一条分支。于是：
-   * ```js
-   * transitions = { walk: ['run'] }，当前态 idle（表中缺项）
-   * can('jump')     → true     ← 白名单形同虚设
-   * can('teleport') → true     ← 甚至不存在的状态也放行
-   * ```
-   * 后果正是"新增状态时忘了在 transitions 里补一行"——
-   * 该状态**允许转换到任意状态**，而 `can()` 返回 true 让宿主以为校验通过了
-   * （实际 `transitionTo` 里还有 `_states.has(to)` 兜一道，
-   * 所以只表现为"该状态意外地万能"，不崩，极难发现）。
-   *
-   * 现在区分两种情形：
-   * - 未配置 `transitions` → 允许任意（文档承诺："不填 = 允许任意"）
-   * - 配置了但当前状态缺项 → **一个都不许转**
-   *   （既符合"白名单"的直觉，也让漏配在运行时立刻暴露）
-   */
+  /** 能否转换到目标状态 */
   can(to: string): boolean {
-    if (!this._opts.transitions) return true;
     const allowed = this._transOf(this._current);
-    if (!allowed) return false;
+    if (!allowed) return true;
     return allowed.includes(to);
-  }
-
-  /**
-   * 某状态能直接到达哪些状态（**can 与 findUnreachable 共用同一口径**）
-   *
-   * 【为什么要共用】
-   * 之前 `can()` 宽松（缺项 = 任意）、`findUnreachable()` 也宽松（缺项 = 全部状态），
-   * 修完 `can()` 之后如果 findUnreachable 还按宽松算，
-   * 就会出现"报告说这个状态可达、`can()` 却永远拒绝"的自相矛盾。
-   * 校验工具和运行时判定必须是同一套规则，否则工具反而误导人。
-   */
-  private _targetsOf(from: string): readonly string[] {
-    if (!this._opts.transitions) return Array.from(this._states.keys());
-    return this._transOf(from) ?? [];
   }
 
   /**
@@ -276,7 +230,7 @@ export class StateMachine<C> {
 
     while (queue.length > 0) {
       const cur = queue.shift()!;
-      const nexts = this._targetsOf(cur);
+      const nexts = this._transOf(cur) ?? all;
       for (const n of nexts) {
         if (!seen.has(n)) {
           seen.add(n);
@@ -288,37 +242,12 @@ export class StateMachine<C> {
     return all.filter((s) => !seen.has(s));
   }
 
-  /**
-   * 回到初始状态
-   *
-   * 【⚠️ reset 之前既不检查 _transitioning，也不触发 onChange】
-   *
-   * ① 不检查 `_transitioning`：在 enter/exit 回调里调 reset 会打断正在进行的转换，
-   *    `transitionTo` 的 finally 再把标志清掉，留下一个"已完成但顺序错乱"的状态。
-   *    这里与 transitionTo 用同一个标志拦截（口径一致）。
-   *
-   * ② 不触发 `onChange`：onChange 是给调试与埋点用的，
-   *    "状态从 run 被重置回 idle"是一次真实的状态变化，
-   *    不通知的话埋点里会缺一段，UI 也不会刷新——
-   *    这正是"读档/重置后状态对了但界面没更新"的成因。
-   *
-   * 【未处理（需总审裁决）】enter 回调抛异常时，`_current` 已经切换、
-   * `_timeInState` 已归零，异常向上传播后状态机会停在"已进入但未初始化"的中间态。
-   * 要修就得决定是**回滚**到 from 还是**标记 failed 并停住**，
-   * 两种都会改变对外行为，且会影响 transitionTo，故只在此记录、不动代码。
-   */
   reset(ctx: C): void {
-    if (this._transitioning) {
-      console.warn('[StateMachine] 正在转换中，忽略 reset（不要在 enter/exit 里重置状态机）');
-      return;
-    }
     if (this._current !== this._opts.initial) {
-      const from = this._current;
-      this._states.get(from)?.exit?.(ctx, this._opts.initial);
+      this._states.get(this._current)?.exit?.(ctx, this._opts.initial);
       this._current = this._opts.initial;
       this._timeInState = 0;
-      this._states.get(this._current)?.enter?.(ctx, from);
-      this._opts.onChange?.(from, this._current, ctx);
+      this._states.get(this._current)?.enter?.(ctx, null);
     } else {
       this._timeInState = 0;
     }
@@ -329,6 +258,4 @@ export class StateMachine<C> {
   }
 
   private _transitioning = false;
-  /** start 是否已执行过（保证幂等，见 start 的注释） */
-  private _started = false;
 }
