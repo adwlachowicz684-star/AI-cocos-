@@ -27,57 +27,6 @@ const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..');
 
-/**
- * 剔除代码区，返回只含"散文"的文本（长度与原文本一致，便于定位）
- *
- * 【为什么要剔除】
- * markdown 规范里，**行内代码（`...`）与围栏代码块（```...```）中的内容是字面文本**，
- * 里面的 `](./x.md)` 不是链接，只是"在讲解/引用链接语法"。
- *
- * 不剔除会怎样：本库 16 个窗口在报告里互相引用对方的修复代码，
- * 凡是出现 ```](...)` `` 或 `return this._derived[id](...)` 这类片段的行，
- * 都会被当成真链接去解析，于是报出"断链"——
- * 实测一次抽查就误报 8 处，分布在 4 个窗口的文件里，
- * 且每多写一份报告就多几处。各窗口为了让它变绿而去改自己报告的写法，
- * 既治标不治本，还会把示例代码改得读不懂。
- *
- * 【为什么替换成空格而不是直接删】
- * 保持字符数不变，正则匹配到的索引仍对应原文件位置（便于将来报错定位），
- * 也不会让两段被代码隔开的文本意外拼成一个假链接。
- */
-function stripCode(md) {
-  const lines = md.split('\n');
-  const out = [];
-
-  let inFence = false;
-  let fenceChar = '';
-
-  for (const line of lines) {
-    // 围栏代码块：``` 或 ~~~（可带语言标注），用空行占位
-    const fence = line.match(/^\s{0,3}(`{3,}|~{3,})/);
-    if (fence) {
-      const ch = fence[1][0];
-      if (!inFence) {
-        inFence = true;
-        fenceChar = ch;
-      } else if (ch === fenceChar) {
-        inFence = false;
-      }
-      out.push('');
-      continue;
-    }
-    if (inFence) {
-      out.push('');
-      continue;
-    }
-
-    // 行内代码：`...` / ``...``（同一行内非贪婪，长度不变地替换为空格）
-    out.push(line.replace(/(`+)(?:[\s\S]*?)\1/g, (s) => ' '.repeat(s.length)));
-  }
-
-  return out.join('\n');
-}
-
 /** 递归收集所有 .md 文件（跳过 node_modules 与 .build） */
 function collectMd(dir, out = []) {
   for (const name of fs.readdirSync(dir)) {
@@ -96,9 +45,7 @@ function main() {
   const broken = [];
 
   for (const file of files) {
-    const raw = fs.readFileSync(file, 'utf8');
-    // 只在"散文"里找链接：代码区里的 ](...) 是字面文本，不是链接
-    const content = stripCode(raw);
+    const content = fs.readFileSync(file, 'utf8');
     const dir = path.dirname(file);
 
     // 匹配 ]( 开头、非 http、非纯锚点、非 mailto 的链接
