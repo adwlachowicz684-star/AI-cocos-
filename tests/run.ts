@@ -70,6 +70,22 @@ import { runPhase6Tests } from './run_phase6';
 import { runPhase7Tests } from './run_phase7';
 import { runPhase8Tests } from './run_phase8';
 import { runPhase9Tests } from './run_phase9';
+import { runPhase10W1ATests } from './run_phase10_w1a';
+import { runPhase10W1BTests } from './run_phase10_w1b';
+import { runPhase10W2ATests } from './run_phase10_w2a';
+import { runPhase10W2BTests } from './run_phase10_w2b';
+import { runPhase10W3ATests } from './run_phase10_w3a';
+import { runPhase10W3BTests } from './run_phase10_w3b';
+import { runPhase10W4ATests } from './run_phase10_w4a';
+import { runPhase10W4BTests } from './run_phase10_w4b';
+import { runPhase10W5ATests } from './run_phase10_w5a';
+import { runPhase10W5BTests } from './run_phase10_w5b';
+import { runPhase10W6ATests } from './run_phase10_w6a';
+import { runPhase10W6BTests } from './run_phase10_w6b';
+import { runPhase10W7ATests } from './run_phase10_w7a';
+import { runPhase10W7BTests } from './run_phase10_w7b';
+import { runPhase10W8ATests } from './run_phase10_w8a';
+import { runPhase10W8BTests } from './run_phase10_w8b';
 import { runPhase11Tests } from './run_phase11';
 
 async function main(): Promise<void> {
@@ -196,6 +212,54 @@ async function main(): Promise<void> {
 
   setSuite('新增能力 · mover.turnRate 平滑转向');
   runPhase11Tests();
+
+  setSuite('精审修复回归 · 第十批 W1-A（builder/craft/crash/cutscene/debug-console/gesture/matchops/skill-variant）');
+  runPhase10W1ATests();
+
+  setSuite('精审修复回归 · 第十批 W1-B（anticheat/audio/buff/collision/condition/skill-player/spatial）');
+  runPhase10W1BTests();
+
+  setSuite('精审修复回归 · 第十批 W2-A（attribute/command/diagpack/indicator/logger/pathfinding/runscope/scheduling/skill-caster/social）');
+  runPhase10W2ATests();
+
+  setSuite('精审修复回归 · 第十批 W2-B（config/curse/hitbox/leaderboard/minimap/save/scheduler/subtitle/telegraph）');
+  runPhase10W2BTests();
+
+  setSuite('精审修复回归 · 第十批 W3-A（attack-token/card/combo/damage-pipeline/element/gacha/loot/quest/skill-queue）');
+  runPhase10W3ATests();
+
+  setSuite('精审修复回归 · 第十批 W3-B（cheatcode/currency/daily/inventory/ranking/room-graph/snapshot/stats/wave-spawner）');
+  runPhase10W3BTests();
+
+  setSuite('精审修复回归 · 第十批 W4-A（behavior-tree/di/grid/quest-log/rebind-ext/skill/skill-target/steering/team-mmr）');
+  runPhase10W4ATests();
+
+  setSuite('精审修复回归 · 第十批 W4-B（dialogue/fov/joystick-mover/mover/rebind/reddot/shop）');
+  runPhase10W4BTests();
+
+  setSuite('精审修复回归 · 第十批 W5-A（autoquality/camera/craft-ext/difficulty/fog/i18n/input-ext/navmesh/perception）');
+  runPhase10W5ATests();
+
+  setSuite('精审修复回归 · 第十批 W5-B（accessibility/analytics/feedback/input/mmr/rarity/scenerouter）');
+  runPhase10W5BTests();
+
+  setSuite('精审修复回归 · 第十批 W6-A（ai/animation/attack/blackboard/character/camera-ext/charge/collision-ext/cooldown）');
+  runPhase10W6ATests();
+
+  setSuite('精审修复回归 · 第十批 W6-B（adapters/dungeon/pathfind/replay）');
+  runPhase10W6BTests();
+
+  setSuite('精审修复回归 · 第十批 W7-A（dash/dialogue-ext/equipment/objective/progressbar/reddot-ext/save-ext/transition）');
+  runPhase10W7ATests();
+
+  setSuite('精审修复回归 · 第十批 W7-B（achievement/curve/expression）');
+  runPhase10W7BTests();
+
+  setSuite('精审修复回归 · 第十批 W8-A（settings/skill-tree/stat-growth/talent/telemetry/tutorial/upgrade/vfx）');
+  runPhase10W8ATests();
+
+  setSuite('精审修复回归 · 第十批 W8-B（affix/binary/blessing）');
+  runPhase10W8BTests();
 
   summary();
 }

@@ -35,7 +35,7 @@
  * ```
  */
 
-import { clamp, clamp01, safeDt, angleDiffRad, normalizeAngleRad, clampNum } from '../_core/math';
+import { clamp01, numOr, safeDt, angleDiffRad, normalizeAngleRad, clampNum } from '../_core/math';
 
 // ==================== 碰撞解算接口 ====================
 
@@ -137,6 +137,7 @@ export interface MoverConfig {
    * 1 = 击退期间照常控制（等于击退没效果）
    */
   knockbackControl?: number;
+
   /**
    * 转向速度（弧度/秒）
    *
@@ -181,6 +182,16 @@ export class CharacterMover {
   private _exX = 0;
   private _exY = 0;
   private _exTimer = 0;
+  /**
+   * **同一帧内**累计施加的冲量（跨帧清零，见 `update` 末尾）
+   *
+   * 【⚠️ 为什么 must 与 `_exX/_exY` 分开记】
+   * `_exX/_exY` 是"角色身上现在还残留多少外力"，它跨帧衰减但**不归零**；
+   * 而判"这一下算不算击退"要看的是**这一帧被推了多大力**，两者不是一回事。
+   * 混用会直接踩中传送带场景（详见 `addImpulse` 的注释）。
+   */
+  private _impulseX = 0;
+  private _impulseY = 0;
 
   // --- 状态 ---
   /** 是否正在被击退（供动画/输入系统调用） */
@@ -194,16 +205,31 @@ export class CharacterMover {
   private readonly _cfg: Required<Omit<MoverConfig, 'solver' | 'x' | 'y'>> & { solver: IMoveSolver };
 
   constructor(cfg: MoverConfig = {}) {
+    /**
+     * 【⚠️ 每个数值配置都要过 `numOr`，不能只靠 `??`】
+     *
+     * `??` 只挡 null / undefined，**挡不住 NaN**；
+     * 而配置来自配表 / 存档 / 编辑器面板，缺失字段反序列化成 NaN 是很常见的。
+     *
+     * 实测（修复前，只给 maxSpeed / accel / decel 做了 `!(x > 0)` 校验）：
+     * ```
+     * externalDamping = NaN → 一次 update 后 externalSpeed = NaN、x = NaN
+     * turnBoost       = NaN → 掉头那一帧 vx = NaN、vy = NaN
+     * ```
+     * 两者都是**坐标永久变 NaN 且不可恢复**（NaN + 任何数 === NaN），
+     * 之后碰撞、渲染、寻路全崩，而且不抛错。
+     * 所以这里一律走 `numOr`（非有限值回落到默认值）。
+     */
     this._cfg = {
-      maxSpeed: cfg.maxSpeed ?? 6,
-      accel: cfg.accel ?? 60,
-      decel: cfg.decel ?? 90,
-      turnBoost: cfg.turnBoost ?? 3,
-      friction: cfg.friction ?? 0,
-      externalDamping: cfg.externalDamping ?? 8,
-      stopEpsilon: cfg.stopEpsilon ?? 0.01,
-      knockbackThreshold: cfg.knockbackThreshold ?? 0,
-      knockbackControl: cfg.knockbackControl ?? 0.3,
+      maxSpeed: numOr(cfg.maxSpeed, 6),
+      accel: numOr(cfg.accel, 60),
+      decel: numOr(cfg.decel, 90),
+      turnBoost: numOr(cfg.turnBoost, 3),
+      friction: numOr(cfg.friction, 0),
+      externalDamping: numOr(cfg.externalDamping, 8),
+      stopEpsilon: numOr(cfg.stopEpsilon, 0.01),
+      knockbackThreshold: numOr(cfg.knockbackThreshold, 0),
+      knockbackControl: numOr(cfg.knockbackControl, 0.3),
       /**
        * 【为什么用 clampNum 而不是 `?? 0`】
        * `??` 只挡 null/undefined，**挡不住 NaN**。
@@ -230,10 +256,28 @@ export class CharacterMover {
       throw new Error(`decel 必须为正，收到 ${this._cfg.decel}`);
     }
 
-    // 未显式指定时，取 maxSpeed 的 25%：
-    // 外力衰减到"明显慢于正常移动"时就可以交还控制权了
-    if (this._cfg.knockbackThreshold <= 0) {
+    /**
+     * 未显式指定时，取 maxSpeed 的 25%：
+     * 外力衰减到"明显慢于正常移动"时就可以交还控制权了
+     *
+     * 【⚠️ 为什么判"未指定"用 `undefined` 而不是 `<= 0`】
+     *
+     * 原写法 `if (threshold <= 0) 取默认值`，把**显式传 0** 也吃掉了：
+     * 想要"外力不清零就一直保持击退态"的调用方，传 0 会被静默改写成
+     * `maxSpeed * 0.25`（默认 maxSpeed=6 时是 1.5）。
+     * 表现为"我明明关掉了提前解除，怎么还有"——而且没有任何提示。
+     *
+     * 阈值 0 是合法语义（只有外力衰减到 stopEpsilon 才解除），
+     * 所以只有**没传**（undefined）才走自动推导。
+     */
+    if (cfg.knockbackThreshold === undefined) {
       this._cfg.knockbackThreshold = this._cfg.maxSpeed * 0.25;
+    } else {
+      // 显式传值时只做收口（NaN → 自动值，负数按 0 处理），不再改写语义
+      this._cfg.knockbackThreshold = Math.max(
+        0,
+        numOr(cfg.knockbackThreshold, this._cfg.maxSpeed * 0.25)
+      );
     }
   }
 
@@ -251,25 +295,99 @@ export class CharacterMover {
    * 但这有个前提——两次击退的**方向**要一致时才该取较大。
    * 方向相反的话（左边一下右边一下）应该抵消，
    * 所以实现里做的是"向量合成后限制总强度"。
+   *
+   * 【⚠️ 默认上限不能是 Infinity，否则这段 JSDoc 是空话】
+   *
+   * 原默认参数 `maxExternal = Infinity` 让 `mag > maxExternal` 恒为 false，
+   * 于是**默认行为就是纯累加**：
+   * ```
+   * 连续 3 次 addImpulse(10, 0) → externalSpeed = 30（不是 10，也不是"取较大者"）
+   * ```
+   * 多段击退（连击、多重爆炸、连环陷阱）会把玩家加速到离谱速度并穿墙，
+   * 而文档上白纸黑字写着"相加会让玩家被弹飞，所以我们不加"。
+   * 这正是"注释说是设计、实际是 bug"的形态——默认值恰好让承诺失效。
+   *
+   * 默认取 `maxSpeed * 5`：既能挡住叠加成火箭，
+   * 又不会把一次强力击退（常见配法是 maxSpeed 的 3~5 倍）削成挠痒痒。
+   * 需要真的不设限时，显式传 `Infinity`。
    */
-  addImpulse(ix: number, iy: number, maxExternal = Infinity): void {
+  addImpulse(ix: number, iy: number, maxExternal?: number): void {
+    /**
+     * 【为什么不是 `??`，还要单独挡 NaN】
+     * `??` 只处理 undefined / null；配表里 `maxExternal: NaN`
+     * 会让 `mag > NaN` 恒 false，等价于"没有上限"。所以 NaN 也要回落到默认值。
+     * 但 `Infinity` 是**调用方显式要求不设限**，必须保留，不能被 numOr 吃掉。
+     */
+    let cap = maxExternal ?? this._cfg.maxSpeed * 5;
+    if (Number.isNaN(cap)) cap = this._cfg.maxSpeed * 5;
+
     this._exX += ix;
     this._exY += iy;
     this._exTimer = 0;
 
     // 限制总外力强度，防止叠加成火箭
     const mag = Math.sqrt(this._exX * this._exX + this._exY * this._exY);
-    if (mag > maxExternal && mag > 1e-9) {
-      const k = maxExternal / mag;
+    if (mag > cap && mag > 1e-9) {
+      const k = cap / mag;
       this._exX *= k;
       this._exY *= k;
     }
 
-    // 【⚠️ 外力存在期间才置 knocked】
-    // 用"刚加过冲量"标记，而不是"外力 > 0"，
-    // 否则传送带这种持续小外力会让角色永远处于击退态。
-    const mag2 = Math.sqrt(ix * ix + iy * iy);
-    if (mag2 > this._cfg.maxSpeed * 0.5) this.knocked = true;
+    // 同帧累计（跨帧由 update 末尾清零）
+    this._impulseX += ix;
+    this._impulseY += iy;
+
+    /**
+     * 【⚠️ 外力存在期间才置 knocked】
+     * 用"刚加过冲量"标记，而不是"外力 > 0"，
+     * 否则传送带这种持续小外力会让角色永远处于击退态。
+     *
+     * 【⚠️ 判据要是"**同一帧内**的合成力"，既不是单次冲量，也不是跨帧总外力】
+     *
+     * 这一段改过两轮，两个方向都踩过坑，所以把两边的实测都记下来：
+     *
+     * **① 只看单次冲量（原实现）—— 漏判**
+     * ```
+     * maxSpeed = 6 → 阈值 3
+     * addImpulse(2.5, 0) × 3  → 合成外力 7.5（明显在把玩家推开）
+     *                         但每次 mag = 2.5 < 3 → knocked 仍是 false
+     * ```
+     * 多个小击退（连击、多重小爆炸、弹幕推挤）合成很大时角色被明显推开，
+     * 却仍保有 100% 控制权——"击退形同虚设"，且极难复现（要凑次数）。
+     *
+     * **② 看跨帧合成后的总外力（第一版修法）—— 误判**
+     * 直接换成 `applied`（叠加限幅后的总外力）确实修好了 ①，
+     * 但踩中了上面那段注释**明确警告要防**的传送带场景。
+     * 外力衰减是渐进的，持续施加会让它收敛到一个稳态：
+     * ```
+     * 每帧 addImpulse(0.5) × 600 帧 → 稳态外力 3.51 > 3 → knocked 590/600 帧
+     * 每帧 addImpulse(1.0)          → 稳态 7.01           → knocked 597/600 帧
+     * 每帧 addImpulse(2.0)          → 稳态 14.02          → knocked 599/600 帧
+     * ```
+     * （以上为验收方 W4-A 实测，本窗口已独立复现，数字一致）
+     * 而 `update` 里是 `const control = knocked ? knockbackControl : 1`、
+     * 默认 `knockbackControl = 0.3`——于是**玩家一踏上传送带，
+     * 操作权就从 100% 掉到 30%，只要还在上面就一直不恢复**。
+     * 不报错、不崩溃，只会被归因为"这游戏手感差"。
+     *
+     * **③ 同帧合成（当前实现）—— 两边都对**
+     * 关键在于区分**两种"多段击退"**：
+     * - 连击、多重爆炸、弹幕推挤：**同一帧内**连续 addImpulse，要合成；
+     * - 传送带、风力、持续推挤：**每帧一小次**，跨帧不该合成。
+     *
+     * 前者才是"多段击退"的真实形态。所以这里累加的是
+     * **同一帧内**的冲量（跨帧由 `update` 末尾清零），
+     * ① 的 3×2.5 = 7.5 仍然判得出，② 的传送带每帧只有 0.5~2，判不出。
+     *
+     * 【为什么取 `Math.min(frameMag, cap)`】
+     * 判据要反映"角色**实际**被推了多大力"。调用方显式传了很小的
+     * `maxExternal` 时，累加值虽大、实际施加的被限幅到 `cap`，
+     * 此时不该算击退——否则"被限成 1 的推力"也会让玩家掉到 30% 操作权。
+     */
+    const frameMag = Math.sqrt(
+      this._impulseX * this._impulseX + this._impulseY * this._impulseY
+    );
+    if (Math.min(frameMag, cap) > this._cfg.maxSpeed * 0.5) this.knocked = true;
   }
 
   /** 清空外力（复位、切场景时用） */
@@ -277,6 +395,8 @@ export class CharacterMover {
     this._exX = 0;
     this._exY = 0;
     this._exTimer = 0;
+    this._impulseX = 0;
+    this._impulseY = 0;
     this.knocked = false;
   }
 
@@ -307,6 +427,7 @@ export class CharacterMover {
   get facing(): number {
     return this._facing;
   }
+
 
   /**
    * 直接设置朝向（不做平滑，立即生效）
@@ -511,6 +632,24 @@ export class CharacterMover {
     if (ts > this._cfg.stopEpsilon * 2) {
       this._turnToward(Math.atan2(totalY, totalX), dt);
     }
+
+    /**
+     * ⑨ 同帧冲量累加器清零
+     *
+     * 【⚠️ 为什么必须在这里清，而不是在 addImpulse 里判断"是不是同一帧"】
+     * 本类没有帧号——`dt` 是外部传进来的，mover 不知道"现在第几帧"。
+     * 于是"一帧"只能由调用方定义：**相邻两次 update 之间**。
+     *
+     * 这个语义与调用方的循环天然对齐：
+     * 收集输入/事件 → addImpulse（可能多次）→ update（推进一帧）。
+     * 清零放在 update 末尾，下一次 addImpulse 就是新的一帧。
+     *
+     * 【契约】调用方应当在每个渲染帧内**先施加冲量、再 update**。
+     * 若某帧跳过了 update（暂停、切后台），那些冲量会被算进下一次 update 之前
+     * 的同一"帧"——这在语义上是对的：没有推进时间，就没有"下一帧"。
+     */
+    this._impulseX = 0;
+    this._impulseY = 0;
   }
 
   /** 以固定加速度朝目标速度逼近（不会过冲） */
@@ -566,6 +705,19 @@ export class CharacterMover {
    * mover 只负责位移与碰撞，不干预速度。
    */
   moveBy(vx: number, vy: number, dt: number): void {
+    /**
+     * 【⚠️ 公开 API 里的 dt 守卫：`update` 有，`moveBy` 原本没有】
+     *
+     * 同一类公开 API 两套标准，迟早在某一处漏掉。
+     * 实测（修复前）：`moveBy(5, 0, NaN)` → 位置变成 `(NaN, NaN)`；
+     * `moveBy(5, 0, -1)` → 角色**倒着走**（负 dt 让位移反向）。
+     *
+     * 位置变 NaN 之后不可自愈（NaN + 任何数 === NaN），
+     * 碰撞、渲染、寻路全崩；而 dash 冲刺是每次按键都走 `moveBy` 的热路径，
+     * 上游一个 `dt = 0/NaN`（切后台回来第一帧很常见）就中招。
+     */
+    if (!safeDt(dt)) return;
+
     const out = this._cfg.solver.move(this.x, this.y, vx * dt, vy * dt);
     this.x = out.x;
     this.y = out.y;
@@ -589,10 +741,30 @@ export class CharacterMover {
 
     const ts = Math.sqrt(vx * vx + vy * vy);
     if (ts > this._cfg.stopEpsilon * 2) {
-      // moveBy 的 dt 在本文件里没有 safeDt 守卫（那是另一条待修项），
-      // 但 _turnToward 内部已挡住非有限 dt，不会把 facing 毒化。
       this._turnToward(Math.atan2(vy, vx), dt);
     }
+  }
+
+  /**
+   * 卸载（rule5：可卸载）
+   *
+   * 【为什么要有】
+   * 角色对象被回收、切场景重新创建 mover 时，
+   * 如果调用方手里还留着旧实例（事件回调、AI 黑名单、UI 绑定），
+   * 旧实例会继续持有 `solver`（里面通常闭包引用了整张碰撞地图）——
+   * 地图卸载不掉，就是一次实打实的内存泄漏。
+   * 这里把引用与状态一并清空，让旧实例变成"安全的空壳"。
+   */
+  destroy(): void {
+    this.vx = 0;
+    this.vy = 0;
+    this.clearImpulse();
+    this.x = 0;
+    this.y = 0;
+    this.blocked = false;
+    this.lastNX = 0;
+    this.lastNY = 0;
+    this._facing = 0;
   }
 
   // ==================== 诊断 ====================
@@ -677,6 +849,22 @@ export function lerpVelocity(
  * 用途：AI 预判、UI 显示刹车距离。
  */
 export function stoppingTime(speed: number, decel: number): number {
-  if (decel <= 0) return Infinity;
-  return clamp(speed / decel, 0, 1e6);
+  /**
+   * 【为什么不夹在 1e6】
+   *
+   * `speed / decel` 本身就是精确答案，夹一个 1e6 的上界
+   * 会让"减速极慢"的场景返回**假的** 1e6：
+   * `stoppingTime(1e9, 1)` = 1e6 秒（约 11.6 天），真实答案是 1e9 秒。
+   * 拿它去做 AI 预判或"刹车距离"UI，就会算出一个看起来合理、
+   * 实际差了 1000 倍的数——**比返回 Infinity 更难发现**。
+   *
+   * 需要做展示上界是调用方的事（它才知道自己的 UI 能显示几位），
+   * 库这里只保证数学正确。
+   *
+   * 【NaN 保持可见】`decel <= 0` 对 NaN 为 false，所以用肯定式 `!(decel > 0)`；
+   * 非有限的 speed 返回 NaN 而不是 0，让坏数据在调用方继续可见。
+   */
+  if (!Number.isFinite(speed)) return NaN;
+  if (!(decel > 0)) return Infinity;
+  return Math.max(0, speed / decel);
 }

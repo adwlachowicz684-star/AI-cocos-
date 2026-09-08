@@ -466,7 +466,9 @@
       "path": "i18n/",
       "maturity": "beta",
       "purpose": "本地化（复数/插值/回退/覆盖率）",
-      "depends": [],
+      "depends": [
+        "_core"
+      ],
       "hasTest": true,
       "hasDemo": true,
       "domain": "通用工具",
@@ -478,7 +480,9 @@
       "path": "turn/",
       "maturity": "beta",
       "purpose": "回合制系统（先攻/行动点/死亡跳过）",
-      "depends": [],
+      "depends": [
+        "_core"
+      ],
       "hasTest": true,
       "hasDemo": true,
       "domain": "玩法框架",
@@ -665,7 +669,8 @@
       "maturity": "beta",
       "purpose": "地牢生成（BSP / Room / Cellular / Maze 四种 + 死图自检）",
       "depends": [
-        "ds"
+        "ds",
+        "_core"
       ],
       "hasTest": true,
       "hasDemo": true,
@@ -693,7 +698,8 @@
       "maturity": "beta",
       "purpose": "寻路（A* + PathSmoother + FlowField 流场）",
       "depends": [
-        "ds"
+        "ds",
+        "_core"
       ],
       "hasTest": true,
       "hasDemo": true,
@@ -748,7 +754,9 @@
       "path": "meta/MetaProgression.ts",
       "maturity": "beta",
       "purpose": "元进度（局外成长）：解锁树、循环依赖检测、效果聚合、存档容错",
-      "depends": [],
+      "depends": [
+        "_core"
+      ],
       "hasTest": true,
       "hasDemo": true,
       "domain": "进度与统计",
@@ -1036,7 +1044,9 @@
       "path": "blessing/Blessing.ts",
       "maturity": "beta",
       "purpose": "祝福堆叠：软上限递减 + 互斥（双向）+ 三选一抽取",
-      "depends": [],
+      "depends": [
+        "_core"
+      ],
       "hasTest": true,
       "hasDemo": true,
       "domain": "内容与掉落",
@@ -1048,7 +1058,9 @@
       "path": "curse/Curse.ts",
       "maturity": "beta",
       "purpose": "诅咒：增益+代价触发时机+移除条件，canRemove/remove 一致",
-      "depends": [],
+      "depends": [
+        "_core"
+      ],
       "hasTest": true,
       "hasDemo": true,
       "domain": "内容与掉落",
@@ -1163,7 +1175,9 @@
       "layer": "L1",
       "domain": "内容与掉落",
       "maturity": "beta",
-      "depends": [],
+      "depends": [
+        "_core"
+      ],
       "hasTest": true,
       "hasDemo": true,
       "purpose": "稀有度不只是个排序——还牵扯掉落权重、UI 颜色、保底归属、排序比较。",
@@ -1193,7 +1207,9 @@
       "layer": "L1",
       "domain": "进度与统计",
       "maturity": "beta",
-      "depends": [],
+      "depends": [
+        "_core"
+      ],
       "hasTest": true,
       "hasDemo": true,
       "purpose": "成就看起来简单：if (kills >= 100) unlock('kill100')。",
@@ -1221,7 +1237,9 @@
       "layer": "L1",
       "domain": "表现与外壳",
       "maturity": "beta",
-      "depends": [],
+      "depends": [
+        "_core"
+      ],
       "hasTest": true,
       "hasDemo": true,
       "purpose": "设置界面里的\"按键设置\"",
@@ -1235,7 +1253,9 @@
       "layer": "L2",
       "domain": "工程与运维",
       "maturity": "beta",
-      "depends": [],
+      "depends": [
+        "_core"
+      ],
       "hasTest": true,
       "hasDemo": true,
       "purpose": "主菜单 → 游戏中 → 暂停 → 结算 → 回主菜单",
@@ -1339,7 +1359,9 @@
       "layer": "L1",
       "domain": "表现与外壳",
       "maturity": "beta",
-      "depends": [],
+      "depends": [
+        "_core"
+      ],
       "hasTest": true,
       "hasDemo": false,
       "purpose": "可访问性常被当成\"发布前再说\"的事，",
@@ -1595,7 +1617,9 @@
       "path": "diagpack/DiagPack.ts",
       "maturity": "beta",
       "purpose": "诊断包：安全序列化、序列化后脱敏、分区配额、永不抛错",
-      "depends": [],
+      "depends": [
+        "_core"
+      ],
       "hasTest": true,
       "hasDemo": true,
       "domain": "工程与运维",
@@ -1682,7 +1706,9 @@
       "layer": "L2",
       "domain": "适配与实体",
       "maturity": "beta",
-      "depends": [],
+      "depends": [
+        "_core"
+      ],
       "hasTest": true,
       "hasDemo": false,
       "added": "2026-09-04",
