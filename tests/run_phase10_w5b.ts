@@ -578,9 +578,34 @@ export function runPhase10W5BTests(): void {
       const ib = new InputBuffer();
       ib.window = NaN;
       assert(Number.isFinite(ib.window), 'window 必须是有限数');
-      eq(ib.window, 0);
+      eq(ib.window, 0.15, '非法值保持旧值（不是兜成 0 —— 0 等于缓冲失效）');
       ib.window = -5;
-      eq(ib.window, 0, '负数仍被夹到 0');
+      eq(ib.window, 0, '负数仍被夹到 0（显式传 0 是"不要缓冲"的合法意图）');
+    });
+
+    test('⚠️ setter 传 NaN 之后缓冲仍要能用（行为级断言）', () => {
+      /**
+       * 只断言 `ib.window === 0` 是**数值断言**，钉不住真正的坑：
+       * 判定是 `now - t <= window`，window = 0 时只有"同一时间戳"成立，
+       * 对"按下 → 下一帧消费"这个主力用法，窗口是死的。
+       * 所以这里断言行为：热更传 NaN 之后，press 隔一帧 consume 仍要拿到。
+       */
+      let now = 0;
+      const ib = new InputBuffer({ window: 0.15, now: () => now });
+      ib.window = NaN;
+      eq(ib.window, 0.15, '热更失败 → 维持上一次的有效窗口');
+      ib.press('attack');
+      now = 1 / 60; // 隔一帧
+      eq(ib.peek('attack'), true, '窗口内应能查到');
+      eq(ib.consume('attack'), true, '窗口内应能消费');
+    });
+
+    test('⚠️ 窗口到期仍会过期（防止矫枉过正）', () => {
+      let now = 0;
+      const ib = new InputBuffer({ window: 0.15, now: () => now });
+      ib.press('attack');
+      now = 0.5;
+      eq(ib.consume('attack'), false, '超过窗口应失效');
     });
 
     test('对照：正常参数下的缓冲与消费完全不变', () => {

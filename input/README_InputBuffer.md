@@ -160,8 +160,16 @@ interface InputBufferOptions { window?: number; /* ... */ }
 | `window` | `now - t <= NaN` 恒为 false → `peek` 永远 false、`consume` 时灵时不灵 |
 
 现在构造用 `clampNum(maxQueue, 1, 64, 6)` 与 `numOr(window, 0.15)`，
-`window` 的 setter 也先 `numOr` 再 `Math.max(0, …)`——
-`Math.max(0, NaN)` 是 NaN，单独一个 `Math.max` 挡不住。
+`window` 的 setter 是 **`numOr(v, this._window)` 后再 `Math.max(0, …)`**——
+`Math.max(0, NaN)` 是 NaN，单独一个 `Math.max` 挡不住，所以必须先 `numOr`。
+
+> ⚠️ **非法值是"保持旧值"，不是兜成 0。**
+> 第一版 setter 写的是 `Math.max(0, numOr(v, 0))`，注释还论证"与构造函数同口径"——
+> 这是假的：构造函数兜 0.15，setter 兜 0。而命中判定是 `now - t <= window`，
+> `window = 0` 时只有"同一时间戳"成立，对"按下 → 下一帧消费"这个主力用法
+> **缓冲等于死了**（实测 `press` 后隔一帧 `consume()` = false），与没修之前一样。
+> 所以改成维持上一次的有效值：热更传 NaN 时至少不会把手感一键清空。
+> 显式传 `0` 是合法意图（"不要缓冲"），照旧接受。
 
 ### 搓招允许中间有多余输入
 

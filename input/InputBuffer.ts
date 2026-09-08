@@ -137,13 +137,27 @@ export class InputBuffer {
 
   set window(v: number) {
     /**
-     * 【为什么先 numOr 再 Math.max（P2）】
-     * `Math.max(0, NaN) === NaN`——`Math.max` **不做有限性检查**，
-     * 单独用它挡不住 NaN（见全库共享模式 B）。
-     * 先用 `numOr` 把 NaN / Infinity 兜成 0，再夹掉负数，
-     * 与构造函数的 `numOr(opts.window, …)` 保持同一口径。
+     * 【⚠️ 为什么非法值是"保持旧值"，而不是像构造函数那样兜成 0.15（P2）】
+     *
+     * 第一版这里写的是 `Math.max(0, numOr(v, 0))`，注释还论证过
+     * "与构造函数的 `numOr(opts.window, 0.15)` 保持同一口径"——
+     * **这句话是假的**：构造函数兜的是 0.15，setter 兜的是 0，两条路径不一样。
+     *
+     * 更糟的是 0 这个兜底值本身：命中判定是 `now - t <= this._window`
+     * （见 `peek` / `consume`），`window = 0` 时只有"同一时间戳"成立，
+     * 也就是**除了按下那一帧之外全部立即过期**。实测（W5-A 在交叉验收里给出）：
+     *   setter 传 NaN → window = 0 → press('attack') 隔一帧 consume() = false
+     * 缓冲看着在、实际已经死了，和没修之前的 `now - t <= NaN` 恒 false 表现一致。
+     * 这正是我在 P1-1（accessibility）里批评过的毛病——
+     * "构造时传 5 生效、之后重设被压到 1，行为随调用路径变化"，我在这里又犯了一遍。
+     *
+     * 改成保持旧值：`window` 允许运行时热更新（难度自适应、不同角色手感），
+     * 一次热更传进来 NaN 时，让窗口维持上一次的有效值，
+     * 至少不会把手感一键清空。与全库 skill-queue 的 `window` 收口口径一致。
+     * 显式传 0 是合法意图（"不要缓冲"），照旧接受。
      */
-    this._window = Math.max(0, numOr(v, 0));
+    const next = numOr(v, this._window);
+    this._window = Math.max(0, next);
   }
 
   /**
