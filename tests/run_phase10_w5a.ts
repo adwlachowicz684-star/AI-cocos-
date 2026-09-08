@@ -81,7 +81,15 @@ export function runPhase10W5ATests(): void {
       eq(n, 1, 'Infinity 冷却 = 只放一次');
     });
 
-    test('⚠️ Cooldown(NaN) 不得变成"冷却永不生效"', () => {
+    /**
+     * 【⚠️ 修复后仍是"无冷却"（对家 W5-B 指出措辞易被误读）】
+     *
+     * `Cooldown(NaN)` 收口成 **0 秒**，子节点依旧每帧执行（实测 5 帧 5 次，与修复前一致）。
+     * 变的是 `remain` 从 NaN 变成可观测的 `0`——**不是"恢复成配表默认值"**。
+     * 这个取舍与 `Wait(NaN) = 0 秒` 同口径：非法值一律退化为"没有效果"，
+     * 而不是替调用方猜一个默认值。别把这条读成"冷却不再失效"。
+     */
+    test('⚠️ Cooldown(NaN) 的 remain 必须是可观测的有限数（语义 = 无冷却）', () => {
       // 修复前：NaN 写进 _remain 后 `_remain > 0` 恒 false，
       // 子节点每帧都被执行（技能每帧释放），而 remain 显示 NaN。
       let n = 0;
@@ -128,7 +136,17 @@ export function runPhase10W5ATests(): void {
       eq(s, BTStatus.Success);
     });
 
-    test('⚠️ times = NaN 退化为 Infinity 而不是"永远 Running 却计数不到"', () => {
+    /**
+     * 【⚠️ 这条是"收口"，不是行为变更（对家 W5-B 验收时指出应写明）】
+     *
+     * 修复前 `_count >= NaN` 恒 false、修复后 `_count >= Infinity` 同样恒 false
+     * ——**两者都是"无限 Repeater"**，实测行为完全一致（50 帧 50 次、恒 Running）。
+     * 所以这条断言回退修复后照样通过，属"锁现状"用例。
+     *
+     * 真正的收益是：非法次数有了**确定且可预期**的语义（与"不传参"一致），
+     * 而不是依赖 NaN 碰巧也让比较恒为 false。别把它读成"NaN 不再导致无限循环"。
+     */
+    test('⚠️ times = NaN 退化为 Infinity（收口，行为与"不传参"对齐）', () => {
       // 修复前：`_count >= NaN` 恒 false，Repeater 永不结束。
       // 收口后与"不传参"一致（Infinity），行为可预期。
       let n = 0;
@@ -267,7 +285,16 @@ export function runPhase10W5ATests(): void {
       eq(r.display, 0, '还没滚动就不该到终值');
     });
 
-    test('⚠️ decimals = -1 不得抛 RangeError', () => {
+    /**
+     * 【⚠️ 这条是"内部收口"，行为未变（对家 W5-B 指出应写明）】
+     *
+     * 修复前 `decimals: -1` → `formatted = '1'`；修复后（夹到 0 后走 `toFixed(0)`）
+     * 结果同样是 `'1'` —— **对外行为完全一致**，实测修复前后输出相同。
+     * 变的是内部不再依赖"`decimals > 0` 碰巧为 false"这种隐式兜底。
+     * 它原本就不会抛 RangeError（走的是 Math.round 分支），
+     * 这条用例锁的是"别将来改崩了"，不是"修了一个 bug"。
+     */
+    test('⚠️ decimals = -1 不得抛 RangeError（内部收口，输出不变）', () => {
       // 修复前：`decimals > 0` 为 false，走 Math.round 分支——
       // 实际不抛，但配置被静默吞掉；这里锁住"不会崩"这条底线。
       const r = new NumberRollerCore({ decimals: -1 });
@@ -282,12 +309,29 @@ export function runPhase10W5ATests(): void {
       eq(r.formatted, '0');
     });
 
-    test('⚠️ overshoot < 1 的下冲必须生效', () => {
+    /**
+     * 【⚠️ 断言加强过（对家 W5-B 验收时抓出来的）】
+     *
+     * 旧断言是 `assert(r.display < 100)`。对家实测：修复前走"不过冲"分支时
+     * 中途值 = **87.5**，同样 `< 100` —— 断言在两种实现下都成立，**无效用例**。
+     *
+     * 正确的做法是**把下冲与不过冲直接对照**：两者中途值必须明显不同。
+     * 实测：修复前 87.5 vs 87.5（无差别 → 断言红），修复后 49.77 vs 87.5（→ 断言绿）。
+     */
+    test('⚠️ overshoot < 1 的下冲必须生效（与不过冲直接对照）', () => {
       // 修复前：只有 `> 1` 才走过冲分支，0.5 被当成"不过冲"。
-      const r = new NumberRollerCore({ duration: { min: 1, max: 1 } });
-      r.set(100, { overshoot: 0.5 });
-      r.update(0.5);
-      assert(r.display < 100, `下冲时中途值应小于终值，实际 ${r.display}`);
+      const plain = new NumberRollerCore({ duration: { min: 1, max: 1 } });
+      plain.set(100);
+      plain.update(0.5);
+
+      const under = new NumberRollerCore({ duration: { min: 1, max: 1 } });
+      under.set(100, { overshoot: 0.5 });
+      under.update(0.5);
+
+      assert(
+        under.display < plain.display - 1e-6,
+        `下冲应比不过冲更慢：下冲 ${under.display} vs 不过冲 ${plain.display}`
+      );
     });
 
     test('正常 duration 与 decimals 行为不变（防止矫枉过正）', () => {
@@ -378,25 +422,40 @@ export function runPhase10W5ATests(): void {
       eq(s.listenerCount, 1, '只应删掉 once 那一条');
     });
 
-    test('⚠️ emit 回调里取消自己，不得连坐另一个监听者', () => {
-      let m = 0;
-      const s2 = new Signal<() => void>();
-      let off: (() => void) | null = null;
-      const selfRemoving = (): void => {
-        m++;
-        if (off) off();
+    /**
+     * 【⚠️ 这条用例重写过（对家 W5-B 验收时抓出来的）】
+     *
+     * 旧版写的是「A 自增 1 并自我取消、B 自增 10，第二次 emit 后 m 应为 21」。
+     * 对家在 df65fca 上实测：修复前 m 就是 21、listenerCount 就是 1——
+     * **与修复后完全一致**，即这条断言回退修复后照样通过，是无效用例。
+     *
+     * 根因（读基线 `signal/Signal.ts`）：`_pendingRemoval` 是 `Set<函数>`，
+     * 连坐只发生在**集合里存在相同函数引用**时。
+     * 旧版 A、B 是两个不同引用，Set 按值去重删不掉 B，压根没触发 bug。
+     *
+     * 真正能触发的形态是**同一个函数注册两次**、在回调里只取消自己那一条：
+     * 修复前收尾 filter 会把两条一起删掉（count 停在 1、listenerCount 归 0），
+     * 修复后只有被 off 的那一条消失（count = 3、listenerCount = 1）。
+     * 实测（修复前 / 修复后）：count = 1 / 3，listenerCount = 0 / 1。
+     */
+    test('⚠️ 同一函数注册两次并在回调里自我取消，不得连坐另一条注册', () => {
+      let count = 0;
+      let off1: (() => void) | null = null;
+      const fn = (): void => {
+        count++;
+        if (off1) off1();
       };
-      off = s2.add(selfRemoving);
-      s2.add(() => {
-        m += 10;
-      });
-      eq(s2.listenerCount, 2);
-      s2.emit();
-      eq(s2.listenerCount, 1, '只应删掉取消的那一条');
-      s2.emit();
-      // 1(A) + 10(B) + 10(B 第二次) = 21
-      // 修复前：A 取消时被连坐删掉 B → 第二次 emit 什么都不会发生，m 停在 11。
-      eq(m, 21, '取消 A 之后 B 仍要在后续 emit 中被调用');
+      const s = new Signal<() => void>();
+      off1 = s.add(fn);
+      s.add(fn);
+      eq(s.listenerCount, 2);
+
+      s.emit();
+      eq(s.listenerCount, 1, '只应删掉被 off 的那一条');
+      s.emit();
+      // 第一次 emit：两条注册都调用（count = 2），收尾删掉 id 更小的那条
+      // 第二次 emit：剩下那条仍应被调用（count = 3）
+      eq(count, 3, '未被取消的那条注册必须在后续 emit 中继续被调用');
     });
 
     test('普通 add / off 语义不变（防止矫枉过正）', () => {
@@ -518,6 +577,14 @@ export function runPhase10W5ATests(): void {
     });
   });
 
+  /**
+   * 【⚠️ 本组用例的有效性来自类型系统，不是运行时断言（对家 W5-B 指出）】
+   *
+   * 真正被修掉的是"不传 rand 时默认 `Math.random`"这条路径——改成必填参数后，
+   * 漏传只能由 `tsc` 拦住，**运行时无法构造回退用例**。
+   * 下面两条断言（"注入后确定"）在修复前也成立，属"锁现状"。
+   * 请不要因为"有测试"就以为这条已被断言守住。
+   */
   describe('steering · wander 的随机源（P1）', () => {
     test('⚠️ 注入同一随机源时 wander 必须可复现', () => {
       // 修复前：默认 `rand = Math.random`，不注入时两次调用结果不同
@@ -575,7 +642,15 @@ export function runPhase10W5ATests(): void {
       eq(t.shouldFlush(), false);
     });
 
-    await testAsync('⚠️ willSample 对原型键走全局采样率而不是静默丢弃', async () => {
+    /**
+     * 【⚠️ 这条是"锁现状"用例，不是缺陷复现（对家 W5-B 指出应标注）】
+     *
+     * 基线 `Telemetry.ts` 的 `willSample` **已经用了 `hasOwn`**，
+     * 原精审报告说的"原型键取到函数 → 采样恒 false"在基线就不成立。
+     * 本次只在 `hasOwn` 之上补了 `numOr`（防表里存的是 'abc'/null），
+     * 断言修复前后都通过 —— 它的作用是**防止将来有人把 hasOwn 改回去**。
+     */
+    await testAsync('⚠️ willSample 对原型键走全局采样率而不是静默丢弃（锁现状）', async () => {
       // 修复前：`_eventSampleRates['toString']` 取到原型方法（函数）
       // → `hash < function` 恒 false → 该事件名永远不上报。
       const t = make({ eventSampleRates: {} });
