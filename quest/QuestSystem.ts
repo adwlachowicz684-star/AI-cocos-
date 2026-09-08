@@ -63,23 +63,6 @@
 
 export type QuestStatus = 'locked' | 'available' | 'active' | 'completed' | 'claimed' | 'failed';
 
-/**
- * 运行时可校验的状态白名单
- *
- * 【为什么不能只靠 TypeScript 的联合类型】
- * `QuestStatus` 编译后**完全消失**。`import()` 读的是存档（JSON.parse 的产物、
- * 甚至可能是玩家手改过的文件），类型系统在运行时一个字节都不拦。
- * 只有这份显式的字符串数组能在运行时回答"这个值到底是不是合法状态"。
- */
-const QUEST_STATUSES: readonly string[] = [
-  'locked',
-  'available',
-  'active',
-  'completed',
-  'claimed',
-  'failed',
-];
-
 /** 目标类型（可扩展：加新类型只需在 _matches 里加一个分支） */
 export type ObjectiveType = 'kill' | 'collect' | 'reach' | 'talk' | 'custom';
 
@@ -458,56 +441,17 @@ export class QuestSystem {
     }));
   }
 
-  /**
-   * 从存档恢复
-   *
-   * 【⚠️ 存档是不可信输入：必须逐字段校验后再写内部状态】
-   *
-   * 老实现是 `status: e.status` 直接写 + `progress[i] ?? 0` 只补 undefined。
-   * 两个洞：
-   *
-   * ① **status 不校验**：存档被篡改或跨版本后写进一个枚举外的值（比如 'garbage'），
-   *    结果是 `available` / `active` / `completed` 三个 getter **全都查不到它**——
-   *    任务在 UI 上凭空消失，但 `_defs` 里还在，`_refreshLocks()` 依然每帧遍历它。
-   *    玩家看到的是"我的任务没了"，日志里一行错误都没有。
-   *
-   * ② **progress 元素不校验类型**：`progress: ['a']` 会被原样写进进度数组。
-   *    `_isAllDone` 已经是肯定式判定（`!(progress[i] >= need)`），不会像旧版那样
-   *    把 'a' 误判成"已完成"，但 report 时 `next[i] + n` 会算出 NaN，
-   *    之后 `next[i] >= need` 恒为 false → **这个目标永远无法完成**，UI 显示 NaN。
-   *
-   * 【为什么 status 非法要整条跳过，progress 非法却只收口成 0】
-   * 两者性质不同：
-   *   - status 是"这一个存档条目还成不成立"的问题，没有安全的降级值——
-   *     猜一个 'active' 可能直接让玩家白拿奖励，所以按 import 的既有契约整条 skipped；
-   *   - progress 的单个元素则和"元素缺失"是同一种情况（老代码对缺失元素就是补 0），
-   *     按同一个口径收口成 0 即可，没有理由为此丢掉整条存档里其他还完好的进度。
-   */
   import(data: ReadonlyArray<{ id: string; status: QuestStatus; progress?: number[]; claimed?: boolean }>): number {
     let skipped = 0;
     for (const e of data) {
-      // 存档可能是手改过的，null / 非对象条目直接跳过而不是崩在 e.id 上
-      if (!e || typeof e !== 'object') {
-        skipped++;
-        continue;
-      }
       const def = this._defs.get(e.id);
       if (!def) {
         skipped++;
         continue;
       }
-      // 状态必须在枚举白名单内，否则这条存档条目整体不可信
-      if (typeof e.status !== 'string' || QUEST_STATUSES.indexOf(e.status) < 0) {
-        skipped++;
-        continue;
-      }
       const progress = e.progress ?? def.objectives.map(() => 0);
-      // 长度不匹配时补齐/截断（版本更新改了目标数量）；
-      // 元素是 null / 字符串 / NaN 时按"该目标无进度"收口成 0，负数一并夹掉。
-      const fixed = def.objectives.map((_, i) => {
-        const raw = progress[i];
-        return typeof raw === 'number' && Number.isFinite(raw) ? Math.max(0, raw) : 0;
-      });
+      // 长度不匹配时补齐/截断（版本更新改了目标数量）
+      const fixed = def.objectives.map((_, i) => progress[i] ?? 0);
       this._progress.set(e.id, {
         defId: e.id,
         status: e.status,
