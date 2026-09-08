@@ -297,30 +297,6 @@ export class SeasonRewardDistributor {
  * 【用途】
  * 赛季结束时给策划看"玩家都卡在哪个段位"，
  * 用于调整下赛季的段位分数线。
- *
- * 【⚠️ 输出顺序按 `rankConfig.tiers` 固定，不按玩家出现顺序】
- *
- * 老实现是 `[...counts.entries()]`，而 `counts` 是 `Map`、
- * 按**首次出现顺序**累积——顺序完全由 `players` 数组的顺序决定
- * （数据库返回顺序、分页顺序、并发写入顺序都会影响它）。
- *
- * `diagnoseDistribution` 用 `dist[0]` 当最低段位、`dist[dist.length-1]` 当最高段位，
- * 于是**同一批玩家只改数组顺序，诊断结论就会完全颠倒**：
- *
- * 实测（修复前），1 个宗师 + 9 个青铜：
- * ```
- * 宗师在前 -> dist=["grandmaster:0.1","bronze:0.9"]
- *            诊断："最高段位占比 90.0%"        ← 把青铜的 90% 当成了最高段位
- * 青铜在前 -> dist=["bronze:0.9","grandmaster:0.1"]
- *            诊断："最低段位占比 90.0%"        ← 这才是正确结论
- * ```
- *
- * 后果：赛季健康度是**运营决策输入**。上面第一种情况会给出
- * "最强段位人太多"的结论，而实际是最弱段位人太多——
- * 数值全部"看起来合理"，不会报错，错的是决策方向。
- *
- * `tiers` 已经强制按 `minRating` 升序（`tierOf` 会校验），
- * 所以按它的顺序输出即得到"最低 → 最高"的稳定顺序。
  */
 export function tierDistribution(
   players: readonly SeasonPlayer[],
@@ -338,22 +314,12 @@ export function tierDistribution(
   }
 
   const total = players.length || 1;
-  const order = new Map<string, number>();
-  rankConfig.tiers.forEach((t, i) => order.set(t.id, i));
-
-  return [...counts.entries()]
-    // 未登记在 tiers 里的段位排在最后，且保持原相对顺序
-    .sort(
-      (a, b) =>
-        (order.get(a[0]) ?? rankConfig.tiers.length) -
-        (order.get(b[0]) ?? rankConfig.tiers.length)
-    )
-    .map(([tierId, v]) => ({
-      tierId,
-      label: v.label,
-      count: v.n,
-      ratio: v.n / total,
-    }));
+  return [...counts.entries()].map(([tierId, v]) => ({
+    tierId,
+    label: v.label,
+    count: v.n,
+    ratio: v.n / total,
+  }));
 }
 
 /**
@@ -365,23 +331,11 @@ export function tierDistribution(
  * - 最高段位占比过高 → 门槛太低，顶端没有区分度
  * - 最高段位占比为 0 → 门槛太高，玩家没有目标
  *
- * @param opts.tierOrder 段位 id 按**由低到高**排列（通常取 `rankConfig.tiers.map(t => t.id)`）。
- *   给了就按它重排后再取"最低/最高"，不给则沿用入参顺序（兼容老调用）。
- *
- * 【⚠️ 为什么必须重排】
- * `dist[0]` / `dist[dist.length-1]` 这两个下标判断隐含了
- * "入参已经按段位从低到高排好"这个**从未被校验过的前提**。
- * 而 `dist` 常常来自 `tierDistribution(players, ...)`，
- * 那里的顺序原本由玩家数组的顺序决定（见 `tierDistribution` 的注释）。
- *
- * 不传 `tierOrder` 时保持原行为，是因为本函数也接受手写的字面量数组
- * （既有回归用例就是这样调的，那些数组本身已经是有序的）。
- *
  * @returns 诊断信息
  */
 export function diagnoseDistribution(
   dist: readonly { tierId: string; ratio: number }[],
-  opts: { topHeavy?: number; bottomHeavy?: number; tierOrder?: readonly string[] } = {}
+  opts: { topHeavy?: number; bottomHeavy?: number } = {}
 ): { healthy: boolean; issues: string[] } {
   const issues: string[] = [];
   const topHeavy = opts.topHeavy ?? 0.05;
@@ -391,29 +345,14 @@ export function diagnoseDistribution(
     return { healthy: false, issues: ['没有数据'] };
   }
 
-  /**
-   * 按段位高低重排的副本
-   *
-   * 不在 `tierOrder` 里的 id 统一排到末尾（判定为"最高"），
-   * 这样配置表里漏登记一个新段位时，不会静默变成"最低段位"而颠倒结论。
-   */
-  const ordered =
-    opts.tierOrder && opts.tierOrder.length > 0
-      ? [...dist].sort((a, b) => {
-          const ia = opts.tierOrder!.indexOf(a.tierId);
-          const ib = opts.tierOrder!.indexOf(b.tierId);
-          return (ia < 0 ? opts.tierOrder!.length : ia) - (ib < 0 ? opts.tierOrder!.length : ib);
-        })
-      : dist;
-
-  const first = ordered[0]!;
+  const first = dist[0]!;
   if (first.ratio > bottomHeavy) {
     issues.push(
       `最低段位占比 ${(first.ratio * 100).toFixed(1)}%，超过 ${(bottomHeavy * 100).toFixed(0)}%`
     );
   }
 
-  const last = ordered[ordered.length - 1]!;
+  const last = dist[dist.length - 1]!;
   if (dist.length > 1 && last.ratio > topHeavy) {
     issues.push(
       `最高段位占比 ${(last.ratio * 100).toFixed(1)}%，超过 ${(topHeavy * 100).toFixed(0)}%`
