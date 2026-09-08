@@ -57,27 +57,9 @@ export class SkillHandle {
     return this._cancelled;
   }
 
-  /**
-   * 取消这次播放
-   *
-   * 【⚠️ 必须先校验归属，否则会停掉**下一个**技能】
-   *
-   * 原实现只持有 player 引用，直接 `this._player.stop(true)`。
-   * 实测（修复前）：`h1 = play(trackA)` → `play(trackB)` → `h1.cancel()`
-   * → `player.state` 变成 **idle**，正在播的 B 被一起停掉了。
-   *
-   * 到达路径是时序性的：`cancel()` 常由动画回调、延迟调用、
-   * 网络回包触发，晚一步执行时 player 上挂的已经是新轨道。
-   * 表现为"连续放技能时莫名其妙中断"，且只在特定时序下复现。
-   *
-   * 【为什么过期句柄要直接返回而不是抛错】
-   * "取消一个已经不存在的播放"是正常时序，不是调用方的 bug；
-   * 抛错会把无害的延迟回调变成崩溃。静默失效 + 标记 cancelled 才是对的。
-   */
   cancel(): void {
     if (this._cancelled) return;
     this._cancelled = true;
-    if (this._player.currentHandle !== this) return;
     this._player.stop(true);
   }
 
@@ -185,19 +167,6 @@ export class SkillPlayer implements IDisposable {
   tick(dt: number): void {
     if (this._state !== 'playing' || !this._track) return;
 
-    /**
-     * 【⚠️ 非法 dt 用 0 兜底，会静默吞掉这一帧】
-     *
-     * 比让 NaN 污染 `_time` 好（`_time` 变 NaN 后所有区间比较恒 false，
-     * 技能会**永久卡住**且再也触发不了任何事件），
-     * 但代价是这一帧被静默丢弃：慢放/暂停恢复的第一帧若传了 NaN，
-     * 时间轴会少走一格。
-     *
-     * 与 `projectile` / `telegraph`（直接 `return`）口径不同：
-     * 这里选择"跳过推进但仍保持 playing 状态"，
-     * 因为技能的生命周期由 `stop()` / 轨道时长决定，不该被一个坏 dt 提前结束。
-     * 【调用方注意】传入前请自行保证 dt 有限，本方法不提供坏 dt 的诊断。
-     */
     const step = safeDt(dt) ? dt : 0;
     const prev = this._time;
     this._time += step;
@@ -208,23 +177,6 @@ export class SkillPlayer implements IDisposable {
     if (this._time >= this._track.duration) {
       if (this._track.loop) {
         this._time -= this._track.duration;
-        /**
-         * 【⚠️ 回卷之后必须补发新一轮的 t=0 事件】
-         *
-         * `play()` 里用 `_fireRange(0, 0, true)` 触发起始帧事件，
-         * 但原实现回卷时只做 `_time -= duration`，**没有再触发一次**——
-         * 而 `_fireRange` 默认 `inclusiveFrom = false`（区间是 `(from, to]`），
-         * 之后的每一轮都永远碰不到 `t = 0` 这个点。
-         *
-         * 实测（修复前）：`duration: 1, loop: true`，事件 `[{t: 0, type:'boom'}]`
-         * → `play()` 后触发 1 次；跑 130 帧（约 2.17 秒，跨 2 次回卷）
-         * 累计仍是 **1** 次（期望 3 次：0s、1s、2s）。
-         *
-         * 后果：循环技能（持续施法、光环、旋转攻击）把起始帧事件放 t=0 时，
-         * **只有第一轮生效**——"第一轮有音效/特效，之后就哑了"，
-         * 而事件数据本身看起来完全正常，只能靠数触发次数才发现。
-         */
-        this._fireRange(0, this._time, true);
       } else {
         this.stop(false);
       }
@@ -298,17 +250,6 @@ export class SkillPlayer implements IDisposable {
 
   get state(): SkillState {
     return this._state;
-  }
-
-  /**
-   * 当前播放对应的句柄（无播放时为 null）
-   *
-   * 【用途】`SkillHandle.cancel()` 靠它判断自己是不是"还挂着的那一个"。
-   * 旧句柄在 player 已经切到新轨道后调用 cancel 时，这里返回的是新句柄，
-   * 于是旧句柄自动失效，不会误伤正在播的技能。
-   */
-  get currentHandle(): SkillHandle | null {
-    return this._handle;
   }
 
   get currentTime(): number {
