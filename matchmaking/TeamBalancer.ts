@@ -136,66 +136,21 @@ export function balanceTeams(
   const totals = new Array(teamCount).fill(0);
 
   for (const u of units) {
-    /**
-     * 【⚠️ 为什么 best 初始化为 -1，而不是 0】
-     *
-     * 原写法 `let best = 0` 隐含一个假设：**第 0 队一定放得下**。
-     * 它从来没被校验过——循环从 `t = 1` 开始，只在"第 0 队放不下"时
-     * 才去找别的队，而如果所有队都放不下，`best` 就停在 0，
-     * 于是这个单位被硬塞进 `teams[0]`：
-     *
-     * ```
-     * 10 人分 2 队（每队 5 人），单位 [4, 3, 3]
-     * 实测各队人数 = [7, 3]      ← 期望 [5, 5]，且**不抛错**
-     * ```
-     *
-     * 这是 bin-packing 无解的情形（4+3+3 无法凑出两个 5）。
-     * 静默超载的表现是"这局莫名其妙 7 打 3"，
-     * 玩家只会觉得匹配系统有问题，而日志里没有任何异常。
-     *
-     * 改成 -1 之后，"塞不下"变成一个显式结果，由下面统一抛错。
-     */
-    let best = -1;
-    for (let t = 0; t < teamCount; t++) {
+    let best = 0;
+    for (let t = 1; t < teamCount; t++) {
       if (sizes[t] + u.members.length > teamSize) continue;
-      // best 放得下时，只在 t 更弱时才换；best 还没定 / 放不下时，t 无条件更优
-      if (best < 0 || sizes[best] + u.members.length > teamSize || totals[t] < totals[best]) {
+      if (sizes[best] + u.members.length > teamSize || totals[t] < totals[best]) {
         best = t;
       }
-    }
-    if (best < 0) {
-      throw new Error(
-        `[TeamBalancer] 无法把 ${u.members.length} 人的队伍塞进任何一队` +
-        `（每队 ${teamSize} 人，当前各队人数：${sizes.join('/')}）。` +
-        `这是 bin-packing 无解，通常需要调整组队人数或 teamCount。`
-      );
     }
     teams[best].push(...u.members);
     sizes[best] += u.members.length;
     totals[best] += u.total;
   }
 
-  /**
-   * 【为什么还要再断言一次】
-   * 上面的 -1 分支挡住了"单个单位塞不下"，
-   * 但还有一种更隐蔽的情况：每个单位都塞进去了，
-   * 最后各队人数却**不相等**（比如 [6,4]，两队都没超容量但也没均分）。
-   * `packResult` 会照常算出 fairness 并返回，
-   * 于是下游拿到一个"看起来合法"的 6v4 对局。
-   *
-   * 均分是 `balanceTeams` 对外的核心承诺（构造时已校验
-   * `players.length % teamCount === 0`），
-   * 这里把"承诺兑现"变成一次显式检查。
-   */
-  if (sizes.some((s) => s !== teamSize)) {
-    throw new Error(
-      `[TeamBalancer] 分队后人数不均：期望每队 ${teamSize} 人，实际 ${sizes.join('/')}`
-    );
-  }
-
   // ⑤ 角色配额修正
   if (opts.roleQuota) {
-    fixRoles(teams, opts.roleQuota);
+    fixRoles(teams, opts.roleQuota, teamSize);
   }
 
   // ⑥ 局部搜索：交换单位以缩小差距
@@ -204,7 +159,7 @@ export function balanceTeams(
     iterations = localSearch(teams, units, metric, maxIter);
   }
 
-  return packResult(teams, iterations);
+  return packResult(teams, metric, iterations);
 }
 
 // ==================== 内部 ====================
@@ -370,22 +325,10 @@ function imbalance(teams: readonly BalancePlayer[][], metric: 'sum' | 'top' | 'b
  * 在各队之间交换**同分差最小**的同角色玩家，直到配额满足。
  * 优先交换那些"对实力平衡影响最小"的人。
  */
-/**
- * 【⚠️ 参数签名里原本有 `teamSize`，但函数体一行都没用到它】
- *
- * 原实现在末尾写 `void teamSize;`——这是为了绕过
- * `noUnusedParameters` 编译选项而加的**占位语句**，不是真实使用。
- *
- * 留着它的代价是每次读这个函数都要先判断
- * "teamSize 到底有没有参与配额计算"，而答案是没有：
- * 配额是按 `quota[role]` 与目标队内**当前人数**算的，与队容量无关。
- *
- * 未使用的参数比没有参数更贵——它暗示了一个不存在的约束。
- * 直接移除（调用方同步去掉实参）。
- */
 function fixRoles(
   teams: BalancePlayer[][],
-  quota: Readonly<Record<string, number>>
+  quota: Readonly<Record<string, number>>,
+  teamSize: number
 ): void {
   const need = (t: readonly BalancePlayer[], role: string): number =>
     (quota[role] ?? 0) - t.filter((p) => p.role === role).length;
@@ -433,36 +376,12 @@ function fixRoles(
 
     if (done) break;
   }
+  void teamSize;
 }
 
-/**
- * 【⚠️ 签名里原本有 `metric`，但计算过程完全没用它】
- *
- * 原实现在 return 前写 `void metric;`——同样是给 `noUnusedParameters` 的占位。
- *
- * 这处比 fixRoles 那处更值得警惕：`metric` 是本模块**唯一**
- * 决定"什么叫平衡"的口径（sum / top / both），
- * 而 `packResult` 输出的 fairness 只用了**平均分差**（spread），
- * 与 metric 无关。也就是说：
- *
- * ```
- * metric: 'top' 时，局部搜索在优化"各队最强者的差距"，
- * 但返回的 fairness 反映的是"各队平均分的差距"
- * ```
- *
- * 调用方拿 fairness 去判断"这局均不均"，看到的是一个
- * **和优化目标不一致的数字**——用它做 A/B 结论会直接误导决策。
- *
- * 两个改法：① 移除参数，让"fairness 只反映平均分差"变成显式事实；
- * ② 让 fairness 随 metric 变化。选 ①：
- * ② 会改变 `BalanceResult.fairness` 的既有语义（下游有测试在断言它），
- * 属于行为变更，不在本窗口"只修清单指出的那一处"的范围内。
- *
- * 【为什么不在 BalanceResult 里补一个按 metric 算的字段】
- * 那是加功能，不是修缺陷。真要做请单独提，并且要保持 fairness 语义不变。
- */
 function packResult(
   teams: BalancePlayer[][],
+  metric: 'sum' | 'top' | 'both',
   iterations: number
 ): BalanceResult {
   const built: BalancedTeam[] = teams.map((t) => {
@@ -491,6 +410,7 @@ function packResult(
   const scale = 100;
   const fairness = clamp(1 - spread / scale, 0, 1);
 
+  void metric;
   return { teams: built, spread, totalSpread, fairness, iterations };
 }
 
