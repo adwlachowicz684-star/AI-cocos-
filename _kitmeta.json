@@ -752,7 +752,9 @@
       "path": "meta/MetaProgression.ts",
       "maturity": "beta",
       "purpose": "元进度（局外成长）：解锁树、循环依赖检测、效果聚合、存档容错",
-      "depends": [],
+      "depends": [
+        "_core"
+      ],
       "hasTest": true,
       "hasDemo": true,
       "domain": "进度与统计",
