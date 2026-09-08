@@ -65,8 +65,6 @@
  * 具体签名见各函数的注释——适配的字段对应关系写在那里。
  */
 
-import { numOr } from '../_core/math';
-
 // ==================== ① 地牢 → 二维数组 ====================
 
 /**
@@ -104,61 +102,12 @@ export function toGrid2D(src: ITileSource): number[][] {
 
 /**
  * 转成扁平 Uint8Array（成块传给渲染器 / 网络 / 二进制存档）
- *
- * 【⚠️ 值域只有 0~255，越界值会被静默改写（本次修复的重点）】
- *
- * `Uint8Array` 的写入是 **mod 256**，不是报错：
- *
- * ```
- * tileAt 返回 -1  → 存进去是 255
- * tileAt 返回 300 → 存进去是 44
- * ```
- *
- * 而地牢/网格里 `-1` 是极常见的哨兵值（"未生成 / 未知 / 查询失败"）。
- * 于是"还没生成的格子"被当成 255 号地形送进渲染器和网络包——
- * 表现为**地图上出现配置里根本不存在的地形块**，存档回读后地形错乱，
- * 全程不报错，所以没人会怀疑是转换函数的问题。
- *
- * 【为什么默认 clamp 而不是抛错】
- * 这个函数常被用在"打包整张图"的热路径上，抛错会让整张图报废。
- * 默认把越界值**收口到 [0,255]**（至少不会再回绕成另一个合法地形 id），
- * 需要严格语义的调用方传 `{ clamp: false }`，越界即抛错——
- * 让"哨兵值混进来"这件事在适配层暴露，而不是下游凭空出现 255 号地形。
- *
- * 【哨兵值应该显式映射】
- * 真正的修法是调用方在 `tileAt` 里把 `-1` 映射成一个明确的地形值
- * （比如"未生成 = 255 号'未知地形'"，并让渲染器认识它）。
- * 靠 mod 兜底等于把两类完全不同的含义压到同一个字节里。
- *
- * @param src 地牢数据源
- * @param opts.clamp 默认 true：越界值收口到 0~255；false：越界抛错
- * @throws `clamp: false` 且 tileAt 返回值超出 0~255 时抛 RangeError
  */
-export function toFlatGrid(
-  src: ITileSource,
-  opts: { clamp?: boolean } = {},
-): Uint8Array {
-  const clamp = opts.clamp !== false;
+export function toFlatGrid(src: ITileSource): Uint8Array {
   const out = new Uint8Array(src.width * src.height);
   let i = 0;
   for (let y = 0; y < src.height; y++) {
-    for (let x = 0; x < src.width; x++) {
-      const v = src.tileAt(x, y);
-      if (!Number.isFinite(v) || v < 0 || v > 255 || !Number.isInteger(v)) {
-        if (!clamp) {
-          throw new RangeError(
-            `[adapters] toFlatGrid 值域越界：(${x},${y}) = ${String(v)}。` +
-              `Uint8Array 只能存 0~255 的整数，直接写入会 mod 256` +
-              `（-1 → 255、300 → 44）。请在 tileAt 中把哨兵值显式映射掉。`
-          );
-        }
-        // NaN / 非整数同样落到 0：它们写进 Uint8Array 会变成 0，结果一样，
-        // 但这里显式写出来，避免"看起来是合法值、其实是转换巧合"。
-        out[i++] = Number.isFinite(v) ? Math.min(255, Math.max(0, Math.round(v))) : 0;
-        continue;
-      }
-      out[i++] = v;
-    }
+    for (let x = 0; x < src.width; x++) out[i++] = src.tileAt(x, y);
   }
   return out;
 }
@@ -174,32 +123,10 @@ export function toFlatGrid(
  * fov.makeWallTest 已经处理了越界（返回 true），
  * 但自己写 wall test 时最容易漏的就是越界——
  * 漏了的表现是"视野从地图边缘漏出去"，且只在边缘发生。
- *
- * 【⚠️ 默认值为什么从 [0] 改成了 [1]】
- *
- * 原来的默认值是 `[0]`（0 = 墙），而 `fov.makeWallTest` 的默认值是 `[1]`。
- * **同一个"墙"概念，两个函数的默认值完全相反**，而不传参恰恰是最常用的调用方式。
- *
- * 实测同一张图 `[[0,1],[1,0]]`：
- *
- * | 坐标 | 旧 `wallTestFrom2D` | `fov.makeWallTest` |
- * |---|---|---|
- * | (0,0) | **true（是墙）** | false（不是墙） |
- * | (1,0) | **false** | **true** |
- *
- * 两处结论**全部相反**。后果是：视野从实体墙里穿出去、或从空地撞上看不见的墙；
- * 两个模块各自单测全绿，接在一起全错，且没有任何报错——
- * 这类"接口对齐错误"只能靠默认值一致来防。
- *
- * 现在两边默认值都是 `[1]`（1 = 墙，与 `AStar` 的 `GridMap` 约定一致：
- * 0 = 可通行，非 0 = 阻挡）。
- *
- * ⚠️ 老代码如果依赖旧的 `[0]` 默认值，请**显式传 `[0]`**，
- * 不要依赖默认值——默认值只应该表达"库推荐的通用约定"。
  */
 export function wallTestFrom2D(
   grid: ReadonlyArray<ReadonlyArray<number>>,
-  wallValues: readonly number[] = [1],
+  wallValues: readonly number[] = [0],
 ): (x: number, y: number) => boolean {
   const set = new Set(wallValues);
   const h = grid.length;
@@ -249,21 +176,6 @@ export interface ICasterHitLike {
  * 不转换直接传的话，`hit.id` 是 undefined，
  * 然后一路传到伤害结算——表现为"技能打中了但没伤害"，不报错。
  *
- * 【⚠️ 复用数组 `opts.out` 的坑（本次补充说明）】
- * 传了 `opts.out` 之后，**每次调用都会先 `out.length = 0` 清空它**。
- * 也就是说：
- *
- * ```typescript
- * const buf: ICasterHitLike[] = [];
- * const a = toCasterHits(hitsA, { out: buf });   // a === buf
- * const b = toCasterHits(hitsB, { out: buf });   // b === buf，且 a 也变成了 hitsB 的结果！
- * ```
- *
- * `a` 和 `b` 是**同一个数组对象**。典型踩法：
- * "先算近战命中，再算 AOE 命中，然后发现近战的结果被 AOE 覆盖了"。
- * 这不是 bug（复用数组本来就是为了省分配），但**必须知道**——
- * 所以写在这里：要么每次调用后立刻消费结果，要么别复用同一个 out。
- *
  * 【可选：按距离排序】
  * `sortByDistance` 默认开启。近战要"只打最近的一个"时，
  * 排序后取 [0] 即可；AOE 无所谓顺序，但排序开销可忽略。
@@ -298,33 +210,13 @@ export function nearestCasterHits(
   n: number,
   out: ICasterHitLike[] = [],
 ): ICasterHitLike[] {
-  /**
-   * 【⚠️ 为什么要把 `n <= 0` 改成 `!(count > 0)` 并先收口】
-   *
-   * 原写法 `if (n <= 0) return` 对 NaN **恒为 false**（NaN 与任何值比较都是 false），
-   * 于是 `n = NaN` 时会一路走到 `Math.min(NaN, sorted.length)` → NaN，
-   * `i < NaN` 恒为 false → **循环一次都不执行，返回空数组**。
-   *
-   * 后果：技能配置表里 `targetCount` 漏填 → 技能静默打不中任何目标，
-   * 不报错、不告警，玩家只觉得"这个技能有时候没伤害"。
-   *
-   * 【为什么不在 NaN 时抛错】
-   * 这里命中数来自技能配置的场景很常见，抛错会把一次技能释放变成崩溃。
-   * 收口成 0（= 不取任何目标，与显式传 0 的既有契约一致）更安全。
-   *
-   * 【注意】收口后 NaN 的结果**仍然是空数组**——和修复前偶然得到的一样，
-   * 但现在是"显式落到 0 分支"，而不是"靠 Math.min 的 NaN 传播恰好不循环"。
-   * 依赖巧合的代码在重构（比如把 Math.min 换成手写循环）时会突然变成全量命中。
-   */
-  const count = numOr(n, 0);
-  if (!(count > 0)) {
+  if (n <= 0) {
     out.length = 0;
     return out;
   }
   const sorted = [...hits].sort((a, b) => a.distance - b.distance);
   out.length = 0;
-  const take = Math.min(Math.floor(count), sorted.length);
-  for (let i = 0; i < take; i++) {
+  for (let i = 0; i < Math.min(n, sorted.length); i++) {
     const hb = sorted[i].hitbox;
     out.push({ id: hb.id, x: hb.x, y: hb.y, data: hb.data });
   }
@@ -432,38 +324,13 @@ export interface DroppedItem {
  */
 export function flattenDrops(
   drops: readonly ILootDropLike[],
-  opts: { mergeSameId?: boolean; path?: readonly string[]; maxDepth?: number } = {},
+  opts: { mergeSameId?: boolean; path?: readonly string[] } = {},
 ): DroppedItem[] {
   const merge = opts.mergeSameId !== false;
-  /**
-   * 【⚠️ 为什么必须给递归定深度上限】
-   *
-   * `walk` 会无条件递归 `d.children`。掉落表一旦出现**自引用**
-   * （配表时把某个子表填成了它自己，或 A→B→A 的环），
-   * 递归就永不终止，进程直接 `RangeError: Maximum call stack size exceeded` 崩掉。
-   *
-   * 实测：
-   * ```typescript
-   * const a = { id: 'a', count: 1 }; a.children = [a];
-   * flattenDrops([a]);   // RangeError: Maximum call stack size exceeded
-   * ```
-   *
-   * 更要命的是**爆栈发生在掉落结算那一刻**——玩家刚打死 Boss、正要弹结算界面时崩溃，
-   * 而且是崩溃不是报错，连"哪个表配错了"都无从查起。
-   * 定上限后改成抛一条带路径的明确错误，配置错误当场可见。
-   */
-  const maxDepth = Math.max(1, Math.floor(numOr(opts.maxDepth, 32)));
   const out: DroppedItem[] = [];
   const index = new Map<string, DroppedItem & { count: number }>();
 
-  const walk = (list: readonly ILootDropLike[], parentPath: readonly string[], depth: number): void => {
-    if (depth > maxDepth) {
-      throw new RangeError(
-        `[adapters] flattenDrops 掉落表嵌套超过 ${maxDepth} 层（当前路径：${parentPath.join('/') || '(根)'}）。` +
-          `合法的掉落表不该嵌套这么深——八成是子表环形引用了自己。` +
-          `若业务确实需要，请显式传 opts.maxDepth。`
-      );
-    }
+  const walk = (list: readonly ILootDropLike[], parentPath: readonly string[]): void => {
     for (const d of list) {
       const path = [...parentPath, d.id];
 
@@ -474,7 +341,7 @@ export function flattenDrops(
 
       // ② 递归子表
       if (d.children && d.children.length > 0) {
-        walk(d.children, path, depth + 1);
+        walk(d.children, path);
       }
     }
   };
@@ -496,7 +363,7 @@ export function flattenDrops(
     out.push(item);
   }
 
-  walk(drops, opts.path ?? [], 1);
+  walk(drops, opts.path ?? []);
   return out;
 }
 
