@@ -171,9 +171,18 @@ export class CameraFollow {
     this._dzX = this._deadZoneValue(opts.deadZone?.x ?? DEFAULTS.deadZoneX, 'x');
     this._dzY = this._deadZoneValue(opts.deadZone?.y ?? DEFAULTS.deadZoneY, 'y');
     this._smoothTime = Math.max(0, numOr(opts.smoothTime, DEFAULTS.smoothTime));
-    this._laFactor = opts.lookAheadFactor ?? DEFAULTS.lookAheadFactor;
-    this._laMaxX = opts.lookAheadMax?.x ?? DEFAULTS.lookAheadMaxX;
-    this._laMaxY = opts.lookAheadMax?.y ?? DEFAULTS.lookAheadMaxY;
+    /**
+     * 【为什么这里必须用 numOr 而不是 ??】
+     * `??` 只挡 undefined/null，**挡不住 NaN**。
+     * `lookAheadFactor` 来自策划表/存档，NaN 会一路穿透：
+     * `clamp(vx * NaN, -max, max)` 得到 NaN（clamp 的两次比较对 NaN 都是 false），
+     * 于是 `_laX` 变 NaN → 相机坐标变 NaN → 整个画面消失，且不会报错。
+     * 实测（dt=1/60，目标速度 10）：`lookAheadFactor: NaN` → `x = NaN`。
+     */
+    this._laFactor = numOr(opts.lookAheadFactor, DEFAULTS.lookAheadFactor);
+    // 同理：max 是 NaN 时 clamp 也拦不住，一并收口
+    this._laMaxX = numOr(opts.lookAheadMax?.x, DEFAULTS.lookAheadMaxX);
+    this._laMaxY = numOr(opts.lookAheadMax?.y, DEFAULTS.lookAheadMaxY);
     this._laSmoothTime = Math.max(0, numOr(opts.lookAheadSmoothTime, DEFAULTS.lookAheadSmoothTime));
     this._teleportThreshold = opts.teleportThreshold ?? DEFAULTS.teleportThreshold;
     this._maxSpeed = opts.maxSpeed ?? DEFAULTS.maxSpeed;
@@ -323,13 +332,27 @@ export class CameraFollow {
      * 每帧位移（此前它只夹了偏差，却仍以原始 target 为基准插值，
      * 导致"目标瞬移 10000px 时相机一帧跳到 9999"）。
      *
-     * 【为什么这里仍然保留二次夹取】
-     * smoothDamp 的 maxSpeed 是**近似**上限——稳态时瞬时速度可达
-     * 约 `2 × maxSpeed`（omega = 2/smoothTime 放大了 change 项）。
-     * 相机对"每帧位移"的要求是硬性的，所以这里再夹一次真实位移，
-     * 保证上限是 `maxSpeed * dt` 而不是它的两倍。
+     * 【W3-A 复核（2026-09-07）：这层不是多余的补丁，别删】
+     * 实测（dt=1/60 × 600 帧，maxSpeed=10，目标在 10000 处）：
+     *   - 单帧位移上限 = 0.159681 ≤ maxSpeed·dt = 0.166667 ✓
+     *   - 10 秒共前进 95.51（≈ maxSpeed×10s = 100）✓ 没有被双重限速拖慢
+     * 结论：`_core` 修好之后，两层各自负责一件事，叠加没有产生偏差。
      *
-     * 也就是说：smoothDamp 负责"不闪现"，这里负责"不超速"。
+     * 【⚠️ 保留理由已由 W3-A 二次修正（2026-09-08），旧理由作废】
+     *
+     * 旧注释写的是"smoothDamp 的 maxSpeed 是近似上限，稳态时瞬时速度
+     * 可达约 2×maxSpeed，所以这里再夹一次"。
+     * **这个理由经实测证伪**：W3-A 扫 216 组、W3-B 扫 240 组参数
+     * （dt × smoothTime × maxSpeed × 目标距离），
+     * 每帧位移 / (maxSpeed·dt) 峰值 = **0.995**（W3-B：0.996），
+     * 超过 1×maxSpeed·dt 的帧数 = **0**，更不用说 2×。
+     *
+     * 也就是说：这层 clamp 在 `_core` 修好之后**从未被观测到触发**。
+     * 保留它是"冗余但无害的防御"——单帧位移对相机是硬约束，
+     * 多一层兜底成本极低；但**不要再用"会超速 2 倍"来给它找理由**，
+     * 那条错误归因会误导下一个读者去加第三层。
+     *
+     * 真要动它之前，请先重跑参数扫描，而不是引用本注释的历史版本。
      */
     if (this._maxSpeed < Infinity) {
       const lim = this._maxSpeed * dt;
@@ -373,6 +396,27 @@ export class CameraFollow {
     this._initialized = false;
     this._lastInDeadZone = false;
     this._resetVelocity();
+  }
+
+  /**
+   * 卸载（rule5：有 install 就必须有对应的卸载入口）
+   *
+   * 【为什么 CameraFollow 也要有 destroy】
+   * 同单元的 `CameraShake` 有 `destroy()` 而 `CameraFollow` 没有，
+   * 调用方会困惑"这俩到底要不要 destroy"。契约应当对齐。
+   *
+   * 【它和 reset 的区别】
+   * `reset()` 是"回到初始状态、还能继续用"；
+   * `destroy()` 是"这个对象不要了"——额外丢掉外部传进来的 `bounds` 引用，
+   * 让关卡数据能被 GC 回收。
+   *
+   * 【为什么 destroy 之后不抛错】
+   * 本类没有监听器/定时器，误用 destroy 后的对象只会得到"不跟随"的结果，
+   * 不会崩。加运行时校验的收益低于它带来的调用点噪音。
+   */
+  destroy(): void {
+    this._bounds = null;
+    this.reset();
   }
 
   // ==================== 内部 ====================

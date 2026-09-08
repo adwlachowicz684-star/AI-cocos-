@@ -45,6 +45,8 @@
  * 集中在一处才能避免"改了设置但某个系统没跟着变"。
  */
 
+import { clampNum } from '../_core/math';
+
 // ==================== 类型 ====================
 
 export type ColorBlindMode = 'none' | 'protanopia' | 'deuteranopia' | 'tritanopia';
@@ -95,26 +97,47 @@ export class Accessibility {
   private _oneHanded: 'off' | 'left' | 'right';
   private _longPressMs: number;
   private _shakeScale: number;
-  private readonly _onChange?: (key: string, value: unknown) => void;
+  /**
+   * 不再用 readonly：destroy() 要能断开它（见文末 destroy 的注释）。
+   */
+  private _onChange?: (key: string, value: unknown) => void;
 
   constructor(opts: AccessibilityOptions = {}) {
+    /**
+     * 【⚠️ 构造必须与 setter 同口径（P1）】
+     *
+     * 修复前这里只写 `if (this._fontScale <= 0) throw`，
+     * 而 `NaN <= 0` 恒为 false —— **NaN 直接穿透校验**。
+     * 后果不是"报错没报对"，而是 `fontSize(base) = base * NaN = NaN`：
+     * 全 UI 字号变成 NaN，文本渲染异常或整块消失，且不抛任何错。
+     * NaN 一旦进了布局，要回溯很久才能定位到"是构造参数带了 NaN"。
+     *
+     * 同一处还有第二个口径问题：`shakeScale` 构造时原样收下任意值
+     * （`new Accessibility({ shakeScale: 5 })` 得到 5），
+     * 但 `setShakeScale(5)` 会夹到 1。于是"构造传 5 生效、重设被压到 1"，
+     * 行为随调用路径变化——这类不一致比单纯的越界更难查。
+     *
+     * 修法：三个数值字段统一走 `clampNum`（与 setter 完全一致的区间），
+     * 只对 fontScale 保留"非正数直接抛错"的既有契约。
+     *
+     * 【为什么 fontScale 的判定写成 `!(v > 0)` 而不是 `v <= 0`】
+     * `v <= 0` 对 NaN 为 false（穿透），`!(v > 0)` 对 NaN 为 true（拦住）。
+     * 见全库共享模式 A：否定式条件天然漏掉 NaN。
+     */
+    if (opts.fontScale !== undefined && !(opts.fontScale > 0)) {
+      throw new Error(`[A11y] 字号缩放必须为正，收到 ${opts.fontScale}`);
+    }
+
     this._reduceMotion = opts.reduceMotion ?? false;
     this._colorBlind = opts.colorBlind ?? 'none';
-    this._fontScale = opts.fontScale ?? 1;
+    this._fontScale = clampNum(opts.fontScale, 0.8, 2, 1);
     this._highContrast = opts.highContrast ?? false;
     this._subtitles = opts.subtitles ?? false;
     this._subtitleSpeaker = opts.subtitleSpeaker ?? true;
     this._oneHanded = opts.oneHanded ?? 'off';
-    this._longPressMs = opts.longPressMs ?? 600;
-    this._shakeScale = opts.shakeScale ?? 1;
+    this._longPressMs = clampNum(opts.longPressMs, 200, 3000, 600);
+    this._shakeScale = clampNum(opts.shakeScale, 0, 1, 1);
     this._onChange = opts.onChange;
-
-    if (this._fontScale <= 0) {
-      throw new Error(`[A11y] 字号缩放必须为正，收到 ${this._fontScale}`);
-    }
-    if (this._longPressMs < 0) {
-      throw new Error(`[A11y] 长按阈值不能为负，收到 ${this._longPressMs}`);
-    }
   }
 
   // ==================== 读取 ====================
@@ -223,22 +246,20 @@ export class Accessibility {
    */
   shouldPlay(kind: EffectKind): boolean {
     if (!this._reduceMotion) return true;
-    switch (kind) {
-      case 'shake':
-      case 'sway':
-      case 'flash':
-        // 这三类是"减少动效"最核心要关掉的（前庭不适主要来源）
-        return false;
-      case 'transition':
-      case 'autoCamera':
-        return false;
-      case 'particle':
-      case 'loopAnim':
-        // 装饰性表现可以保留（不引起不适），但由调用方决定是否减弱
-        return true;
-      default:
-        return true;
-    }
+    /**
+     * 【P2：两支都返回 false，合并成一句】
+     *
+     * 修复前 switch 里 `shake/sway/flash` 与 `transition/autoCamera`
+     * 是两个独立的 case 组，但**返回值完全相同**。
+     * 这种写法会让人误以为"这两组的开关策略将来会分开"，
+     * 于是改动时只敢动其中一组——事实上它们现在就是同一条规则：
+     * 只要开了减少动效，**所有会引起前庭不适的画面运动都要停**。
+     *
+     * 反过来写（保留 particle / loopAnim）也有好处：
+     * 新增 EffectKind 时，默认是"关掉"而不是"播放"——
+     * 未知表现放行，等于让一个没被评估过的动效在前庭敏感玩家面前播出来。
+     */
+    return kind === 'particle' || kind === 'loopAnim';
   }
 
   /**
@@ -369,5 +390,25 @@ export class Accessibility {
     if (typeof s.shakeScale === 'number' && Number.isFinite(s.shakeScale)) {
       this.setShakeScale(s.shakeScale);
     }
+  }
+
+  // ==================== 卸载 ====================
+
+  /**
+   * 卸载（P2）
+   *
+   * 【为什么需要有 destroy】
+   * 本单元持有 `onChange` 回调。这个回调通常指向 UI 层的闭包，
+   * 闭包又持有 UI 节点/组件。设置界面销毁后，如果不主动断开，
+   * 实例还活着 → 闭包还活着 → 整棵 UI 子树无法被回收。
+   * 表现是"切几次设置界面就涨几 MB"，且不报任何错。
+   *
+   * 【为什么不断开就不行】
+   * 没有 install / 没有定时器，看起来"没什么可清理的"，
+   * 于是很容易认为 destroy 是空方法而省略它——
+   * 真正要清的就是这一个引用。
+   */
+  destroy(): void {
+    this._onChange = undefined;
   }
 }

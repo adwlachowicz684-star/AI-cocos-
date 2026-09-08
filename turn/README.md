@@ -69,7 +69,7 @@ turn.orderPreview;            // ['boss','hero','goblin']（UI 行动条）
 | 成员 | 说明 |
 |---|---|
 | `addUnit(unit)` | 添加。重复返回 false |
-| `start(shuffleEqual?)` | 开始（排序）。没单位会抛错 |
+| `start(shuffleEqual?, rng?)` | 开始（排序）。没单位会抛错 |
 | `endTurn()` | 结束当前，返回是否成功 |
 | `skip()` | 跳过当前（不触发 onUnitEnd） |
 | `killUnit(id)` / `reviveUnit(id)` | 死亡 / 复活 |
@@ -87,3 +87,16 @@ turn.orderPreview;            // ['boss','hero','goblin']（UI 行动条）
 > ⚠️ **用 `isOutOfAP` 判断该不该结束回合，不要自己数 `spendAP` 次数。**
 > 有"额外行动点"buff 时，自己算的次数和实际不符——
 > 表现为「还能行动，但游戏强制结束了回合」。
+
+> ⚠️ **同先攻的顺序：只有同时传 `shuffleEqual = true` 和 `rng` 才会真打乱。**
+> 早期版本 `start(true)` 看起来承诺打乱，实际 ES2019 起 `Array.sort` 保证稳定，
+> 同先攻永远按添加顺序走——回合制里"谁先手"往往决定胜负，
+> 于是配了打乱的游戏实际在给"先加入的一方"系统性先手优势。
+>
+> 现在拆成两条路：
+> - `start()` / `start(true)` **不传 rng** → 同先攻保持添加顺序（与旧行为一致，不破坏既有调用方）
+> - `start(true, rng)` → 对同先攻的连续段做 Fisher-Yates 真打乱，**同种子可复现**
+>
+> ```typescript
+> turn.start(true, new FixedRandomSource([0.9, 0.1, 0.5]));   // 可复现的先手顺序
+> ```

@@ -1,4 +1,5 @@
 import { clampNum, numOr } from '../_core/math';
+import { IRandomSource, MathRandomSource } from '../_core/types';
 /**
  * CrashReporter —— 崩溃捕获与上报
  *
@@ -134,6 +135,24 @@ export interface CrashReporterOptions {
   readonly onError?: (e: unknown, report: CrashReport) => void;
   /** 生成前的最后一次修改机会（可返回 null 丢弃该报告） */
   readonly beforeSend?: (r: CrashReport) => CrashReport | null;
+  /**
+   * 采样用的随机源（默认 `MathRandomSource`）
+   *
+   * 【为什么必须可注入】
+   * 采样决策也是随机行为。用裸 `Math.random()` 的话：
+   * - 单元测试只能写"大致 50%"这种不稳定断言
+   * - 线上无法用固定种子复现"为什么这条崩溃没上报"
+   *
+   * 注入 `FixedRandomSource([...])` 就能精确控制每一次采样结果。
+   */
+  readonly random?: IRandomSource;
+  /**
+   * 指纹表容量上限（默认 1000）
+   *
+   * 【为什么要设上限】见 `_seen` 的注释：指纹表只增不减，
+   * 崩溃风暴下会持续膨胀，且 `stats()` 每次全表排序随之劣化。
+   */
+  readonly maxFingerprints?: number;
 }
 
 // ==================== 面包屑环 ====================
@@ -173,8 +192,23 @@ export class CrashReporter {
   private readonly _onError?: (e: unknown, r: CrashReport) => void;
   private readonly _beforeSend?: (r: CrashReport) => CrashReport | null;
 
-  /** 指纹 → { 次数, 上次上报时间 } */
+  /**
+   * 指纹 → { 次数, 上次上报时间 }
+   *
+   * 【⚠️ 为什么必须限制容量】
+   * 指纹 = 错误类型 + 首个堆栈帧，线上一个复杂应用去重后的指纹数可以上万，
+   * 而这张表**只增不减**——唯一清理入口是 `reset()`，用户不会在运行时调。
+   * 崩溃风暴时（大量不同指纹）它会持续膨胀，
+   * 而 `stats()` 每次都 `[...entries].map().sort()` 全表排序，随指纹数线性劣化。
+   *
+   * 所以：容量到了就淘汰最久没上报的（LRU），
+   * 顺带把"窗口早就过了"的陈旧条目清掉。
+   */
   private readonly _seen = new Map<string, { count: number; lastSent: number }>();
+  /** 指纹表容量上限 */
+  private readonly _maxFingerprints: number;
+  /** 采样用随机源 */
+  private readonly _rng: IRandomSource;
 
   private _context: Record<string, unknown> = {};
   private _startTime = Date.now();
@@ -208,6 +242,8 @@ export class CrashReporter {
     this._dedupeWindow = Math.max(0, numOr(opts.dedupeWindow, 60000));
     this._onError = opts.onError;
     this._beforeSend = opts.beforeSend;
+    this._rng = opts.random ?? MathRandomSource;
+    this._maxFingerprints = clampNum(opts.maxFingerprints, 1, 1e6, 1000);
 
     if (opts.autoCapture) this.install();
   }
@@ -306,10 +342,14 @@ export class CrashReporter {
 
     // 首次，或窗口已过：上报，并把窗口起点重置为现在
     this._seen.set(fingerprint, { count, lastSent: now });
+    this._evictSeen(now);
 
     // 采样（只对非致命错误采样；崩溃永远上报）
+    //
+    // 【为什么用注入的随机源而不是 Math.random()】
+    // 见 `CrashReporterOptions.random`：采样决策必须可复现、可测试。
     if (severity !== 'fatal' && this._sampleRate < 1) {
-      if (Math.random() > this._sampleRate) return false;
+      if (this._rng.next() > this._sampleRate) return false;
     }
 
     let report: CrashReport = {
@@ -453,6 +493,49 @@ export class CrashReporter {
     this._seen.clear();
     this._ring.clear();
     this._startTime = Date.now();
+  }
+
+  /**
+   * 淘汰指纹表里的陈旧条目
+   *
+   * 【两轮淘汰，顺序有讲究】
+   *
+   * 第一轮：清掉"窗口早就过了"的陈旧条目（保留期 = dedupeWindow × 10）。
+   * 它们已经上报过，留着只会让 stats() 越来越慢。
+   *
+   * 第二轮：仍超过容量上限时，按**最久未上报**淘汰（LRU）。
+   *
+   * 【为什么用 10 倍窗口当保留期，而不是窗口本身】
+   * 窗口一过就把条目删掉的话，下次同指纹再出现时 `count` 从 1 重新开始——
+   * 服务端丢掉了"这个 bug 累计发生过多少次"的信息，
+   * 而那正是去重机制存在的意义（窗口内累加就是为了这个）。
+   * 留 10 倍窗口的余量，既不会让表无意义地膨胀，
+   * 又能在短期内复发时接上计数。
+   *
+   * 【为什么 dedupeWindow 为 0 时不做第一轮】
+   * window=0 表示"不去重，每次都上报"，此时 staleMs=0，
+   * 每个条目都会立刻被判为陈旧 → 计数永远接不上。
+   * 所以 dedupeWindow<=0 时跳过过期清理，只做容量淘汰。
+   */
+  private _evictSeen(now: number): void {
+    if (this._dedupeWindow > 0) {
+      const staleMs = this._dedupeWindow * 10;
+      for (const [k, v] of this._seen) {
+        if (now - v.lastSent > staleMs) this._seen.delete(k);
+      }
+    }
+
+    if (this._seen.size <= this._maxFingerprints) return;
+
+    // 按 lastSent 升序淘汰最旧的（Map 的插入顺序≠最近使用顺序，
+    // 所以这里显式排序；只在超限时才做，平时零开销）
+    const ordered = [...this._seen.entries()].sort((a, b) => a[1].lastSent - b[1].lastSent);
+    let over = this._seen.size - this._maxFingerprints;
+    for (const [k] of ordered) {
+      if (over <= 0) break;
+      this._seen.delete(k);
+      over--;
+    }
   }
 
   private _collectLogs(): ILogEntryLike[] {

@@ -84,6 +84,22 @@ export interface CommandStackOptions {
   readonly onChange?: () => void;
   /** 命令执行后的日志（用于调试，不需要可省略） */
   readonly onLog?: (action: 'do' | 'undo' | 'redo', cmd: ICommand) => void;
+  /**
+   * 事务回滚中某条命令 `undo()` 抛错时的回调
+   *
+   * 【为什么需要】见 `rollback()` 的说明：回滚失败曾经是**完全静默**的。
+   * 配了这个回调后，错误由调用方（通常是上报通道 / Logger）接管，
+   * 不会再落到 console 兜底。
+   */
+  readonly onRollbackError?: (error: unknown, cmd: ICommand) => void;
+}
+
+/** 回滚失败明细 */
+export interface RollbackError {
+  /** 哪条命令的 undo 失败了 */
+  readonly cmd: ICommand;
+  /** 抛出的内容（可能是任何值，故为 unknown） */
+  readonly error: unknown;
 }
 
 export interface CommandStackSnapshot {
@@ -99,11 +115,15 @@ export class CommandStack {
   private readonly _limit: number;
   private readonly _onChange?: () => void;
   private readonly _onLog?: (a: 'do' | 'undo' | 'redo', c: ICommand) => void;
+  private readonly _onRollbackError?: (error: unknown, cmd: ICommand) => void;
 
   /** 事务嵌套深度（>0 时命令进缓冲区，提交时才入栈） */
   private _txDepth = 0;
   private _txBuffer: ICommand[] | null = null;
   private _txName = '';
+
+  /** 上一次 `rollback()` 的失败明细（无失败时为空数组） */
+  private _lastRollbackErrors: readonly RollbackError[] = [];
 
   constructor(opts: CommandStackOptions = {}) {
     // 【为什么不能用 Math.max(1, opts.limit ?? 100)】
@@ -116,6 +136,7 @@ export class CommandStack {
     this._limit = clampNum(opts.limit, 1, 1e6, 100);
     this._onChange = opts.onChange;
     this._onLog = opts.onLog;
+    this._onRollbackError = opts.onRollbackError;
   }
 
   // ==================== 查询 ====================
@@ -321,7 +342,29 @@ export class CommandStack {
   /**
    * 回滚事务（撤销已执行的部分）
    *
-   * @returns 回滚的命令数
+   * 【⚠️ 曾经的 bug：单条 undo 抛错被空 catch 吞掉】
+   *
+   * 原写法是 `try { buffer[i].undo(); } catch { }`，
+   * 注释写着「单条回滚失败不能中断整体回滚，否则残留更多脏状态」——
+   * **这个意图是对的，但实现把「不中断」做成了「完全无声」**。
+   *
+   * 后果：undo 失败时（依赖的资源已释放、外部状态被别的系统改写、
+   * 或正如 `do()` 文档所说——对一条 execute 都没跑完的命令调 undo），
+   * 调用方拿到的是"回滚成功"这个返回值，
+   * 于是事务在调用方眼里干干净净，世界却停在中间态。
+   * 静默降级比崩溃更难查：崩溃至少有堆栈。
+   *
+   * 【现在的做法】
+   * 仍然**不中断**整体回滚（继续撤销剩下的命令，残留越少越好），
+   * 但每条失败都会留下痕迹：
+   *   ① 记进 `_lastRollbackErrors`（可通过 `lastRollbackErrors` 读）；
+   *   ② 通知 `onRollbackError` 回调（建议接 Logger / 上报通道）；
+   *   ③ 没配回调时才用 `console.error` 兜底——宁可吵，也不要无声。
+   *
+   * @returns 回滚的命令数。
+   *          **语义未变**：仍是"尝试撤销的命令条数"，不是"成功数"。
+   *          改成成功数或改成返回 `{rolledBack, errors}` 都会破坏既有调用方，
+   *          所以新增信息一律走旁路（getter / 回调），不动返回值。
    */
   rollback(): number {
     if (this._txDepth === 0) return 0;
@@ -330,15 +373,40 @@ export class CommandStack {
     const buffer = this._txBuffer ?? [];
     this._txBuffer = null;
 
+    const errors: RollbackError[] = [];
     for (let i = buffer.length - 1; i >= 0; i--) {
+      const cmd = buffer[i];
       try {
-        buffer[i].undo();
-      } catch {
-        // 单条回滚失败不能中断整体回滚，否则残留更多脏状态
+        cmd.undo();
+      } catch (e) {
+        errors.push({ cmd, error: e });
+        if (this._onRollbackError) {
+          this._onRollbackError(e, cmd);
+        } else {
+          // 【为什么兜底打 console.error】
+          // 回滚失败是数据不一致的信号，默认必须能被看见。
+          // 想静音就配 `onRollbackError`，由调用方决定是否上报——
+          // 而不是让库自己假装什么都没发生。
+          console.error(`[command] 事务回滚失败：命令「${cmd.name}」的 undo() 抛错`, e);
+        }
       }
     }
+
+    // 【为什么是覆盖而不是累加】
+    // 这是"上一次回滚"的诊断快照。跨多次回滚累加会混进早已处理过的旧错误，
+    // 反而看不清本次到底哪条炸了。
+    this._lastRollbackErrors = errors;
     this._onChange?.();
     return buffer.length;
+  }
+
+  /**
+   * 上一次 `rollback()` 中 undo 抛错的明细（全部成功时为空数组）
+   *
+   * 【用途】事务失败后自检："世界真的回滚干净了吗？"
+   */
+  get lastRollbackErrors(): readonly RollbackError[] {
+    return this._lastRollbackErrors;
   }
 
   /**

@@ -43,7 +43,7 @@
  * 【零业务依赖】
  */
 
-import { clamp } from '../_core/math';
+import { clampNum } from '../_core/math';
 
 // ==================== 类型 ====================
 
@@ -62,6 +62,32 @@ export interface Stats {
   readonly sum: number;
   /** 数值指标平方和 */
   readonly sumSq: number;
+  /**
+   * 求和时减去的常数基准（方差"两遍算法"的第一遍结果）
+   *
+   * 【为什么需要它】
+   * `sum` / `sumSq` 记的是 **Σ(x − shift)** 与 **Σ(x − shift)²**，
+   * 不再直接记 Σx 与 Σx²。
+   *
+   * 原因见 `variance()` 的注释：直接存 Σx² 时，
+   * `Σx² − n·m²` 会在"大基数小波动"下被灾难性消去抹平成 0。
+   * 先把量级减掉再求和，减出来的差值就保留了全部有效位。
+   *
+   * 【为什么是 optional】
+   * 外部（存档、测试、手算）构造的 Stats 字面量不带它是合法的，
+   * 此时语义等价于 shift = 0，所有公式退化为修复前的写法。
+   *
+   * 【⚠️ 不要手工合并 Stats（交叉验收时实测出的边界）】
+   * `shift` 取的是**第一批第一个样本**的量级，不是全局常量。
+   * 若把两个不同时期 / 不同量级的 Stats 手工相加
+   * （实测：`{n:2, sum:2, sumSq:2, shift:1e9}` → `mean` 算成 1000000001），
+   * 结果毫无意义，且不报错。要合并请**一律用 `record*` 逐条喂**，
+   * 让 `shiftOf` 自己维护基准。
+   *
+   * 同理：外部用字面量构造"大数量级"的 Stats（带 shift 但不是本模块算出来的），
+   * 精度会退化回旧写法——这是该表示的固有边界，不是 bug。
+   */
+  readonly shift?: number;
 }
 
 export interface ZTestResult {
@@ -167,7 +193,18 @@ export function bucketOf(id: string, salt: string): number {
  * 分组互相独立，避免实验间的交叉污染。
  */
 export function assign(id: string, cfg: ExperimentConfig): Variant {
-  const pct = cfg.treatmentPercent ?? 50;
+  /**
+   * 【⚠️ 为什么这里也要收口（P2）】
+   * 构造函数校验了 `treatmentPercent` 的 0~100，
+   * 但 `assign` 是**公开导出的独立函数**——
+   * 调用方完全可以不经过 `Experiment` 直接拿一个配置对象来调它。
+   *
+   * 修复前 `?? 50` 只挡 null/undefined，NaN 穿过去：
+   * `bucket < NaN` 恒为 false → **200 人全部落进 control**（实测），
+   * 实验组永远 0 人，且没有任何报错。
+   * 表现为"这个实验怎么一直没有实验组数据"，排查方向很容易被引到哈希函数上。
+   */
+  const pct = clampNum(cfg.treatmentPercent, 0, 100, 50);
   const bucket = bucketOf(id, cfg.name);
   return bucket < pct ? 'treatment' : 'control';
 }
@@ -206,24 +243,59 @@ export function emptyStats(): Stats {
   return { n: 0, conversions: 0, sum: 0, sumSq: 0 };
 }
 
+/**
+ * 取本批样本共用的移位基准
+ *
+ * 【为什么用第一个样本当基准】
+ * 方差对平移不变（`Var(x − K) === Var(x)`），所以 K 取多少都不影响结果，
+ * 只要**同一批样本用同一个 K**。
+ * 取第一个样本是最省事且最贴近真实场景的选择：
+ * 埋点里的"大基数小波动"（ARPU 1e8 量级、时长 1e5 毫秒量级）
+ * 通常同一批样本彼此非常接近，第一个样本就在那个量级上，
+ * 减完之后剩下的是真正的波动部分，有效位全部保留。
+ */
+function shiftOf(s: Stats, sample: number): number {
+  if (s.n > 0) return s.shift ?? 0;
+  return Number.isFinite(sample) ? sample : 0;
+}
+
 /** 记录一次二值结果（转化/未转化） */
 export function recordBinary(s: Stats, converted: boolean): Stats {
   const v = converted ? 1 : 0;
+  const k = shiftOf(s, v);
+  const d = v - k;
   return {
     n: s.n + 1,
     conversions: s.conversions + (converted ? 1 : 0),
-    sum: s.sum + v,
-    sumSq: s.sumSq + v * v,
+    sum: s.sum + d,
+    sumSq: s.sumSq + d * d,
+    shift: k,
   };
 }
 
-/** 记录一次数值结果（时长、金额…） */
+/**
+ * 记录一次数值结果（时长、金额…）
+ *
+ * 【⚠️ 非有限值直接丢弃（P2）】
+ * 修复前 `sum + NaN` 会把整个 Stats 污染成 NaN，
+ * 之后 `mean` / `variance` / 显著性判定全部失效且**静默**。
+ *
+ * 为什么不记成 0：0 是一个"看起来合法"的样本，
+ * 它会把均值系统性拉低（ARPU 里混进几个 0，均值就偏了），
+ * 而且同样难查。直接丢弃这条样本、n 不增加，
+ * 至少"样本数少了几条"是一个能被对出来的数字。
+ */
 export function recordValue(s: Stats, value: number): Stats {
+  if (!Number.isFinite(value)) return s;
+
+  const k = shiftOf(s, value);
+  const d = value - k;
   return {
     n: s.n + 1,
     conversions: s.conversions,
-    sum: s.sum + value,
-    sumSq: s.sumSq + value * value,
+    sum: s.sum + d,
+    sumSq: s.sumSq + d * d,
+    shift: k,
   };
 }
 
@@ -232,7 +304,9 @@ export function conversionRate(s: Stats): number {
 }
 
 export function mean(s: Stats): number {
-  return s.n === 0 ? 0 : s.sum / s.n;
+  if (s.n === 0) return 0;
+  // sum 是移位后的和，要还原成真实量级必须加回 shift
+  return (s.shift ?? 0) + s.sum / s.n;
 }
 
 /**
@@ -244,9 +318,44 @@ export function mean(s: Stats): number {
  */
 export function variance(s: Stats): number {
   if (s.n < 2) return 0;
-  const m = mean(s);
-  // 用 Σx² − n·m² 计算，避免二次遍历
-  const v = (s.sumSq - s.n * m * m) / (s.n - 1);
+
+  /**
+   * 【⚠️ 为什么不能再用 Σx² − n·m²（P1）】
+   *
+   * 那个式子叫"一次遍历算法"，代价是**灾难性消去**：
+   * Σx² 与 n·m² 是两个几乎相等的大数，相减时有效位全部抵消掉，
+   * 剩下的主要是舍入噪声。实测（修复前）：
+   *
+   * ```
+   * [1e8+1, 1e8+2, 1e8+3, 1e8+4, 1e8+5]  → 2     （精确值 2.5，误差 20%）
+   * [1e9+7, 1e9+9, 1e9+11]               → 0     （精确值 4，被彻底抹平）
+   * ```
+   *
+   * 更糟的是末尾的 `Math.max(0, v)`：消去产生的**负数**被压成 0，
+   * 于是"精度崩了"这件事被伪装成"方差就是 0"。
+   * 后果是置信区间为 0、t 检验失效——
+   * ARPU 这类"大基数小波动"的实验会得出完全不可信的显著性结论。
+   *
+   * 【修法：两遍算法的等价形式】
+   * 真正的两遍算法要留着全部样本再扫一遍，这里没有样本
+   * （Stats 只有聚合值）。但方差有平移不变性：
+   *
+   * ```
+   * Var(x) === Var(x − K)
+   * ```
+   *
+   * 所以只要在**记录时**就把量级减掉（见 `shiftOf`），
+   * 方差就能用同样的一次遍历公式算，而消去被完全消除：
+   *
+   * ```
+   * Σd² − (Σd)²/n      d = x − K，K 取第一个样本
+   * ```
+   *
+   * 验证（修复后）：上面两组分别得到 2.5 与 4，与精确值一致。
+   * `Math.max(0, …)` 依旧保留——极小样本下仍可能有 1e-15 级的负噪声，
+   * 但现在它兜的是"真正的浮点噪声"，不再掩盖精度崩溃。
+   */
+  const v = (s.sumSq - (s.sum * s.sum) / s.n) / (s.n - 1);
   // 浮点误差可能让它轻微为负
   return Math.max(0, v);
 }
@@ -315,7 +424,21 @@ export function twoProportionZTest(control: Stats, treatment: Stats): ZTestResul
   // 双尾 p 值
   const p = 2 * (1 - normalCdf(Math.abs(z)));
 
-  return { z, p: clamp(p, 0, 1), lift: p1 === 0 ? 0 : (p2 - p1) / p1 };
+  /**
+   * 【⚠️ 为什么用 clampNum 而不是 clamp（P2）】
+   * `clamp` 内部是 `v < min ? min : v > max ? max : v`，
+   * 对 NaN 三条分支全不成立 → **原样返回 NaN**。
+   * （`Math.max(0, NaN)` 也是 NaN，同样挡不住。）
+   *
+   * `p = NaN` 的后果：`isSignificant` 里 `NaN < alpha` 恒为 false，
+   * 于是"永远不显著"——一个真的有效的改动会被判成无效而砍掉，
+   * 而且从结果上看和"真的没差异"一模一样。
+   *
+   * fallback 取 1（= 最不显著）而不是 0：
+   * 算不出 p 值时，正确的默认姿态是"没有证据表明有差异"，
+   * 而不是"有显著差异"。
+   */
+  return { z, p: clampNum(p, 0, 1, 1), lift: p1 === 0 ? 0 : (p2 - p1) / p1 };
 }
 
 /**
@@ -359,7 +482,18 @@ export function isSignificant(
  * 提前知道，就能改成检测更大的效应，或者干脆不做这个实验。
  */
 export function requiredSampleSize(baseline: number, lift: number): number {
-  if (baseline <= 0 || baseline >= 1) {
+  /**
+   * 【⚠️ 为什么改写判定形式（P2）】
+   * `baseline <= 0 || baseline >= 1` 对 NaN 两支都是 false → **NaN 被放行**，
+   * 一路算到 `Math.ceil(NaN)` 返回 NaN。
+   * 调用方拿到"每组需要 NaN 人"，常见后果是 `for` 循环一次都不跑，
+   * 或者进度条永远停在 0%。
+   *
+   * 改成肯定式 `!(baseline > 0 && baseline < 1)` 后，
+   * NaN 与越界值一样在这里被拒——见全库共享模式 A。
+   * （下面的 `lift` 早已是肯定式写法，两处口径至此一致。）
+   */
+  if (!(baseline > 0 && baseline < 1)) {
     throw new Error(`[ABTest] 基线转化率必须在 (0,1) 开区间，收到 ${baseline}`);
   }
   if (!(lift > 0)) {
@@ -550,6 +684,24 @@ export class Experiment {
   }
 
   reset(): void {
+    this._users.clear();
+  }
+
+  /**
+   * 卸载（P2）
+   *
+   * 【为什么要清 _users】
+   * 实验跑了几十万用户时，`_users` 是最大的一块内存，
+   * 而且它持有**原始 user id 字符串**——那是玩家标识，
+   * 实验结束后不该继续留在堆里。
+   *
+   * 【为什么不是 alias 到 reset】
+   * 名字要表达意图：`reset` 是"重新开始一轮实验"，
+   * `destroy` 是"这个实验结束了，资源可以收了"。
+   * 目前两者行为一致，但把 destroy 写成 reset 的别名，
+   * 将来给其中任何一个加逻辑时都会误伤另一个。
+   */
+  destroy(): void {
     this._users.clear();
   }
 }

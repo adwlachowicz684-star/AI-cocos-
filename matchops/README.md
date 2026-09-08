@@ -97,6 +97,13 @@ const rc = new ReconnectTracker({
 > 它需要在线名单来算分母（见本节第一条）。
 > 忘了更新的话，掉线的人仍占着分母，票永远投不出去。
 
+> ⚠️ **掉线玩家的票会被 `vote()` 直接拒绝（`not-connected`），与 `start()` 口径一致。**
+> 老实现里 `vote` 只查队伍与状态、不查在线，而计票时又把掉线者的票跳过：
+> 玩家看到"投票成功"，票数却一动不动，于是反复点、以为是网络问题。
+> 配合 `requireAllConnected: true`（默认）时，只要有一人掉线，
+> 投降永远无法达成，对局被拖到超时。
+> `status().ignoredVotes` 给出"已投但未被计入"的票数，UI 可据此提示。
+
 ## 3. Spectate · 观战
 
 ### 延迟是安全要求，不是体验选项
@@ -255,8 +262,17 @@ const j = spec.join('v1', now, { visibility: 'all' });
 | `ReconnectConfig` | `graceMs`（默认 120s）、`maxAttempts`（默认 3）、`teammatePenaltyRate` |
 | `ReconnectEntry` | `id` / `state` / `disconnectedAt` / `attempts` / 本次宽限期 |
 | `SurrenderConfig` | `teamSize`、`threshold`（默认 0.5） |
-| `SurrenderStatus` | `state` / `yes` / `no` / `eligible` / `needMore` |
+| `SurrenderStatus` | `state` / `yes` / `no` / `eligible` / `needMore` / `ignoredVotes` |
 | `SpectateConfig` | `delayMs`（默认 120s）、`allVisionMinDelayMs`（默认 300s）、`maxSpectators` |
+
+> ⚠️ **`graceMs` / `graceDecay` 为 NaN 时会回落到默认值，不会变成"永不过期"。**
+> `??` 只挡 `null` / `undefined`，挡不住 NaN。
+> 配置表里 `graceDecay` 算成 NaN 时，第一次 `Math.pow(NaN, 0) === 1`（**侥幸正确**，
+> 所以"第一次断线看起来是好的"），重连一次后宽限期直接变 NaN，
+> 而 `elapsed > NaN` 恒为 false → **任何时候重连都成功**、`tick` **永不判弃权**。
+> 后果是悬挂对局：队友掉线 3 小时，比赛一直不结束；
+> 而他既不是 `forfeited` 也不是 `exhausted`，队友连扣分减免都拿不到。
+> `graceDecay` 还会被限制在 `(0,1]`——大于 1 会让宽限期越重连越长，语义完全反了。
 
 **`graceMs` 怎么选**：
 太短 → 正常网络波动就被判负；太长 → 对手干等，体验极差。

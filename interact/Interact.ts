@@ -31,6 +31,24 @@ export interface Interactable<T = unknown> {
   /** 交互半径 */
   readonly radius: number;
   /**
+   * 物件位置。**不提供则视为"全局可交互"**（UI 按钮、随身菜单等），
+   * 不受距离与朝向限制。
+   *
+   * 【⚠️ 这个字段曾被"藏"在实现里】
+   * 旧版本 `evaluate()` 靠 `(item as unknown as { pos?: ... }).pos`
+   * 双重强转去读位置，而接口里**根本没有 `pos`**。
+   * 后果是双向的：
+   * - 按接口写 `register({ id, data, radius })` 完全合法，
+   *   运行时的行为却是"永远可交互"（distance=0 / inRange=true）——
+   *   类型层面完全看不出来；
+   * - 反过来，README 示例里的 `pos: { x, y }` 在 `strict` 下
+   *   会因多余属性检查**编译失败**，调用方只能自己 `as any`。
+   *
+   * 现在 `pos` 是接口的一等字段：不传 = 全局可交互（语义不变），
+   * 传了就有类型检查。
+   */
+  readonly pos?: { x: number; y: number; z?: number };
+  /**
    * 是否需要朝向它才能交互
    *
    * 【默认 true】
@@ -110,12 +128,32 @@ export interface InteractCandidate<T> {
 export class InteractSystem<T = unknown> {
   private readonly _items = new Map<string, Interactable<T>>();
   private readonly _used = new Map<string, number>();
-  private readonly _canInteract?: (i: Interactable<T>, c: InteractContext) => boolean;
+  // 【为什么这几个不是 readonly】destroy() 要能断掉它们持有的外部引用
+  private _canInteract?: (i: Interactable<T>, c: InteractContext) => boolean;
   private readonly _distance: (a: InteractContext['pos'], b: InteractContext['pos']) => number;
-  private readonly _onInteract?: (i: Interactable<T>, c: InteractContext) => void;
-  private readonly _onFocusChange?: (i: Interactable<T> | null) => void;
+  private _onInteract?: (i: Interactable<T>, c: InteractContext) => void;
+  private _onFocusChange?: (i: Interactable<T> | null) => void;
 
   private _focusedId: string | null = null;
+
+  /**
+   * 被 `setDisabled` 关掉的 id
+   *
+   * 【为什么不直接写 `item.disabled`】
+   * `Interactable.disabled` 是 `readonly` 字段，
+   * 写入要靠 `(it as { disabled?: boolean }).disabled = ...` 绕过类型系统。
+   * 对 `Object.freeze` 过的物件（配置表导出的常量、immer 产物很常见），
+   * 严格模式下这行会**直接抛 TypeError**：
+   *   `Cannot add property disabled, object is not extensible`
+   * 实测触发路径正是最要紧的那条——`interact()` 里"用完自动禁用"，
+   * 也就是说玩家开一个冻结的箱子会让游戏当场崩在这里。
+   *
+   * 所以真正的开关放在内部的两个 Set 里，物件上的 `disabled` 只是**镜像**，
+   * 且只在对象可写时才回写（保持 `get(id).disabled` 的旧行为不变）。
+   */
+  private readonly _disabled = new Set<string>();
+  /** 被显式重新启用的 id（用于盖住冻结物件上写不掉的 `disabled: true`） */
+  private readonly _reEnabled = new Set<string>();
 
   constructor(opts: InteractSystemOptions<T> = {} as InteractSystemOptions<T>) {
     this._canInteract = opts.canInteract;
@@ -146,21 +184,57 @@ export class InteractSystem<T = unknown> {
     return this._items.delete(id);
   }
 
-  /** 禁用 / 启用（破坏箱子后禁用） */
+  /**
+   * 禁用 / 启用（破坏箱子后禁用）
+   *
+   * 【为什么对冻结物件也安全】见 `_disabled` 的注释。
+   */
   setDisabled(id: string, disabled: boolean): void {
     const it = this._items.get(id);
     if (!it) return;
-    (it as { disabled?: boolean }).disabled = disabled;
+    this._markDisabled(id, disabled);
     if (disabled && this._focusedId === id) {
       this._focusedId = null;
       this._onFocusChange?.(null);
     }
   }
 
+  /**
+   * 清空全部注册
+   *
+   * 【⚠️ 清空必须通知 UI】
+   * 旧实现直接把 `_focusedId` 置 null 就结束了，
+   * `onFocusChange` 不会触发——屏幕上"按 E 开箱"的提示**留在原地**，
+   * 指向一个已经不存在的物件（切场景时最明显）。
+   * UI 的可见状态必须由一个通知来驱动，不能靠调用方记得手动清。
+   */
   clear(): void {
     this._items.clear();
     this._used.clear();
-    this._focusedId = null;
+    this._disabled.clear();
+    this._reEnabled.clear();
+    if (this._focusedId !== null) {
+      this._focusedId = null;
+      this._onFocusChange?.(null);
+    }
+  }
+
+  /**
+   * 卸载（rule5）
+   *
+   * 【为什么 `clear()` 不算卸载】
+   * `clear()` 只清本系统自己的记录，
+   * 而真正要断的是两条**指向外部**的引用：
+   * 1. `_items` 里存着注册方传进来的物件（它们往往还挂着场景节点）
+   * 2. 两个回调闭包——闭包会把整条作用域链拖到下一次 GC
+   *
+   * 所以 `destroy()` 在 `clear()` 之外再摘掉回调。
+   */
+  destroy(): void {
+    this.clear();
+    this._canInteract = undefined;
+    this._onInteract = undefined;
+    this._onFocusChange = undefined;
   }
 
   get(id: string): Interactable<T> | undefined {
@@ -222,7 +296,8 @@ export class InteractSystem<T = unknown> {
    * 评估一个候选（供 UI 显示全部候选，或调试）
    */
   evaluate(item: Interactable<T>, ctx: InteractContext): InteractCandidate<T> {
-    const pos = (item as unknown as { pos?: InteractContext['pos'] }).pos;
+    // `pos` 现在是 Interactable 的正式字段，不再需要双重强转
+    const pos = item.pos;
 
     /**
      * 【⚠️ 曾经的 bug：超出半径的东西被当成有效候选】
@@ -269,9 +344,19 @@ export class InteractSystem<T = unknown> {
       const c = this.evaluate(item, ctx);
       if (c.valid || c.reason) out.push(c);
     }
+    /**
+     * 【⚠️ 比较函数在"相等"时必须返回 0】
+     * 旧写法 `(a, b) => (this._better(a, b) ? -1 : 1)`：
+     * 两个候选等价时（同朝向档、同 priority、同距离），
+     * `better(a,b)` 与 `better(b,a)` 都是 false，于是**两个方向都返回 1**，
+     * 比较函数自相矛盾 → 排序结果取决于引擎的实现细节（V8 的插入/快排分界），
+     * 表现为"UI 上几个箱子的高亮顺序每次刷新都不一样"。
+     *
+     * 正确写法是"两个方向都不更好 → 0"（等价），保持输入顺序（稳定排序）。
+     */
     return out
       .filter((c) => c.valid)
-      .sort((a, b) => (this._better(a, b) ? -1 : 1));
+      .sort((a, b) => (this._better(a, b) ? -1 : this._better(b, a) ? 1 : 0));
   }
 
   // ==================== 执行交互 ====================
@@ -325,9 +410,42 @@ export class InteractSystem<T = unknown> {
   resetAll(): void {
     this._used.clear();
     for (const it of this._items.values()) {
-      (it as { disabled?: boolean }).disabled = false;
+      this._markDisabled(it.id, false);
     }
-    this._focusedId = null;
+    // 同 clear()：焦点没了要通知 UI，否则提示框指向不存在的物件
+    if (this._focusedId !== null) {
+      this._focusedId = null;
+      this._onFocusChange?.(null);
+    }
+  }
+
+  /**
+   * 记录启用/禁用，并尽力把结果镜像回物件上
+   *
+   * 【为什么回写要判 `Object.isFrozen`】
+   * 冻结对象写属性会抛 TypeError（严格模式），
+   * 而 `interact()` 用完之后要自动禁用——那条路径上抛错等于崩游戏。
+   * 冻结对象的开关只由内部 Set 决定，不再碰物件本身。
+   */
+  private _markDisabled(id: string, disabled: boolean): void {
+    if (disabled) {
+      this._disabled.add(id);
+      this._reEnabled.delete(id);
+    } else {
+      this._disabled.delete(id);
+      this._reEnabled.add(id);
+    }
+    const it = this._items.get(id);
+    if (it && !Object.isFrozen(it)) {
+      (it as { disabled?: boolean }).disabled = disabled;
+    }
+  }
+
+  /** 是否禁用（内部 Set 优先，冻结物件也能正确表达） */
+  private _isDisabled(item: Interactable<T>): boolean {
+    if (this._disabled.has(item.id)) return true;
+    if (this._reEnabled.has(item.id)) return false;
+    return item.disabled === true;
   }
 
   // ==================== 内部 ====================
@@ -339,7 +457,7 @@ export class InteractSystem<T = unknown> {
     alignment = 1,
     requireFacing?: boolean
   ): string | null {
-    if (item.disabled) return '已禁用';
+    if (this._isDisabled(item)) return '已禁用';
 
     const max = item.maxUses ?? 1;
     if ((this._used.get(item.id) ?? 0) >= max) return '已用完';
@@ -386,6 +504,15 @@ function tier(alignment: number): number {
   return 2;                          // 背对
 }
 
+/**
+ * 【为什么这里有一份 clamp 而不是 import _core 的】
+ * 本单元是**零依赖**单元（rule 6 只允许 import `_core`，
+ * 但引入之后 `interact/` 目录就没法"拷走即用"了）。
+ * 三行代码换一个外部依赖不划算，所以保留本地实现。
+ *
+ * 与 `_core.clamp` 行为完全一致（`v < lo ? lo : v > hi ? hi : v`），
+ * 改其中一边时请同步另一边。
+ */
 function clamp(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v;
 }

@@ -52,7 +52,7 @@
  * ```
  */
 
-import { clamp, clamp01, safeDt } from '../_core/math';
+import { clamp, clamp01, numOr, safeDt } from '../_core/math';
 
 export type ShakeNoise = 'perlin' | 'random' | 'decay-sine';
 
@@ -63,6 +63,12 @@ export interface CameraShakeOptions {
    * 【为什么必须有】
    * 设置面板里的"震屏强度"滑块直接接这里。
    * 部分玩家（前庭功能敏感）会因震屏产生晕眩，这是可访问性需求，不是可选项。
+   *
+   * 【⚠️ 构造与 setter 走同一套收口】
+   * 历史上构造函数用 `?? 1`（不夹取），setter 用 `clamp01`，
+   * 于是 `new CameraShake({ strengthScale: 2 })` 得到 2，
+   * 之后 `shake.strengthScale = 2` 却得到 1——同一个字段两种口径，
+   * 表现为"设置面板拖到最大反而变弱了"。现统一为 `clamp01(numOr(v, 1))`。
    */
   strengthScale?: number;
 
@@ -95,7 +101,57 @@ export interface CameraShakeOptions {
    */
   maxOffset?: number;
 
+  /**
+   * 震源数量上限（默认 32）
+   *
+   * 【为什么要有上限】
+   * `punch()` 此前无上限：连续暴击、掉进爆炸链、或者干脆在循环里
+   * 每帧 punch 一次，`_sources` 就会无限增长（实测 10 万次 punch 后
+   * `sourceCount` = 100000），每帧还要全量遍历——帧率被自己的特效拖垮。
+   *
+   * 超出上限时**丢弃最老的那个**（`shift`）：
+   * 老的震动已经衰减到接近 0，丢掉它对观感几乎没影响；
+   * 而新的震动正是玩家刚打出来的那一下，必须留着。
+   */
+  maxSources?: number;
+
+  /**
+   * 旋转分量强度：每 1 单位振幅对应的旋转角度（度）。默认 6
+   *
+   * 【为什么和平移分开配】
+   * 平移的单位是米/像素，旋转的单位是度，两者没有天然换算关系。
+   * 同一个 `amplitude` 在 2D 横版和 3D 俯视角里该转多少度完全不同，
+   * 所以旋转的强度单独配，不复用 `maxOffset`。
+   */
+  rotationScale?: number;
+
+  /**
+   * 旋转偏移上限（度）。默认 3
+   *
+   * 【为什么这么小】
+   * 相机 roll 超过 3~5 度就会让人眩晕，而且画面边缘会露出黑边。
+   * 震屏的旋转是"点缀"，不是主角。
+   */
+  maxRotation?: number;
+
 }
+
+/**
+ * 缺省配置
+ *
+ * 【为什么抽成常量】配置驱动不等于"每个默认值都散落在构造函数里"
+ * ——散落之后没人知道当前默认值是多少，改的时候也容易漏掉一处。
+ */
+const SHAKE_DEFAULTS = {
+  strengthScale: 1,
+  noise: 'perlin' as ShakeNoise,
+  frequency: 24,
+  decay: 'exp' as 'exp' | 'linear',
+  maxOffset: 2,
+  maxSources: 32,
+  rotationScale: 6,
+  maxRotation: 3,
+};
 
 /**
  * 【为什么没有 random 选项】
@@ -153,6 +209,9 @@ export class CameraShake {
   private _frequency: number;
   private _decay: 'exp' | 'linear';
   private _maxOffset: number;
+  private readonly _maxSources: number;
+  private readonly _rotationScale: number;
+  private readonly _maxRotation: number;
 
   private _sources: ShakeSource[] = [];
 
@@ -166,11 +225,18 @@ export class CameraShake {
   private _seedCounter = 1;
 
   constructor(opts: CameraShakeOptions = {}) {
-    this._scale = opts.strengthScale ?? 1;
-    this._noise = opts.noise ?? 'perlin';
-    this._frequency = opts.frequency ?? 24;
-    this._decay = opts.decay ?? 'exp';
-    this._maxOffset = opts.maxOffset ?? 2;
+    // 【为什么要 clamp01(numOr(...)) 而不是 ?? 1】
+    // `??` 只挡 undefined/null，挡不住 NaN 和越界值；
+    // 而 setter 一直是 clamp01。两处口径不一致时，
+    // 调用方会观察到"构造时传 2 生效，之后 set 2 被压成 1"。
+    this._scale = clamp01(numOr(opts.strengthScale, SHAKE_DEFAULTS.strengthScale));
+    this._noise = opts.noise ?? SHAKE_DEFAULTS.noise;
+    this._frequency = opts.frequency ?? SHAKE_DEFAULTS.frequency;
+    this._decay = opts.decay ?? SHAKE_DEFAULTS.decay;
+    this._maxOffset = opts.maxOffset ?? SHAKE_DEFAULTS.maxOffset;
+    this._maxSources = Math.max(1, Math.floor(numOr(opts.maxSources, SHAKE_DEFAULTS.maxSources)));
+    this._rotationScale = numOr(opts.rotationScale, SHAKE_DEFAULTS.rotationScale);
+    this._maxRotation = Math.abs(numOr(opts.maxRotation, SHAKE_DEFAULTS.maxRotation));
   }
 
   /** 全局强度（接设置面板滑块，0~1） */
@@ -183,6 +249,11 @@ export class CameraShake {
     if (this._scale === 0) this._ox = this._oy = this._orot = 0;
   }
 
+  /** 当前可容纳的震源上限（调试/面板用） */
+  get maxSources(): number {
+    return this._maxSources;
+  }
+
   /** 当前偏移 X */
   get offsetX(): number {
     return this._ox;
@@ -193,7 +264,20 @@ export class CameraShake {
     return this._oy;
   }
 
-  /** 当前旋转偏移（度） */
+  /**
+   * 当前旋转偏移（度）
+   *
+   * 【⚠️ 这个值曾经恒为 0】
+   * 旧实现里 `_orot` 只有三处写入，全是 `= 0`，
+   * `tick()` 算完 `totalX/totalY` 就收工了，从没算过旋转分量。
+   * 而 `README.md` 的 API 表里早就写着 `offsetRotation`——
+   * 调用方照文档把它加到相机 rotation 上，加的永远是 0。
+   *
+   * 属于"文档写了、源码没实现"：不报错、不崩溃，
+   * 只是打击感少了一块，而且因为文档写了，没人会去查实现。
+   *
+   * 现在旋转由第三次噪声采样驱动（见 `tick()` 里的 `nz`）。
+   */
   get offsetRotation(): number {
     return this._orot;
   }
@@ -221,6 +305,9 @@ export class CameraShake {
     const dx = p.dirX ?? 0;
     const dy = p.dirY ?? 0;
     const directional = Math.hypot(dx, dy) > 1e-6;
+
+    // 超上限时丢最老的（衰减已接近 0，对观感影响最小）
+    if (this._sources.length >= this._maxSources) this._sources.shift();
 
     this._sources.push({
       amplitude: p.amplitude,
@@ -272,6 +359,7 @@ export class CameraShake {
 
     let totalX = 0;
     let totalY = 0;
+    let totalRot = 0;
 
     for (let i = this._sources.length - 1; i >= 0; i--) {
       const s = this._sources[i];
@@ -294,6 +382,16 @@ export class CameraShake {
       const phase = this._time * s.frequency;
       const nx = this._sample(phase, s.seed);
       const ny = this._sample(phase, s.seed + 12345);
+      /**
+       * 【旋转为什么用第三次采样】
+       * 和 X/Y 用不同 seed，否则旋转会与平移**完全同相**——
+       * 相机看起来是在一条直线上来回平移，而不是在"抖"。
+       * 三个分量互相错开才有"被撞了一下"的立体感。
+       */
+      const nz = this._sample(phase, s.seed + 54321);
+
+      // 旋转不区分方向性：挨了一下之后相机该"歪"一下，跟从哪边打来无关
+      totalRot += nz * amp;
 
       if (s.directional) {
         // 方向性震动：沿指定方向的主震 + 少量垂直抖动
@@ -322,8 +420,22 @@ export class CameraShake {
       totalY *= k;
     }
 
+    /**
+     * 【旋转的限幅为什么不用 maxOffset】
+     * `maxOffset` 的单位是长度（米/像素），旋转的单位是度，
+     * 两者不能混着夹——否则把 `maxOffset` 从 2 调成 0.5 时，
+     * 旋转会被莫名其妙地一起压掉，调参会互相干扰。
+     * 所以旋转走自己的 `maxRotation`（度）。
+     */
+    totalRot = clamp(
+      totalRot * this._scale * this._rotationScale,
+      -this._maxRotation,
+      this._maxRotation
+    );
+
     this._ox = totalX;
     this._oy = totalY;
+    this._orot = totalRot;
   }
 
   /**

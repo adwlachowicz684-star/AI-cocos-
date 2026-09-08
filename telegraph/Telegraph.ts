@@ -293,8 +293,33 @@ export class TelegraphSystem {
     return n;
   }
 
-  clear(): void {
-    this._list.length = 0;
+  /**
+   * 清空所有预警
+   *
+   * 【⚠️ 曾经的 bug：clear() 不触发 onComplete，与 cancelAll() 行为不一致】
+   *
+   * 原实现只有一行 `this._list.length = 0`——
+   * 预警被**凭空抹掉**，`onComplete` 一次都不调用。
+   * 而 `cancelAll()` 是逐个调 `onComplete(t, true)` 再清空。
+   *
+   * 后果：外部状态机依赖 `onComplete` 做清理
+   * （"预警期间锁住 AI""显示地面圈""取消施法进度条"）。
+   * 场景切换 / Boss 死亡这类路径调的是 `clear()`，
+   * 于是回调收不到 → 地面圈残留、AI 锁死、进度条卡住。
+   *
+   * 而 `cancelAll()` 那条路径是好的，所以 bug **只在"切场景/重置"时出现**——
+   * 开发期几乎不会走到，上线后才暴露。
+   *
+   * 实测（修复前）：spawn 一个带 onComplete 的 telegraph → `clear()` → 回调次数 0
+   * （同样的场景调 `cancelAll()` → 回调次数 1）
+   *
+   * 【为什么统一行为而不是只在文档里写清区别】
+   * 两个名字相近的 API 语义不同，调用方**必然会混用**。
+   * 这种"读文档才知道"的差异在真实项目里等于没有边界，
+   * 所以这里让 `clear()` 直接复用 `cancelAll()`。
+   */
+  clear(): number {
+    return this.cancelAll();
   }
 
   destroy(): void {

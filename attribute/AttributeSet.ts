@@ -254,20 +254,49 @@ export class AttributeSet {
     return removed;
   }
 
-  /** 清空某个属性的所有修正器（不传则清空全部） */
+  /**
+   * 清空某个属性的所有修正器（不传则清空全部）
+   *
+   * 【为什么必须补 onChange 通知】
+   * 同一个"移除修正器"的语义，本类给了三个 API：
+   * `removeBySource` / `clearByTag`（内部走 `removeWhere`，**会通知**）
+   * 与 `clearModifiers`（原本**不通知**）。
+   *
+   * 后果是调用方用 `clearModifiers` 清 debuff 时，血条 / 属性面板停在旧数值上，
+   * 直到下一次别的操作才刷新——而调用方完全不知道自己用错了 API。
+   * 这是典型的"同义不同行为"，所以这里对齐到"会通知"的一侧。
+   */
   clearModifiers(attr?: string): number {
     if (attr === undefined) {
+      // 【为什么要在 clear() 之前先快照受影响的属性与旧值】
+      // 两件事都必须赶在清空前做：
+      //   1. `this._mods.clear()` 之后再遍历 keys() 只会拿到空迭代器，
+      //      就再也无从知道"哪些属性被改过"；
+      //   2. 通知的 oldValue 必须是**清空前**的值，
+      //      而 newValue 由 `_notifyIf` 在**清空后**重新 `get()` 得到。
+      // 两者跨了一次状态变更，所以只能各自在正确的时机取。
+      const affected = Array.from(this._mods.keys());
+      const olds = new Map<string, number>();
+      for (const a of affected) olds.set(a, this.get(a));
+
       let n = 0;
-      for (const a of this._mods.keys()) n += this._mods.get(a)?.length ?? 0;
+      for (const a of affected) n += this._mods.get(a)?.length ?? 0;
       this._mods.clear();
       this._hasConditional = false;
       this._bump();
+      // 【为什么逐个通知而不是只发一条"全变了"】
+      // 让 `clearModifiers()` 与"对每个属性各调一次 clearModifiers(attr)"等价，
+      // 监听器无需区分两种调用方式。挂起期间由 `_notifyIf` 自动汇总，无需特判。
+      for (const a of affected) this._notifyIf(a, olds.get(a) as number);
       return n;
     }
+    const old = this.get(attr);
     const n = this._mods.get(attr)?.length ?? 0;
     this._mods.delete(attr);
     this._recomputeHasConditional();
     this._bump();
+    // n === 0 时值没变，`_notifyIf` 内部比较后会自动跳过，无需在这里判空。
+    this._notifyIf(attr, old);
     return n;
   }
 
@@ -331,7 +360,6 @@ export class AttributeSet {
     let v = base;
     let add = 0;
     let mul = 0;
-    let overridden = false;
 
     if (list) {
       for (const m of list) {
@@ -341,7 +369,6 @@ export class AttributeSet {
           case 'override':
             // 【取最后一个】后设置的覆盖先设置的，符合直觉
             v = m.value;
-            overridden = true;
             break;
           case 'add':
             add += m.value;
@@ -353,8 +380,18 @@ export class AttributeSet {
       }
     }
 
-    // override 之后，add/mul 依然生效（否则 override 就成了"锁死"，太粗暴）
-    v = overridden ? v + add : v + add;
+    // 【原来这里写的是 `v = overridden ? v + add : v + add;`】
+    // 三元两个分支完全相同——作者显然犹豫过"override 时是否该忽略 add"，
+    // 但最终没有区分，留下一段看起来有分支、实际什么都没做的代码。
+    //
+    // 危害不在运行结果（两种写法结果一致），而在**误导**：
+    // 维护者读到这行会以为存在"override 定终值"的开关，
+    // 顺着这个错误前提去改，必然改错。所以这里摊平成无条件相加。
+    //
+    // 【当前语义（与 README 第 27 行公式一致，未作变更）】
+    //   override 只替换 base，add 与 mul **仍然叠加**。
+    //   否则 override 就成了"锁死"——连 buff 都加不上去，太粗暴。
+    v = v + add;
     v = v * (1 + mul);
 
     const min = def?.min;

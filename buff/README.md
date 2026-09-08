@@ -68,7 +68,7 @@ buffs.clearOnDeath();         // 死亡清理
 | `clearOnDeath()` | 只清 `clearOnDeath !== false` 的 |
 | `update(dt, onTick?)` | 每帧推进，onTick 用于 DoT/HoT |
 | `stacks(id)` / `remain(id)` / `has(id)` | 查询 |
-| `onChange(fn)` | 订阅变更（**在这里重建 ModifierSet**） |
+| `onChange(fn)` | 订阅变更（**多播**，返回取消函数；在这里重建 ModifierSet） |
 | `export()` / `import()` | 存档（含剩余时间与层数） |
 | `count()` | 当前生效的 buff **种类数**（不是总层数） |
 | `destroy()` | 释放（**之后 onChange 不再触发**） |
@@ -78,10 +78,37 @@ buffs.clearOnDeath();         // 死亡清理
 > 拿它算"总层数"会少算——
 > 表现为"UI 上显示 2 层但实际有 4 层效果"。
 
-> ⚠️ **`destroy()` 之后 `onChange` 不再触发。**
+> ⚠️ **`onChange` 是多播：注册多个监听器互不影响。**
+> 早期实现是 `this._onChange = fn` 直接赋值，**第二次注册会静默顶掉第一次**。
+> 后果很隐蔽：UI 层（刷图标）和数值层（重建 ModifierSet）都订阅时，
+> 后注册的那个生效、先注册的那个彻底失联——
+> 表现为"图标还在，但属性没变"，且没有任何报错。
+> 返回的取消函数只摘掉自己，不影响其它监听器。
+
+> ⚠️ **`clear()` 会逐个 buff 发一次 `remove`，再发一次 `clear`。**
+> 只监听 `remove` 的依赖方（逐个图标的 UI 最常见）
+> 以前在 `clear()` 之后收不到任何单个 buff 的移除通知，
+> 表现为"人已经死了，状态栏图标还挂着"。两类事件现在都会发。
+
+> ⚠️ **`import()` 会校验并收口存档数据，不是原样写入。**
+> `remain` 为 NaN / 非正数 → 回落到 `def.duration`（`remain = 0` 则跳过该条）；
+> `stacks` 会被夹到 `maxStacks`；`independent` 模式会重建逐层实例。
+> 早期实现绕过校验直接写内部字段，坏存档能造出**永不消失的中毒**
+> （`remain = NaN` → `NaN <= 0` 恒 false → 永不过期）和超出上限的层数。
+> 若你的存档里有合法但超上限的旧数据，读档后层数会被夹到 `maxStacks`——这是刻意的。
+
+> ⚠️ **`destroy()` 之后 `onChange` 不再触发——但**期间**会。**
+>
+> `destroy()` 内部走 `clear()`，所以会先逐个 buff 发 `remove`、再发一条 `clear`，
+> 最后才摘掉监听器、清空定义表。
 > 换场景时如果只 `dispelAll()` 不 `destroy()`，
 > 旧场景的回调还挂着——新场景里加 buff 时会触发上一局的刷新逻辑，
 > 表现为"属性莫名被改"。
+>
+> 【为什么"期间"也通知，而不是先摘监听器再清】
+> 这是既有行为（`destroy` 从一开始就会发一条 `clear`），不在本次改动范围内。
+> 若你的监听器会在 `remove` 里操作 UI 节点，请注意换场景的时序：
+> 先摘掉自己的监听器（`off()`），再 `destroy()`。
 
 ## BuffDef 字段
 

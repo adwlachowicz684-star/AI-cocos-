@@ -170,8 +170,27 @@ export class SpeedChecker {
    */
   push(s: SpeedSample): SpeedViolation | null {
     const prev = this._last;
-    this._last = s;
-    if (!prev) return null;
+    /**
+     * 【⚠️ 只有**合法**样本才能成为下一轮的基线】
+     *
+     * 原实现一进门就 `this._last = s`，于是非法样本也会顶掉基线。
+     * 时间戳为 NaN 的样本顶上之后，下一个**合法**样本算出
+     * `dtSec = (t - NaN) / 1000 = NaN`，同样被守卫丢掉——
+     * 一个坏包会连带废掉它后面那一个好包。
+     *
+     * 于是只要按"好包 / NaN 包"交替上报（每两个包塞一个 NaN），
+     * **所有合法样本都会被跳过**，检测彻底失明，
+     * 而 `strikes` 既不加也不清零——看起来"运行正常"。
+     * 这比"清零连击"更彻底，且是同一条绕过链上的第三个入口。
+     *
+     * 修法：非法样本直接丢弃，基线保持为**上一个合法样本**。
+     * 副作用是这一对样本的间隔被合并计算（dt 偏大 → 速度偏低），
+     * 方向是"宁可少报、不可误报"，与原则三一致。
+     */
+    if (!prev) {
+      this._last = s;
+      return null;
+    }
 
     const dtSec = (s.t - prev.t) / 1000;
 
@@ -202,8 +221,30 @@ export class SpeedChecker {
     const dy = s.y - prev.y;
     const dist = Math.sqrt(dx * dx + dy * dy);
 
+    /**
+     * 【⚠️ dist 同样要挡 NaN，光挡住 dt 不够】
+     *
+     * dt 守卫只能拦住"时间戳为 NaN"，拦不住**坐标为 NaN**：
+     * 坐标 NaN 时 `dist = NaN`，`NaN < minDist` 为 false → 穿透守卫，
+     * 于是 `speed = NaN / dt = NaN`，`exceeded = NaN > allowed` 恒为 false
+     * → 走 else → **`_strikes` 被清零**（和 P0/P1 里 dt 那条完全一样）。
+     *
+     * 实测（修复前）：连续两次超速攒到 `strikes = 2`，
+     * 再上报一个 `{x: NaN}` 的样本 → `strikes` 变回 **0**。
+     * 也就是说"洗掉连击"根本不需要伪造时间戳，
+     * 只要上报一个坏坐标即可——这是同一条绕过链上的第二个入口。
+     *
+     * 【为什么是"跳过不计"而不是"清零"】
+     * 非法样本既不是合规证明、也不是违规证据，它对判定**没有信息量**。
+     * 把它算成"没超速"就等于送作弊者一次清零。跳过才是中性处理。
+     */
+    if (!Number.isFinite(dist)) return null;
+
     // 位移过小：比值误差太大，数据没有参考价值
     if (dist < this._minDist) return null;
+
+    // 走到这里才是合法样本：它才有资格当下一轮的基线（见本方法开头的注释）
+    this._last = s;
 
     const speed = dist / dtSec;
     if (speed > this._maxObserved) this._maxObserved = speed;
@@ -285,6 +326,21 @@ export class SpeedChecker {
     this._strikes = 0;
     this._window.length = 0;
     this._maxObserved = 0;
+  }
+
+  /**
+   * 【铁律 5】可卸载
+   *
+   * SpeedChecker 不持有外部资源（无定时器、无监听、无引擎对象），
+   * 所以这里只是把内部状态清空——**真正的目的是给出统一的收尾入口**：
+   * 调用方（以及自动化的可卸载校验）不必为了"这个单元要不要特殊处理"去翻实现。
+   *
+   * 【⚠️ 不要在这个方法里加"告警/上报"之类的副作用】
+   * 它被设计为纯粹的状态归零；有副作用的话，
+   * 玩家断线重连时销毁旧 checker 就会误报一次。
+   */
+  destroy(): void {
+    this.reset();
   }
 }
 

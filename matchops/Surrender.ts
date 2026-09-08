@@ -108,6 +108,16 @@ export interface SurrenderStatus {
   /** 冷却结束时刻 */
   readonly cooldownUntil: number | null;
   readonly initiator: string | null;
+  /**
+   * 已投但因掉线而**不计入**的票数
+   *
+   * 【为什么需要它】
+   * 投票中途掉线的人，票还在 `_votes` 里但 `_tally` 会跳过他（见 `_tally`）。
+   * 老实现里 UI 完全看不到这件事：玩家投了票、收到了 `ok:true`，
+   * 票数却纹丝不动。暴露这个数字，UI 才能说清楚
+   * "你/某人 的票因掉线未被计入"，而不是让人反复点。
+   */
+  readonly ignoredVotes: number;
 }
 
 export type SurrenderError =
@@ -261,6 +271,25 @@ export class Surrender {
     }
 
     /**
+     * 【⚠️ 掉线玩家的票必须当场拒绝，不能收下再悄悄作废】
+     *
+     * `_tally()` 里有 `if (!this._connected.has(id)) continue;`——
+     * 掉线者的票**根本不会被计入**，但老实现 `vote()` 不查 connected，
+     * 照样返回 `{ok:true}`。
+     *
+     * 于是掉线重连（或网络抖动被短暂标记掉线）的玩家投了赞成票，
+     * UI 显示"投票成功"，票数不变，投降永远差一票。
+     * 玩家会以为是自己没点上、或者是网络问题，反复点击——
+     * 而实际上系统从一开始就没打算收这张票。
+     *
+     * 这里与 `start()` 的 `requireAllConnected` 检查保持同一口径：
+     * 未连接 → `not-connected`。
+     */
+    if (!this._connected.has(id)) {
+      return { ok: false, error: 'not-connected' };
+    }
+
+    /**
      * 【⚠️ 用 Map 而不是数组】
      * 数组的话同一个人点两次算两票，
      * 表现为"4 个人投了 5 票赞成"。
@@ -328,6 +357,11 @@ export class Surrender {
 
     const eligible = this._eligibleCount();
     const { yes, no } = this._tally();
+    // 已投但掉线、因而不计入的票数（UI 用它解释"为什么票数没变"）
+    let ignoredVotes = 0;
+    for (const id of this._votes.keys()) {
+      if (!this._connected.has(id)) ignoredVotes++;
+    }
 
     /**
      * 需要几票：`ceil(eligible * threshold)` 且至少 1 票。
@@ -354,6 +388,7 @@ export class Surrender {
       deadline: this._deadline,
       cooldownUntil: this._state === 'cooldown' ? this._cooldownUntil : null,
       initiator: this._initiator,
+      ignoredVotes,
     };
   }
 

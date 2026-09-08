@@ -414,7 +414,18 @@ export interface SatResult {
   depth: number;
 }
 
-const _satEmpty: SatResult = { overlap: false, mtvX: 0, mtvY: 0, depth: 0 };
+/**
+ * 【⚠️ 共享常量必须 freeze：调用方改一次，全局被污染】
+ *
+ * `satOverlap` 在未重叠时返回的是**同一个对象**（零分配，高频路径需要）。
+ * 实测（修复前）：拿到返回值后写 `r.overlap = true`，
+ * 之后**所有**不相交的 `satOverlap` 调用都返回 `overlap: true`——
+ * 碰撞检测从此认为"全世界都撞在一起了"，且不报错。
+ *
+ * 冻结之后这种写入在严格模式下直接抛错，把静默污染变成当场暴露。
+ * 【代价】调用方若要改写结果，得自己拷贝一份（`{ ...r }`）。
+ */
+const _satEmpty: SatResult = Object.freeze({ overlap: false, mtvX: 0, mtvY: 0, depth: 0 });
 
 /**
  * 分离轴定理（凸多边形）
@@ -699,6 +710,20 @@ export class CollisionGrid {
     return this._nextId++;
   }
 
+  /**
+   * 【⚠️ 坐标有效范围：格号必须在 ±32767 以内】
+   *
+   * 32 位里塞两个 16 位坐标，超出后 `& 0xffff` 会**回绕**——
+   * 第 0 格和第 65536 格算出的 key 完全相同。
+   *
+   * 后果是**多报**候选而不是漏报（远处不相干的格子被当成同一格），
+   * 配合后续精确检测不会判错，但查询会变慢：
+   * 世界边界外的实体会不断往桶里塞东西。
+   * 表现为"地图大了之后碰撞莫名变卡"，而不是报错。
+   *
+   * 换算：cellSize=64 时有效半径约 ±2,097,088 世界单位。
+   * 无限地图请自行做分块或用世界坐标取模。
+   */
   private _key(cx: number, cy: number): number {
     // 用 32 位打包两个 16 位坐标（支持 ±32767 格）
     return ((cx & 0xffff) << 16) | (cy & 0xffff);
@@ -727,6 +752,11 @@ export class CollisionGrid {
         // 【⚠️ 同一碰撞体会落在多个格子，去重靠 id】
         // 不去重的话，站在格子边界的角色会被检测两次，
         // 分离力翻倍 → 抖动。
+        //
+        // 【复杂度提醒】这里是 O(格子数 × 桶内元素数)。
+        // 大物体（Boss、长条平台）跨几十格、每格桶里又有上百个时，
+        // 单次 insert 就是几千次比较。当前实现以正确性优先；
+        // 若成为热点，可改成"记录上次 cell 集合、只做增量 diff"。
         if (!arr.some((e) => e.id === c.id)) arr.push(c);
       }
     }
@@ -740,7 +770,15 @@ export class CollisionGrid {
     const minY = Math.floor((cy - r) / this._cell);
     const maxY = Math.floor((cy + r) / this._cell);
     // 【性能】早期每次查询 new 一个 Set，500 实体每帧 3.24 KB 分配。
-    // 复用实例级 scratch（注意：不可重入，嵌套查询会互相踩）
+    // 复用实例级 scratch（注意：不可重入，嵌套查询会互相踩）。
+    //
+    // 【⚠️ 不可重入的具体表现】`seen` 是实例级的，
+    // 若调用方在遍历 `out` 期间又调了一次 `query()`（例如对每个碰撞体
+    // 再做一次范围查询），内层会把 `seen` 清空，外层循环继续跑时
+    // 去重记录已经丢了 → **外层结果错乱**（重复项 + 漏项），
+    // 而且两次调用的代码各自看起来完全正确。
+    // 需要嵌套查询时，请为内层单独 new 一个 CollisionGrid，
+    // 或先把外层结果 copy 出来（`out.slice()`）再遍历。
     const seen = this._scratchSeen;
     seen.clear();
 
@@ -760,6 +798,28 @@ export class CollisionGrid {
 
   get bucketCount(): number {
     return this._buckets.size;
+  }
+
+  /**
+   * 【铁律 5】可卸载
+   *
+   * `CollisionGrid` 持有的 `_buckets` 是**对碰撞体的强引用**：
+   * 不 clear 的话，即使外部已经丢弃了所有碰撞体，
+   * 它们也会被这个 Map 一直吊着，整批无法回收。
+   * 换场景时"销毁了实体但内存没降"往往就是这个原因。
+   *
+   * `clear()` 只清 `_buckets`，这里额外清 `_scratchSeen`——
+   * 那个 Set 里存的是历史 id，同样会占内存。
+   *
+   * 【为什么不重置 `_nextId`】
+   * 调用方可能还在别处缓存着旧的碰撞体 id（比如用它索引自己的数组）。
+   * 重置会让新插入的碰撞体拿到与旧对象相同的 id，
+   * 那种"同一个 id 指向两个不同对象"的错误极难定位。
+   * id 单调递增的代价只是一个计数器，很划算。
+   */
+  destroy(): void {
+    this._buckets.clear();
+    this._scratchSeen.clear();
   }
 }
 
@@ -1047,6 +1107,9 @@ export function raycastAabb(
   let tmax = Infinity;
   let axis = 0;
   let sign = 0;
+  /** 穿出面（起点在盒内时用得上） */
+  let outAxis = 0;
+  let outSign = 0;
 
   if (Math.abs(dx) < 1e-12) {
     if (ox < b.x - b.hw || ox > b.x + b.hw) return _rayMiss;
@@ -1057,7 +1120,8 @@ export function raycastAabb(
     let s = -1;
     if (t1 > t2) { const tt = t1; t1 = t2; t2 = tt; s = 1; }
     if (t1 > tmin) { tmin = t1; axis = 0; sign = s; }
-    if (t2 < tmax) tmax = t2;
+    // 穿出面法线与进入面相反：进入取 s，穿出取 -s
+    if (t2 < tmax) { tmax = t2; outAxis = 0; outSign = -s; }
   }
 
   if (Math.abs(dy) < 1e-12) {
@@ -1069,18 +1133,46 @@ export function raycastAabb(
     let s = -1;
     if (t1 > t2) { const tt = t1; t1 = t2; t2 = tt; s = 1; }
     if (t1 > tmin) { tmin = t1; axis = 1; sign = s; }
-    if (t2 < tmax) tmax = t2;
+    if (t2 < tmax) { tmax = t2; outAxis = 1; outSign = -s; }
   }
 
-  if (tmax < tmin || tmax < 0 || tmin < 0) return _rayMiss;
+  if (tmax < tmin || tmax < 0) return _rayMiss;
+
+  /**
+   * 【⚠️ 起点在盒内必须返回"穿出点"，不能判 miss】
+   *
+   * 原守卫是 `tmax < 0 || tmin < 0`：起点在盒内时 `tmin < 0 < tmax`，
+   * `tmin < 0` 成立 → 直接判 miss。
+   * 而同一文件的 `raycastCircle` 在同样情形（起点在圆内，`t1 < 0`）
+   * 会取正根 `t2` 返回**穿出点**——两个兄弟函数给出相反结论。
+   *
+   * 实测（修复前）：`raycastAabb((0,0)→(1,0), 盒心(5,0) 半宽10)` → `hit: false`；
+   * 同样的射线打圆（`圆心(5,0) r=10`）→ `hit: true, t: 15`。
+   * 而 `raycast()` 是统一入口，按 shape 类型分派——
+   * 做视线检测时，射线起点一旦落进某个 AABB 障碍内部
+   * （角色贴墙、站在触发盒里、胶囊体起点偏移进墙），
+   * AABB 障碍就被判"没挡住" → **敌人隔着墙看见玩家**；
+   * 换成圆形障碍一切正常。表现为"偶尔能穿墙看到人"，极难复现。
+   *
+   * 【为什么对齐 raycastCircle 而不是反过来】
+   * "从内部射出的射线一定会穿过边界"是几何事实；
+   * 把内部起点判成 miss，等于说"站在墙里就看不见墙"。
+   * 且 raycastCircle 已在线上跑通，一致性优先。
+   */
+  const inside = tmin < 0;
+  const t = inside ? tmax : tmin;
+  // 退化情形：方向为零向量且起点在盒内 → t 为 Infinity，不产生有限交点
+  if (!Number.isFinite(t)) return _rayMiss;
+  const hitAxis = inside ? outAxis : axis;
+  const hitSign = inside ? outSign : sign;
 
   return {
     hit: true,
-    t: tmin,
-    x: ox + dx * tmin,
-    y: oy + dy * tmin,
-    nx: axis === 0 ? sign : 0,
-    ny: axis === 1 ? sign : 0,
+    t,
+    x: ox + dx * t,
+    y: oy + dy * t,
+    nx: hitAxis === 0 ? hitSign : 0,
+    ny: hitAxis === 1 ? hitSign : 0,
     colliderId: -1,
   };
 }

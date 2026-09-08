@@ -1,4 +1,5 @@
-import { needCount } from '../_core/guard';
+import { needCount, needFinite } from '../_core/guard';
+import { clampNum, numOr } from '../_core/math';
 
 /**
  * noise —— 程序化噪声（地形 / 纹理 / 随机分布）
@@ -62,7 +63,24 @@ import { needCount } from '../_core/guard';
 // ============================================================
 
 function mulberry32(seed: number): () => number {
-  let a = seed >>> 0;
+  /**
+   * 【⚠️ 非有限 seed 必须在这里拦住，不能让 `>>> 0` 静默吃掉】
+   *
+   * `NaN >>> 0 === 0`、`Infinity >>> 0 === 0`、
+   * 所以 `new Noise(NaN)` 会**静默**变成 `new Noise(0)`。
+   * seed 来自配置表、存档或字符串 hash 时，一旦算成 NaN/undefined，
+   * 所有地图 / 怪物分布 / 掉落抖动全部退化成 seed 0 的同一份结果。
+   * 现象是"每次进游戏地形一模一样，但代码里明明传了不同 seed"——
+   * 排查时会去查 scale、查采样坐标，没人会想到 seed 已经塌成 0。
+   *
+   * 本单元的卖点是**确定性**，与它相称的做法是"坏种子立刻失败"，
+   * 而不是悄悄给你一张 seed 0 的图。
+   *
+   * 【为什么守在这里而不是每个类的构造函数】
+   * `PerlinNoise` / `SimplexNoise` / `ValueNoise` / `WorleyNoise` 四个类
+   * 最终都从这里取随机流，一处收口全覆盖；漏掉一个就会重新长出这个坑。
+   */
+  let a = needFinite(seed, 'seed') >>> 0;
   return function (): number {
     a |= 0;
     a = (a + 0x6d2b79f5) | 0;
@@ -80,6 +98,30 @@ function fade(t: number): number {
 function lerp(a: number, b: number, t: number): number {
   return a + (b - a) * t;
 }
+
+/**
+ * 2D 梯度方向表（12 个，避开轴向以减少格子感）
+ *
+ * 【为什么提成模块级常量】
+ * 它原本在 `PerlinNoise` 和 `SimplexNoise` 里各存了一份，逐字相同。
+ * 两份拷贝的问题不是多占几十字节，而是**改一份忘另一份**：
+ * 调梯度的人只改了一处，两种噪声的输出会悄悄分叉，
+ * 而没人会把"两种噪声长得不一样"跟这次改动联系起来。
+ */
+const GRAD2: ReadonlyArray<readonly [number, number]> = [
+  [1, 1], [-1, 1], [1, -1], [-1, -1],
+  [1, 0], [-1, 0], [0, 1], [0, -1],
+  [0.7071, 0.7071], [-0.7071, 0.7071], [0.7071, -0.7071], [-0.7071, -0.7071],
+];
+
+/**
+ * `noise3D` 的 z 方向切片间距
+ *
+ * 【这是个观感参数，不是推导出来的数学常数】
+ * 唯一要求是"足够大，让相邻切片之间不相关"；取无理数是为了避免与整数格点共振。
+ * 埋在算式里会让人以为它是算出来的系数、不敢改，所以提成一个有名有姓的常量。
+ */
+const NOISE3D_SLICE_SPACING = 37.7;
 
 /** 把置换表按种子打乱 */
 function buildPermutation(seed: number, size = 256): Uint8Array {
@@ -113,17 +155,16 @@ function buildPermutation(seed: number, size = 256): Uint8Array {
  * 但胜在经典、实现简单、结果可预期。
  *
  * 【输出范围】约 -1 ~ 1（理论上 ±√(n/2)，2D 约 ±0.707，实测常被夹到 ±1）
+ *
+ * 【为什么库内部不用它、却仍然导出】
+ * 确实：`Noise` 统一入口只用 `SimplexNoise`，本单元内部没有任何代码引用 `PerlinNoise`。
+ * 但它是 **export 的公开 API**，删掉会直接破坏已经 `import { PerlinNoise }` 的使用者；
+ * 而"格子感"本身就是一种画风需求（像素/复古地形常故意要它），不是缺陷。
+ * 所以保留导出，并在这里说明它的定位，而不是静悄悄地留一个没人解释的类。
  */
 export class PerlinNoise {
   private readonly _perm: Uint8Array;
   private readonly _permMod12: Uint8Array;
-
-  /** 2D 梯度方向（12 个，避开轴向以减少格子感） */
-  private static readonly GRAD3: ReadonlyArray<readonly [number, number]> = [
-    [1, 1], [-1, 1], [1, -1], [-1, -1],
-    [1, 0], [-1, 0], [0, 1], [0, -1],
-    [0.7071, 0.7071], [-0.7071, 0.7071], [0.7071, -0.7071], [-0.7071, -0.7071],
-  ];
 
   constructor(seed = 0) {
     this._perm = buildPermutation(seed);
@@ -152,7 +193,7 @@ export class PerlinNoise {
     const ba = this._permMod12[this._perm[X + 1] + Y];
     const bb = this._permMod12[this._perm[X + 1] + Y + 1];
 
-    const g = PerlinNoise.GRAD3;
+    const g = GRAD2;
 
     const dotAA = g[aa][0] * xf + g[aa][1] * yf;
     const dotBA = g[ba][0] * (xf - 1) + g[ba][1] * yf;
@@ -189,12 +230,6 @@ export class SimplexNoise {
   private readonly _perm: Uint8Array;
   private readonly _permMod12: Uint8Array;
 
-  private static readonly GRAD3: ReadonlyArray<readonly [number, number]> = [
-    [1, 1], [-1, 1], [1, -1], [-1, -1],
-    [1, 0], [-1, 0], [0, 1], [0, -1],
-    [0.7071, 0.7071], [-0.7071, 0.7071], [0.7071, -0.7071], [-0.7071, -0.7071],
-  ];
-
   /** 2D 单形的偏斜常数 */
   private static readonly F2 = 0.5 * (Math.sqrt(3) - 1);
   private static readonly G2 = (3 - Math.sqrt(3)) / 6;
@@ -209,7 +244,7 @@ export class SimplexNoise {
 
   /** 2D 噪声，返回约 -1 ~ 1 */
   noise2D(xin: number, yin: number): number {
-    const g = SimplexNoise.GRAD3;
+    const g = GRAD2;
 
     // 偏斜到单形网格
     const s = (xin + yin) * SimplexNoise.F2;
@@ -270,15 +305,30 @@ export class SimplexNoise {
     return 70 * (n0 + n1 + n2);
   }
 
-  /** 3D 噪声（用于体积雾、3D 地形） */
+  /**
+   * 3D 噪声（用于体积雾、3D 地形）
+   *
+   * 【⚠️ 这是"伪 3D"：z 方向是 2D 切片插值，不是真 3D 单纯形】
+   *
+   * 实现是 `lerp(noise2D(x, y + iz·D), noise2D(x, y + (iz+1)·D), fade(fz))`。
+   * 后果是**各向异性**：z 方向的特征尺度与 xy 完全不同。
+   * 实测（seed 7）：沿 x 走 1 个单位，输出变化约 0.198；
+   * 沿 z 走 1 个单位，输出变化约 1.005——差 5 倍。
+   * 拿它做 3D 地形 / 云体积，会看到明显的"层叠切片"感，
+   * 沿 z 拉长的结构与沿 xy 完全不同。
+   *
+   * 大多数游戏（分层地形、随时间演化的 2D 噪声）看不出区别，
+   * 这就是它留在这里的原因；但如果你需要**各向同性**的 3D 噪声，
+   * 这个方法不适用，得换真 3D 单纯形实现。
+   */
   noise3D(xin: number, yin: number, zin: number): number {
     // 3D 实现较冗长，这里用简化的：三层 2D 切片插值
     // 对于大多数游戏够用，且代码量小得多
     const iz = Math.floor(zin);
     const fz = zin - iz;
 
-    const a = this.noise2D(xin, yin + iz * 37.7);
-    const b = this.noise2D(xin, yin + (iz + 1) * 37.7);
+    const a = this.noise2D(xin, yin + iz * NOISE3D_SLICE_SPACING);
+    const b = this.noise2D(xin, yin + (iz + 1) * NOISE3D_SLICE_SPACING);
 
     return lerp(a, b, fade(fz));
   }
@@ -382,17 +432,42 @@ export function fbm2D(
    * 【⚠️ octaves 必须有上界】
    *
    * 它直接就是下面的 `for (let i = 0; i < octaves; i++)` 次数。
-   * 实测 `fbm(0, 0, { octaves: Infinity })`：静默返回 0——
-   * 不是卡死，而是**结果错误**：频率不断翻倍、振幅衰减到 0，
-   * 地形变成一片平坦。不报错、不崩溃，
+   * 早年它没有任何守卫：`Infinity` 会让主循环永不结束（进程级卡死），
+   * `NaN` 会让循环体一次都不执行、`maxValue` 停在 0，最后静默返回 0——
+   * 地形变成一片平原，不报错、不崩溃，
    * 排查时会去查种子、查 scale，没人会想到 octaves。
+   * 现在由 `needCount` 收口（有限整数 + 上界 64），坏值直接抛错。
    */
   const octaves = needCount(opts.octaves ?? 4, 'opts.octaves', 64);
-  const lacunarity = opts.lacunarity ?? 2;
-  const persistence = opts.persistence ?? 0.5;
 
-  let amplitude = opts.amplitude ?? 1;
-  let frequency = opts.frequency ?? 1;
+  /**
+   * 【⚠️ lacunarity / persistence 也必须收口】
+   *
+   * 这两个是循环里的乘子，`??` 挡不住 NaN，`Math.max` 也挡不住 NaN：
+   *
+   * - `lacunarity = 0`：`frequency` 从第二层起恒为 0，
+   *   每一层都在采样同一个点 → 退化成"同一层重复叠加"，地形出现诡异的重复纹理。
+   * - `persistence = NaN / 负数`：`amplitude` 变 NaN 或符号翻转，
+   *   `maxValue` 累加成 NaN 或负数 → 走 `maxValue > 0 ? ... : 0` 分支，
+   *   **整张图静默变成 0**。
+   *
+   * 范围选择：
+   * - `lacunarity ∈ [1, 16]`：分形要求逐层加密，< 1 意味着越往后越"糊"，
+   *   实际没人这么用（JSDoc 推荐 2）；上界 16 防止 frequency 叠成 Infinity。
+   * - `persistence ∈ [0, 1]`：0 = 只要第一层（等价于单层噪声，合法），
+   *   1 = 不衰减（合法上界）；越界值会让归一化失去意义。
+   *
+   * 【为什么这里用 clampNum 兜底、而 octaves 用 needCount 抛错】
+   * octaves 是循环次数，越界会**卡死进程**，必须让调用方立刻失败；
+   * 这两个是观感参数，夹到合法区间后仍能出一张合理的图——
+   * 让地形生成器因为配置表里一个笔误就整局崩溃，代价不成比例。
+   */
+  const lacunarity = clampNum(opts.lacunarity, 1, 16, 2);
+  const persistence = clampNum(opts.persistence, 0, 1, 0.5);
+
+  // 振幅 / 频率只挡非有限值：0 和极大值都可能是调用方想要的合法输入
+  let amplitude = numOr(opts.amplitude, 1);
+  let frequency = numOr(opts.frequency, 1);
 
   let total = 0;
   let maxValue = 0;
@@ -428,17 +503,42 @@ export function ridged2D(
    * 【⚠️ octaves 必须有上界】
    *
    * 它直接就是下面的 `for (let i = 0; i < octaves; i++)` 次数。
-   * 实测 `fbm(0, 0, { octaves: Infinity })`：静默返回 0——
-   * 不是卡死，而是**结果错误**：频率不断翻倍、振幅衰减到 0，
-   * 地形变成一片平坦。不报错、不崩溃，
+   * 早年它没有任何守卫：`Infinity` 会让主循环永不结束（进程级卡死），
+   * `NaN` 会让循环体一次都不执行、`maxValue` 停在 0，最后静默返回 0——
+   * 地形变成一片平原，不报错、不崩溃，
    * 排查时会去查种子、查 scale，没人会想到 octaves。
+   * 现在由 `needCount` 收口（有限整数 + 上界 64），坏值直接抛错。
    */
   const octaves = needCount(opts.octaves ?? 4, 'opts.octaves', 64);
-  const lacunarity = opts.lacunarity ?? 2;
-  const persistence = opts.persistence ?? 0.5;
 
-  let amplitude = opts.amplitude ?? 1;
-  let frequency = opts.frequency ?? 1;
+  /**
+   * 【⚠️ lacunarity / persistence 也必须收口】
+   *
+   * 这两个是循环里的乘子，`??` 挡不住 NaN，`Math.max` 也挡不住 NaN：
+   *
+   * - `lacunarity = 0`：`frequency` 从第二层起恒为 0，
+   *   每一层都在采样同一个点 → 退化成"同一层重复叠加"，地形出现诡异的重复纹理。
+   * - `persistence = NaN / 负数`：`amplitude` 变 NaN 或符号翻转，
+   *   `maxValue` 累加成 NaN 或负数 → 走 `maxValue > 0 ? ... : 0` 分支，
+   *   **整张图静默变成 0**。
+   *
+   * 范围选择：
+   * - `lacunarity ∈ [1, 16]`：分形要求逐层加密，< 1 意味着越往后越"糊"，
+   *   实际没人这么用（JSDoc 推荐 2）；上界 16 防止 frequency 叠成 Infinity。
+   * - `persistence ∈ [0, 1]`：0 = 只要第一层（等价于单层噪声，合法），
+   *   1 = 不衰减（合法上界）；越界值会让归一化失去意义。
+   *
+   * 【为什么这里用 clampNum 兜底、而 octaves 用 needCount 抛错】
+   * octaves 是循环次数，越界会**卡死进程**，必须让调用方立刻失败；
+   * 这两个是观感参数，夹到合法区间后仍能出一张合理的图——
+   * 让地形生成器因为配置表里一个笔误就整局崩溃，代价不成比例。
+   */
+  const lacunarity = clampNum(opts.lacunarity, 1, 16, 2);
+  const persistence = clampNum(opts.persistence, 0, 1, 0.5);
+
+  // 振幅 / 频率只挡非有限值：0 和极大值都可能是调用方想要的合法输入
+  let amplitude = numOr(opts.amplitude, 1);
+  let frequency = numOr(opts.frequency, 1);
 
   let total = 0;
   let maxValue = 0;
@@ -605,8 +705,41 @@ export function islandMask(
   falloff = 2
 ): Float64Array {
   const mask = new Float64Array(width * height);
-  const cx = (width - 1) / 2;
-  const cy = (height - 1) / 2;
+  /**
+   * 【⚠️ 尺寸为 1 时不能让 cx / cy 变成 0】
+   *
+   * `width = 1` → `cx = (1-1)/2 = 0` → `(x - cx) / cx = 0/0 = NaN`
+   * → `Math.min(1, NaN) = NaN` → 整张 mask 全是 NaN。
+   * mask 通常要和高度图相乘，于是全图一起变 NaN：
+   * 单列采样、边界尺寸这类"看起来无害"的调用会直接产出一整张废图，且不报错。
+   *
+   * 实测（修复前）：`islandMask(1,1)[0] === NaN`、`islandMask(1,3)[0] === NaN`，
+   * 而 `islandMask(3,3)[0] === 0`（正常）。
+   *
+   * 【⚠️ 只在 cx 恰好为 0 时兜底，不要写成 clamp 到 1】
+   *
+   * 这是本条修复**返工过一次**才定下来的写法，记录一下踩过的坑：
+   * 第一版写成 `Math.max(1, (width - 1) / 2)`，理由看着也自洽
+   * （"退化时语义仍是到中心的距离"），但它会**连带改掉正常尺寸**：
+   *
+   * ```
+   * width = 2 → (2-1)/2 = 0.5  → 被夹成 1
+   * 旧 islandMask(2,2) = [0,0,0,0]        （中心距边缘只有半格，全算边缘）
+   * 第一版        → [0,0,0,1]   ← 凭空多出一块"中心陆地"
+   * ```
+   *
+   * 2×N 的图修复前并**没有** NaN，是既有行为；我只是来修 NaN 的，
+   * 没有资格顺手重定义"中心在哪"。这就是任务书 1.1 第 1 条说的顺手重构。
+   *
+   * 正确做法是**只在除零发生的那一个点**兜底：
+   * `cx > 0` 时原样保留，`cx === 0`（即 width <= 1）时才给 0.5。
+   * 0.5 不是任意值：它让唯一的那一列 `nx = (0-0.5)/0.5 = -1`，
+   * 即"唯一的格子就是边缘"，与 2×N 的既有口径一致。
+   */
+  const rawCx = (width - 1) / 2;
+  const rawCy = (height - 1) / 2;
+  const cx = rawCx > 0 ? rawCx : 0.5;
+  const cy = rawCy > 0 ? rawCy : 0.5;
 
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {

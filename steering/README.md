@@ -180,7 +180,16 @@ circleFormation(index, count, radius);       // 环绕阵型（保护中心）
 `arrive(agent, target, slowRadius?, stopRadius?)`
 `pursuit(agent, targetAgent, lookAhead?)`
 `evade(agent, pursuer, lookAhead?)`
-`wander(agent, state, circleDist?, circleRadius?, angleChange?, rand?)`
+`wander(agent, state, circleDist?, circleRadius?, angleChange?, rand)`
+
+> ⚠️ **`rand` 是必填的，不是可选**（`IRandomSource`，即 `() => number`）。
+> 早期版本默认 `Math.random`，导致同一份数据两次运行结果不同——
+> 回放 / 录像 / 确定性 lockstep 全部失效，而单测又抓不到（每次结果都"随机得正常"）。
+> 现在不传会在**编译期**报错。要可复现就传带种子的随机源，例如：
+> ```typescript
+> const rng = new FixedRandomSource([0.3]);   // _core/types
+> wander(agent, state, 20, 10, 0.5, rng.next.bind(rng));
+> ```
 `obstacleAvoid(agent, obstacles, lookAhead?)`
 
 ### 群体

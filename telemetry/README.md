@@ -53,6 +53,16 @@ await t.flush();     // 退出前尽力发一次
 | `stats` | 四个计数 |
 | `clear()` | 清空缓冲与统计 |
 | `sessionId` | 当前会话 id |
+| `flushSync()` | 页面关闭前尽力发一次（**注意：它是 async**） |
+| `destroy()` | 卸载：断开 sender 并清空缓冲（rule5） |
+
+> ⚠️ **`flushSync` 叫 Sync 但返回 Promise。**
+> 名字是历史遗留——它表达的是"现在就发"，不是"同步返回"。
+> 调用方务必 `await`（或在 `pagehide` 里 fire-and-forget）。
+
+> ⚠️ **卸载时要调 `destroy()`，不是只调 `clear()`。**
+> `sender` 闭包通常持有页面级对象，只清缓冲不断引用，实例会一直驻留。
+> `destroy()` 之后 `flush()` 不再触发网络。
 
 > **`shouldFlush()` 是给你自己的主循环用的。**
 > 本模块不自带定时器——

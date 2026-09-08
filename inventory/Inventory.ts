@@ -157,7 +157,34 @@ export class Inventory {
     return this.count(id) >= amount;
   }
 
-  /** 还能再放多少个该物品 */
+  /**
+   * 还能再放多少个该物品
+   *
+   * 【⚠️ 为什么是 `s.data === undefined` 而不是 `!s.data`】
+   *
+   * `data` 用来存装备的强化等级 / 随机种子这类附加数据，
+   * `0`、`''`、`false` **都是合法值**（"强化 +0"、种子 0 是最典型的两个）。
+   * 而 `!s.data` 把这些全部当成"没有 data"，
+   * 于是它给出的可用空间**偏大**——这正是 falsy 判断的经典陷阱。
+   *
+   * 更麻烦的是它与 `add()` 的口径不一致：`add` 用的是
+   * `s.data !== undefined || data !== undefined`（`:197`），
+   * 于是"查询说还能堆 9 个，实际一个都堆不进去"：
+   *
+   * 实测（修复前），`size=1`、`maxStack=10`：
+   * ```js
+   * add('sword', 1, 0);              // data = 0，falsy 但不是 undefined
+   * remainingSpaceFor('sword');      // → 9   （认为还能堆 9 个）
+   * add('sword', 5);                 // → leftover=5, count=1（一个都没进去）
+   * ```
+   *
+   * 后果：UI 显示"可堆叠"但实际拒绝，带堆叠上限的背包会**卡住自动拾取流程**。
+   * 查询与写入用两套口径，是这个 bug 最难被发现的原因——两边单独看都对。
+   *
+   * 【为什么改查询而不是改 add】
+   * `add` 的 `!== undefined` 是正确口径：`undefined` 才表示"没带附加数据"。
+   * 让查询去对齐写入，而不是反过来放宽写入。
+   */
   remainingSpaceFor(id: string): number {
     const def = this._defs.get(id);
     if (!def) return 0;
@@ -165,7 +192,7 @@ export class Inventory {
     let space = 0;
     for (const s of this._slots) {
       if (s.def === null) space += def.maxStack;
-      else if (s.def.id === id && !s.data) space += def.maxStack - s.count;
+      else if (s.def.id === id && s.data === undefined) space += def.maxStack - s.count;
     }
     return space;
   }
@@ -455,8 +482,24 @@ export class Inventory {
    * 【用途】"一键整理"按钮
    * 【副作用】格子顺序会变。如果玩家习惯了物品位置，整理反而是负担——
    * 所以很多游戏不做这个功能，或者做成可撤销的。
+   *
+   * @returns **装不下而被丢弃的数量**（0 = 一件都没丢）
+   *
+   * 【⚠️ 为什么必须有返回值】
+   *
+   * 重排的 `while (left > 0 && idx < this._slots.length)` 在**格子用尽**时退出，
+   * 剩下没放进去的 `left` 直接被丢掉——没有事件、没有返回值、没有任何出口。
+   * 而 `add()` 阶段的溢出是通过返回值 `leftover` 报告的，两边不对称。
+   *
+   * 必现场景：存档恢复后槽位数据与 `maxStack` 不一致（跨版本改了 `maxStack`，
+   * 或存档被写成超量）。一次"整理"就把超出部分**无声吞掉**。
+   * 物品消失是最严重的运营事故类型之一，且**不可回滚**。
+   *
+   * 这里只补返回值、不改丢弃行为本身：
+   * "整理不丢东西"需要重新设计容量语义，属于另一个议题；
+   * 但"丢了几个"必须让调用方能知道，才能提示玩家或拒绝执行。
    */
-  compact(): void {
+  compact(): number {
     // 收集所有物品
     const items: Array<{ id: string; data?: unknown; total: number }> = [];
 
@@ -485,6 +528,7 @@ export class Inventory {
     // 重排
     this._clearSlotsNoEvent();
     let idx = 0;
+    let dropped = 0;
     for (const it of items) {
       const def = this._defs.get(it.id)!;
       let left = it.total;
@@ -500,9 +544,13 @@ export class Inventory {
         left -= put;
         idx++;
       }
+      // while 退出有两种原因：left 放完了，或 idx 用尽了。
+      // 后者剩下的就是被静默丢掉的部分，必须让调用方看见。
+      dropped += left;
     }
 
     this._emit('move', this._slots.map((_, i) => i));
+    return dropped;
   }
 
   /** 调整容量（保留前面的物品，超出部分**丢弃**） */

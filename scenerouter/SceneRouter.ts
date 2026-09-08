@@ -122,7 +122,22 @@ export interface RouteState {
   readonly phase: RoutePhase;
   readonly current: string | null;
   readonly target: string | null;
-  /** 当前阶段进度 0~1（驱动进度条/动画） */
+  /**
+   * 当前阶段进度 0~1（驱动进度条/动画）
+   *
+   * 【⚠️ load 阶段恒为 0，不是进度条卡住了（P2）】
+   * `out` / `in` 是定时动画，本模块知道总时长，能自己算进度；
+   * `load` 阶段的进度**只有宿主知道**（资源加载 API 的回调里才有），
+   * 本模块拿不到，所以一律返回 0。
+   *
+   * 宿主想要加载进度条，请自己按引擎的加载回调维护一个 0~1，
+   * 不要用 `state.progress`——它在 load 阶段永远是 0。
+   * 资源就绪后调 `notifyLoaded()` 结束该阶段（有超时兜底，忘调不会永久卡死）。
+   *
+   * 【skipPhase() 之后为什么也是 0】
+   * `skipPhase()` 会把 `_elapsed` 清零并立刻进入下一阶段，
+   * 新阶段刚起步，进度自然从 0 开始。
+   */
   readonly progress: number;
   /** 返回栈 */
   readonly history: readonly string[];
@@ -136,7 +151,8 @@ export class SceneRouter {
   private readonly _outMs: number;
   private readonly _inMs: number;
   private readonly _loadTimeout: number;
-  private readonly _onChange?: (phase: RoutePhase, scene: string | null) => void;
+  /** 不再用 readonly：destroy() 要能断开它，否则会泄漏宿主节点 */
+  private _onChange?: (phase: RoutePhase, scene: string | null) => void;
 
   private _phase: RoutePhase = 'idle';
   private _current: string | null;
@@ -237,11 +253,32 @@ export class SceneRouter {
    * - 进入 `in`：播放入场动画
    * - 回到 `idle`：切换完成
    */
-  tick(dt: number): void {
+  /**
+   * 【⚠️ 单位是毫秒，不是秒（P1）】
+   *
+   * 全库其余 23 个单元的 `dt` 都是**秒**，只有本单元是**毫秒**
+   * （`outMs` / `inMs` / `loadTimeoutMs` 全是毫秒）。
+   * 参数名原本也叫 `dt`，于是它是一个"同名不同义"的陷阱：
+   * 宿主按全库惯例传 `1/60`，不会报错，只会发现转场慢 1000 倍。
+   *
+   * 实测（修复前）：`outMs = inMs = 300` 时，
+   * - 按**秒**传 `1/60` → 36000 帧 ≈ 600 秒才走完（期望 0.6 秒）
+   * - 按**毫秒**传 `16.67` → 36 帧 ≈ 0.6 秒
+   *
+   * 表现为"点了开始，黑屏卡住十分钟"，
+   * 而因为 JSDoc 没写单位、参数名又和别的单元一样，
+   * 不翻到 README 的 `dtMs` 示例根本发现不了。
+   *
+   * 改单位会动到所有宿主（breaking），所以这里**只改参数名**：
+   * `dtMs` 让 IDE 与类型提示在调用的那一刻就把单位亮出来。
+   *
+   * @param dtMs 帧间隔，**毫秒**
+   */
+  tick(dtMs: number): void {
     if (this._phase === 'idle') return;
     // 【为什么不是 dt > 0】Infinity > 0 为 true，会把 _elapsed 直接推到 Infinity，
     // 转场进度永远越界，卡在 out/load 阶段再也出不来。
-    if (safeDt(dt)) this._elapsed += dt;
+    if (safeDt(dtMs)) this._elapsed += dtMs;
 
     switch (this._phase) {
       case 'out':
@@ -290,6 +327,30 @@ export class SceneRouter {
     }
     this._elapsed = 0;
     this._setPhase(this._phase === 'out' ? 'load' : 'idle');
+  }
+
+  // ==================== 卸载 ====================
+
+  /**
+   * 卸载（P2）
+   *
+   * 【为什么需要它】
+   * 实例持有 `onChange` 回调，回调通常闭包引用了场景节点/进度条 UI。
+   * 路由对象（常常是单例，挂在 GameApp 上）不主动断开，
+   * 这些节点就会被一直引用着，切几次场景泄漏一批。
+   *
+   * 【为什么不在 destroy 里把 current 置 null】
+   * `current` 是"现在在哪个场景"，属于业务状态而非资源；
+   * 把它清掉会让"销毁后还能读到当前场景名"这个合理用法失效。
+   * 这里只断回调 + 停掉在途转场。
+   */
+  destroy(): void {
+    this._onChange = undefined;
+    this._phase = 'idle';
+    this._target = null;
+    this._params = null;
+    this._elapsed = 0;
+    this._history = [];
   }
 
   // ==================== 内部 ====================

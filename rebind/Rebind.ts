@@ -27,6 +27,8 @@
  * 【无引擎依赖】
  */
 
+import { hasOwn } from '../_core/guard';
+
 // ==================== 类型 ====================
 
 export type Modifier = 'ctrl' | 'shift' | 'alt' | 'meta';
@@ -136,7 +138,23 @@ export function encodeBinding(b: Binding): string {
   return sorted.length > 0 ? `${sorted.join('+')}+${key}` : key;
 }
 
-/** 解码规范字符串 */
+/**
+ * 解码规范字符串
+ *
+ * 【⚠️ 解析不出主键时必须抛错，不能返回 `{ key: undefined }`】
+ *
+ * `'+'` 这种"只有加号"的脏数据，split 之后再过滤空串会得到空数组，
+ * 于是 `parts[parts.length - 1]` 是 `undefined`——原实现照样返回了一个
+ * 结构合法的 `Binding`，只是 key 是 undefined。
+ *
+ * 后果不在这一行，而在下游：调用方拿到"看起来是对的对象"后
+ * 去调 `isReserved(undefined.key)`，内部 `key.trim()` 直接抛 TypeError。
+ * 实测（修复前）：`importState({ jump: '+' })` 抛出
+ * `Cannot read properties of undefined (reading 'trim')`，
+ * **整个导入批次中断**——后面明明正确的条目一条都没进。
+ *
+ * 让它在解析阶段就以"格式错误"失败，调用方的 `catch` 才能正常跳过这一条。
+ */
 export function decodeBinding(s: string): Binding {
   const raw = s.trim().toLowerCase();
   if (raw === '') {
@@ -145,6 +163,9 @@ export function decodeBinding(s: string): Binding {
 
   const parts = raw.split('+').map((x) => x.trim()).filter((x) => x !== '');
   const key = parts[parts.length - 1];
+  if (typeof key !== 'string' || key === '') {
+    throw new Error(`[Rebind] 按键组合 "${s}" 解析不出主键`);
+  }
 
   if (MOD_SET.has(key)) {
     throw new Error(`[Rebind] 修饰键 "${key}" 不能作为主键`);
@@ -162,10 +183,24 @@ export function decodeBinding(s: string): Binding {
 
 // ==================== 展示 ====================
 
-/** 单个按键的展示名 */
+/**
+ * 单个按键的展示名
+ *
+ * 【⚠️ 查 `PRETTY` 必须先判自有属性，不能 `if (PRETTY[k])`】
+ *
+ * `PRETTY` 是对象字面量，`PRETTY['constructor']` 会顺着原型链取到
+ * `Object.prototype` 上的**函数**（truthy！），于是被当成展示名返回。
+ * 实测（修复前）：
+ * ```
+ * prettyKey('constructor') → typeof 'function'，值 function Object() { [native code] }
+ * ```
+ * 键名来自外部输入（导入配置、宏录制、剪贴板粘贴）时，
+ * 设置界面上会显示一段函数源码；宿主再对它 `toUpperCase()`
+ * 就直接抛 TypeError。用 `hasOwn` 收口。
+ */
 export function prettyKey(key: string): string {
   const k = key.toLowerCase();
-  if (PRETTY[k]) return PRETTY[k];
+  if (hasOwn(PRETTY, k)) return PRETTY[k];
   return k.length === 1 ? k.toUpperCase() : capitalize(k);
 }
 
@@ -175,7 +210,8 @@ export function formatBinding(b: Binding): string {
     .slice()
     .sort((a, c) => MOD_ORDER.indexOf(a) - MOD_ORDER.indexOf(c));
 
-  const parts = mods.map((m) => PRETTY[m] ?? capitalize(m));
+  // 同 prettyKey：走自有属性查表，别让 'constructor' 之类取到原型方法
+  const parts = mods.map((m) => (hasOwn(PRETTY, m) ? PRETTY[m] : capitalize(m)));
   parts.push(prettyKey(b.key));
   return parts.join('+');
 }
@@ -319,7 +355,21 @@ export class Rebind {
       if (d) {
         this._setRaw(a, d);
         this._onChange?.(a);
+        continue;
       }
+      /**
+       * 【⚠️ 没有默认值的动作：绑定确实会被清掉，但必须通知】
+       *
+       * 原实现"先 clear 再只填有 default 的"，对**当前有绑定但没有默认值**
+       * 的动作等于静默解绑——内部状态已经没了，`onChange` 却没触发。
+       * 实测（修复前）：`rb.bind('custom', {key:'k'})` 后 `resetToDefault()`，
+       * `has('custom') === false`，但界面上还显示着 K。
+       *
+       * "恢复默认"对没有默认值的动作来说，解绑本身是合理的
+       * （默认值 = 没有默认值 = 不绑定），所以这里**保持解绑语义**，
+       * 只补上缺失的通知——真正的问题是"静默"，不是"丢弃"。
+       */
+      this._onChange?.(a);
     }
   }
 
@@ -350,19 +400,52 @@ export class Rebind {
    */
   importState(state: Readonly<Record<string, string>>): void {
     for (const [action, code] of Object.entries(state)) {
-      let b: Binding;
+      /**
+       * 【⚠️ 整条解析链路都要在 try 里，不能只包 decodeBinding】
+       *
+       * 原实现只把 `decodeBinding` 包进 try，后面三行留在 try 外：
+       * `isReserved(b.key)` 遇到坏数据（`b.key` 为 undefined）会抛
+       * TypeError，**并且这次抛出发生在 try 之外**——
+       * 于是坏数据不是"跳过这一条"，而是**中断整个导入批次**。
+       *
+       * 实测（修复前）：`importState({ jump: '+', attack: 'k' })` 抛异常后
+       * `has('attack') === false` —— 明明合法的 attack 也没导入。
+       * 玩家从云存档恢复按键，只要其中任意一条是脏数据（老版本遗留、
+       * 手改配置、剪贴板粘贴），整份设置就恢复失败，且无任何错误提示。
+       */
       try {
-        b = decodeBinding(code);
-      } catch {
-        continue;   // 格式错误，跳过
-      }
-      if (this.isReserved(b.key)) continue;
+        const b = decodeBinding(code);
+        if (typeof b.key !== 'string' || b.key === '') continue;  // 双保险
+        if (this.isReserved(b.key)) continue;
 
-      const owner = this._byCode.get(encodeBinding(b));
-      if (owner !== undefined && owner !== action) {
-        this._removeRaw(owner);
+        const owner = this._byCode.get(encodeBinding(b));
+        /**
+         * 【⚠️ 重复 code：保留先来的，跳过后来的】
+         *
+         * 原实现调 `_removeRaw(owner)` 把前一个动作**彻底解绑**
+         * （不是恢复默认，是变成"没有绑定"），而且**不触发 onChange**。
+         * 实测（修复前）：`importState({ a: 'k', b: 'k' })` 后
+         * a 无绑定、b 有绑定。
+         *
+         * 后果比"冲突没解决"更糟：a 静默失去绑定，而设置界面
+         * 因为没收到 onChange **仍显示旧键位**——玩家点了没反应，
+         * 会以为键盘坏了。
+         *
+         * 选"保留前者"而不是"后者覆盖前者"：导入是一批数据的整体恢复，
+         * 顺序通常取决于 `Object.entries`（对象字面量顺序），
+         * 让结果依赖这个顺序本来就危险；先到先得至少是稳定的。
+         */
+        if (owner !== undefined && owner !== action) continue;
+
+        const prev = this._bindings.get(action);
+        this._setRaw(action, b);
+        // 导入是"外部改状态"，UI 必须被通知，否则界面与内状态不一致
+        if (!prev || encodeBinding(prev) !== encodeBinding(b)) {
+          this._onChange?.(action);
+        }
+      } catch {
+        continue;   // 格式错误，跳过这一条，继续下一条
       }
-      this._setRaw(action, b);
     }
   }
 
@@ -389,10 +472,31 @@ export class Rebind {
     const old = this._bindings.get(action);
     if (!old) return false;
     this._bindings.delete(action);
+    /**
+     * 【为什么只算一次 encodeBinding】
+     * 原实现在判断和删除里各调一次——`encodeBinding` 内部要
+     * trim / toLowerCase / split / Set 去重 / sort，是这一行里最贵的操作，
+     * 而 `unbind` 这类调用在设置界面里会连续触发。行为完全等价，纯省一半。
+     */
+    const code = encodeBinding(old);
     // 只有反向索引还指向自己时才删（可能被别人覆盖了）
-    if (this._byCode.get(encodeBinding(old)) === action) {
-      this._byCode.delete(encodeBinding(old));
+    if (this._byCode.get(code) === action) {
+      this._byCode.delete(code);
     }
     return true;
+  }
+
+  /**
+   * 卸载（rule5：有 install 必须有对应的 uninstall/destroy）
+   *
+   * 【为什么必须有】
+   * `onChange` 闭包通常捕获整个设置界面。实例被丢弃但回调不清，
+   * 界面生命周期就被这个对象拖住了。清空后再调用查询方法都会返回空，
+   * 是"安全的空壳"，不会抛错。
+   */
+  destroy(): void {
+    this._bindings.clear();
+    this._byCode.clear();
+    for (const k of Object.keys(this._defaults)) delete this._defaults[k];
   }
 }

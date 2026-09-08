@@ -307,6 +307,20 @@ export class GestureRecognizer {
     RecognizeOptions;
   private _pts: Point[] = [];
   private _active = false;
+  /**
+   * 按下的时刻（`down()` 的那个点的时间戳）
+   *
+   * 【⚠️ 为什么必须单独记，不能读 `_pts[0].t`】
+   * `maxPoints` 是**滑动窗口**：超限时 `shift()` 丢的是**最早的点**，
+   * 而"按了多久"恰恰由最早的点决定。静止按住 1 秒产生 20 个采样点、
+   * `maxPoints: 8` 时，窗口里最早的点已经是第 650ms 的那个，
+   * 于是"按了 1000ms"被算成"按了 350ms"——长按阈值 600ms 判不出来，
+   * 1 秒的长按被识别成**单击**。
+   *
+   * 更麻烦的是它**只在特定设备上复现**：采样率越高、maxPoints 配得越小，
+   * 越容易触发。玩家的表现是"我明明按住了却触发了普通点击"。
+   */
+  private _downT: number | null = null;
 
   constructor(opts: RecognizerOptions = {}) {
     this._opts = {
@@ -333,6 +347,7 @@ export class GestureRecognizer {
   down(p: Point): void {
     this._pts = [p];
     this._active = true;
+    this._downT = p.t;
   }
 
   move(p: Point): void {
@@ -362,15 +377,32 @@ export class GestureRecognizer {
   up(p: Point): Gesture {
     if (!this._active) return { kind: 'none' };
     this.move(p);
+    /**
+     * 【⚠️ 起点的时间戳要用真实的按下时刻，不能用窗口里最早的点】
+     *
+     * 只把 `_pts[0]` 的 **t** 换成 `_downT`、坐标保持不动：
+     * 这样 `recognize` 算出的 dt 是真实按住时长，
+     * 而 `pathLength` / `totalTurn`（只依赖坐标）完全不受影响。
+     *
+     * 【为什么不在 move() 裁剪时"不丢起点"】
+     * 那会让窗口失去意义（轨迹无限增长），
+     * 而位移类判定（滑动距离、画圈）本来就该只看最近的一段。
+     * 时长与轨迹是两种语义，就该分开存。
+     */
+    if (this._downT !== null && this._pts.length > 0 && this._pts[0].t > this._downT) {
+      this._pts[0] = { x: this._pts[0].x, y: this._pts[0].y, t: this._downT };
+    }
     const g = recognize(this._pts, this._opts);
     this._pts = [];
     this._active = false;
+    this._downT = null;
     return g;
   }
 
   cancel(): void {
     this._pts = [];
     this._active = false;
+    this._downT = null;
   }
 
   /**
@@ -381,8 +413,9 @@ export class GestureRecognizer {
    */
   isLongPressSoFar(now: number): boolean {
     if (!this._active || this._pts.length === 0) return false;
-    const start = this._pts[0];
-    if (now - start.t < (this._opts.longPressMs ?? DEFAULTS.longPressMs)) {
+    // 用真实的按下时刻，而不是 `_pts[0].t`（它可能被 maxPoints 裁掉）
+    const startT = this._downT ?? this._pts[0].t;
+    if (now - startT < (this._opts.longPressMs ?? DEFAULTS.longPressMs)) {
       return false;
     }
     return pathLength(this._pts) < (this._opts.minDistance ?? DEFAULTS.minDistance);

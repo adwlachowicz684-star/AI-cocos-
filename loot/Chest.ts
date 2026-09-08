@@ -50,6 +50,7 @@
  */
 
 import { IRandomSource } from '../_core/types';
+import { clampNum } from '../_core/math';
 
 export type ChestState = 'idle' | 'rolled' | 'taken';
 
@@ -114,6 +115,7 @@ export class Chest<T> {
   private _currentIndices: number[] = [];
   private _rerollsLeft: number;
   private _takenIndex = -1;
+  private _lastDropped: number[] = [];
 
   constructor(items: readonly T[], opts: ChestOptions<T> = {}) {
     this._items = items;
@@ -217,13 +219,57 @@ export class Chest<T> {
     };
   }
 
-  /** 恢复状态（读档后 UI 能显示"上次没选完的宝箱"） */
+  /**
+   * 恢复状态（读档后 UI 能显示"上次没选完的宝箱"）
+   *
+   * 【⚠️ 存档里的索引必须逐个校验，不能直接 slice 进来用】
+   *
+   * 索引是**位置**，位置只在"池子没变"时才有效。而池子恰恰是会变的：
+   * - 版本更新删掉/插入了物品 → 后面的索引整体位移
+   * - 存档被改（外挂 / 手工编辑 / 跨版本迁移脚本写错）
+   *
+   * 越界时原实现静默产出 `undefined` 选项：
+   * 实测 `importState({current:[0,7,-3]})` 后 `current = ["sword", null, null]`，
+   * 玩家点第二个拿到 `undefined`，而宝箱状态已经被置成 `'taken'`——
+   * **奖励没了，宝箱也消耗了，不可恢复，且没有任何报错**。
+   * 这比崩溃糟得多：崩溃会立刻被发现，静默丢失只会被当成"运气差"。
+   *
+   * 【为什么是"丢弃越界项"而不是"抛错"】
+   * 与 `_pickIndices` 里"候选不足时放宽条件而不是少给选项"是同一条原则：
+   * 读档失败不该让玩家卡在加载界面。丢弃非法项、保留合法的，
+   * 至少玩家还能从剩下的选项里挑一个。
+   * 被丢弃的索引记进 `lastDropped`，调用方可以打日志排查。
+   */
   importState(snap: ChestSnapshot): void {
     this._state = snap.state;
     this._rerollsLeft = snap.rerollsLeft;
     this._takenIndex = snap.takenIndex;
-    this._currentIndices = snap.current.slice();
+
+    const dropped: number[] = [];
+    const kept: number[] = [];
+    for (const i of snap.current) {
+      if (Number.isInteger(i) && i >= 0 && i < this._items.length) kept.push(i);
+      else dropped.push(i);
+    }
+    this._lastDropped = dropped;
+    this._currentIndices = kept;
+
+    // 存档记的选择下标指向被丢弃的位置时，清成"未选"，避免 take() 拿到错位的东西
+    if (this._takenIndex >= kept.length) this._takenIndex = -1;
+
     this._applyIndices();
+  }
+
+  /**
+   * 上次 `importState` 被丢弃的非法索引（调试/日志用）
+   *
+   * 【为什么要有这个出口】
+   * 静默丢弃本身是必要的（见 importState），
+   * 但如果连"丢过"这件事都不留痕，配置错误就永远查不出来——
+   * 玩家只会反馈"宝箱少给了一个东西"。有个字段，至少能打点上报。
+   */
+  get lastDropped(): readonly number[] {
+    return this._lastDropped;
   }
 
   // ==================== 内部 ====================
@@ -338,12 +384,42 @@ export class Chest<T> {
     return work.length - 1;
   }
 
+  /**
+   * 【⚠️ 选项数量必须收口】
+   *
+   * 原写法 `Math.max(1, count ?? 3)` 两道防线都挡不住坏值：
+   * - `??` 只挡 null / undefined，NaN 直接穿过去
+   * - `Math.max(1, NaN)` 得到 **NaN**
+   *
+   * 于是 `_pickIndices` 里 `for (let k = 0; k < n; k++)` 的 `n` 是 NaN，
+   * 循环条件 `0 < NaN` 恒为 false → **一次都不执行**。
+   * 实测：`count: NaN` 时 `roll()` 返回空数组——玩家打开宝箱看见三个空位。
+   *
+   * 这个方向的错误特别隐蔽：不崩、不报、不抛，只是"这次没给东西"，
+   * 很容易被当成随机性或数据问题放过去。
+   *
+   * 上限 1e6 不是业务限制，是防止 `count: Infinity` 时撑出超大数组的兜底。
+   */
   private get _count(): number {
-    return Math.max(1, this._options.count ?? 3);
+    return clampNum(this._options.count, 1, 1e6, 3);
   }
 
   destroy(): void {
     this._current = [];
     this._currentIndices = [];
+    /**
+     * 【⚠️ 必须断开外部数组的引用】
+     *
+     * `owned` 是**调用方传进来的数组**（`addOwned` 会往里 push）。
+     * 只要本对象还持有它，这个数组就跟着本对象一起活着——
+     * 切场景时本对象被忘掉，调用方的已拥有列表也跟着不能被回收。
+     *
+     * 【为什么不清空数组本身】
+     * `owned.length = 0` 会连带清掉调用方的数据，那是**别人的数组**，
+     * 副作用会扩散到 Chest 之外。这里只把引用置空：断开的是"引用"，
+     * 不是"内容"。
+     */
+    this._options.owned = undefined;
+    this._lastDropped = [];
   }
 }

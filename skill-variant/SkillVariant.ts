@@ -135,6 +135,18 @@ export interface VariantContext {
 
 // ==================== 实现 ====================
 
+/**
+ * 合法的补丁操作集合
+ *
+ * 【为什么单独维护一份运行时集合】
+ * `PatchOp` 是编译期类型，运行时不存在。而补丁来自配置表（外部输入），
+ * 需要运行时校验。这里与 `PatchOp` 一一对应，漏改会在下面 `_validate`
+ * 的报错信息里立刻暴露（白名单变窄 → 合法变体注册失败，测试会红）。
+ */
+const VALID_OPS: ReadonlySet<string> = new Set<PatchOp>([
+  'set', 'add', 'mul', 'push', 'remove', 'max', 'min',
+]);
+
 export class SkillVariantSystem<T extends Record<string, unknown>> {
   private readonly _variants = new Map<string, VariantDef>();
   private readonly _evaluator?: (c: VariantCondition, ctx: VariantContext) => boolean;
@@ -185,6 +197,20 @@ export class SkillVariantSystem<T extends Record<string, unknown>> {
     for (const p of v.patches) {
       if (!p.path || p.path.trim() === '') {
         throw new Error(`[SkillVariant] 变体 "${v.id}" 有一条补丁的 path 为空`);
+      }
+      /**
+       * 【注册时就拦下拼错的 op，不要等到运行时】
+       * `PatchOp` 是字面量联合，TS 能挡住写死的拼写错误，
+       * 但挡不住从 JSON 配置表反序列化出来的字符串。
+       * `applyPatch` 末尾的 default 抛错是运行时兜底，
+       * 这里再拦一道是"早失败"——配置加载时就炸，
+       * 而不是玩家拿了遗物、打了半天才发现数值没变。
+       */
+      if (!VALID_OPS.has(p.op)) {
+        throw new Error(
+          `[SkillVariant] 变体 "${v.id}" 的补丁 "${p.path}" 使用了未知操作 ` +
+          `${JSON.stringify(p.op)}（只接受 ${[...VALID_OPS].join(' / ')}）`
+        );
       }
       if (p.op !== 'remove' && p.value === undefined) {
         throw new Error(
@@ -280,24 +306,58 @@ export class SkillVariantSystem<T extends Record<string, unknown>> {
     // ③ 互斥：同组只留优先级最高的
     const final: VariantDef[] = [];
     for (const v of picked) {
-      const blockedBy = final.find(
+      /**
+       * 【⚠️ 必须收集**所有**冲突者，不能只取第一个】
+       *
+       * 老实现用 `final.find(...)` 只找第一个冲突者、只处理它一个。
+       * 三变体场景就会漏检：
+       *
+       * ```
+       * A(prio 1)、B(prio 1)、C(prio 10, excludes:['A','B'])
+       * → 老实现 applied = ["B","C"]
+       * ```
+       *
+       * C 明确排除了 A **和** B，正确结果应只剩 C。
+       * 但 `find` 只命中 A：A 被替换成 C，B 原样留下。
+       * 因为"确实移除了一个"，表面上看互斥是生效的，极具欺骗性——
+       * 互斥规则（"这两个遗物不能同时改造同一技能"）悄悄部分失效。
+       */
+      const conflicts = final.filter(
         (f) => (f.excludes?.includes(v.id) ?? false) || (v.excludes?.includes(f.id) ?? false)
       );
-      if (!blockedBy) {
+      if (conflicts.length === 0) {
         final.push(v);
         continue;
       }
       if (this._onConflict === 'error') {
         throw new Error(
-          `[SkillVariant] 变体 "${v.id}" 与 "${blockedBy.id}" 互斥，但都被激活了`
+          `[SkillVariant] 变体 "${v.id}" 与 ` +
+          `"${conflicts.map((f) => f.id).join('"、"')}" 互斥，但都被激活了`
         );
       }
       if (this._onConflict === 'first') continue;
 
-      // priority：优先级高的胜出，替换掉低的
+      // priority：优先级严格高于**所有**冲突者才胜出
       const pv = v.priority ?? 0;
-      const pb = blockedBy.priority ?? 0;
-      if (pv > pb) final[final.indexOf(blockedBy)] = v;
+      let highest = -Infinity;
+      for (const f of conflicts) {
+        const pf = f.priority ?? 0;
+        if (pf > highest) highest = pf;
+      }
+      /**
+       * 【为什么是"高于所有"而不是"高于任一个"】
+       * 只要还有一个同优先级的冲突者在，换成新的就没有收益——
+       * 反而让结果依赖遍历顺序（谁先被 find 命中）。
+       * 严格高于全部，结果是确定的。
+       */
+      if (pv > highest) {
+        for (const f of conflicts) {
+          const i = final.indexOf(f);
+          if (i >= 0) final.splice(i, 1);
+        }
+        final.push(v);
+      }
+      // 否则：新变体被现有冲突者挡下，跳过
     }
 
     // ④ 按优先级排序（稳定：同优先级保持注册顺序）
@@ -452,12 +512,20 @@ export function applyPatch(target: Record<string, unknown>, p: Patch): void {
     case 'add':
       assertNumber(oldVal, p, 'add');
       assertOperand(p, 'add');
+      /**
+       * 【⚠️ 先算、后校验、最后才写回】
+       * 两个有限数相加/相乘**仍能溢出成 Infinity**（1e308 * 10）。
+       * 先写回再校验的话，抛错时目标字段已经被写成 Infinity 了——
+       * 调用方 catch 住这个异常继续用这个对象，拿到的是**半改坏的数据**。
+       */
+      assertResultFinite(((oldVal as number) + (p.value as number)) as number, p, 'add');
       cur[last] = (oldVal as number) + (p.value as number);
       break;
 
     case 'mul':
       assertNumber(oldVal, p, 'mul');
       assertOperand(p, 'mul');
+      assertResultFinite(((oldVal as number) * (p.value as number)) as number, p, 'mul');
       cur[last] = (oldVal as number) * (p.value as number);
       break;
 
@@ -494,6 +562,23 @@ export function applyPatch(target: Record<string, unknown>, p: Patch): void {
       }
       break;
     }
+
+    /**
+     * 【⚠️ 未知 op 必须抛错，不能静默"什么都不做"】
+     *
+     * 老实现 switch 没有 default：配置里 op 拼错（`multiply` 而非 `mul`）
+     * 时，这条补丁**什么都不改**，但仍然被算作"已应用"——
+     * `apply()` 返回的 `applied` 里赫然写着它的 id。
+     *
+     * 于是变体显示"已生效"、技能数值毫无变化，
+     * 玩家和策划都以为是"数值没配够"，没人会怀疑 op 名写错了。
+     * 表面上一片正常，是所有失败模式里最难查的一种。
+     */
+    default:
+      throw new Error(
+        `未知补丁操作：${JSON.stringify((p as { op: unknown }).op)}` +
+        `（只接受 set / add / mul / push / remove / max / min）`
+      );
   }
 }
 
@@ -524,6 +609,33 @@ function assertOperand(p: Patch, op: string): void {
     throw new Error(
       `${op} 要求 value 是有限数字，"${p.path}" 的 value 实际是 ` +
         `${JSON.stringify(v)}（${typeof v}）`
+    );
+  }
+}
+
+/**
+ * 校验**运算结果**仍是有限数字
+ *
+ * 【⚠️ 为什么只校验操作数还不够】
+ *
+ * `assertNumber`（旧值）和 `assertOperand`（补丁值）都只管**输入**。
+ * 但 JS 里两个有限数运算照样能溢出：`1e308 * 10 === Infinity`、
+ * `1e308 + 1e308 === Infinity`。
+ *
+ * 结果一旦变成 Infinity/NaN 就写回了技能定义，
+ * 之后伤害计算、UI 显示、存档序列化全部跟着坏——
+ * 而 `apply()` 返回的 `applied` 列表里，这个变体是"成功应用"的。
+ *
+ * 【为什么在写回之后立刻校验而不是先算再判断】
+ * 已写回再抛错看似"留下脏数据"，但本模块的 `apply()` 操作的是
+ * **深拷贝出来的副本**（见 `apply` 里的 cloned），
+ * 抛错后调用方拿不到这个副本，脏数据不会泄漏到原型上。
+ */
+function assertResultFinite(v: unknown, p: Patch, op: string): void {
+  if (typeof v !== 'number' || !Number.isFinite(v)) {
+    throw new Error(
+      `${op} 的结果不是有限数字，"${p.path}" 溢出成了 ${String(v)}` +
+      `（请检查该字段的量级与补丁值）`
     );
   }
 }

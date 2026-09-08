@@ -507,6 +507,14 @@ export class PerceptionSystem {
     }
 
     if (bestTarget >= 0 && bestVisibility > 0) {
+      // 【为什么要在覆盖 lastKnown 之前先存旧目标】
+      // `lastKnownX/Y` 是本帧新目标的位置，
+      // 而 `lost` 事件要报的是**旧目标**最后在哪——
+      // 顺序写反的话，业务侧会收到"玩家在诱饵位置失踪"这种错数据。
+      const prevTarget = st.targetId;
+      const prevX = st.lastKnownX;
+      const prevY = st.lastKnownY;
+
       st.visibleTime += dt;
       st.lastKnownX = bx;
       st.lastKnownY = by;
@@ -516,12 +524,30 @@ export class PerceptionSystem {
       const gain = p.cfg.alertGain ?? 1;
       st.alert = Math.min(this._threshold, st.alert + bestVisibility * gain * dt);
 
-      if (st.targetId !== bestTarget && st.targetId >= 0) {
-        // 换目标（比如玩家跑远了、出现了更近的诱饵）
-        st.targetId = bestTarget;
-      } else {
-        st.targetId = bestTarget;
+      /**
+       * 【换目标要发 lost，旧目标是"静默消失"的】
+       *
+       * 旧实现是两个分支体完全相同的 if/else（`if (a && b) x = c; else x = c;`），
+       * 读代码的人会以为"两支不同，只是刚好长得像"，
+       * 从而忽略真正缺的东西：**旧目标没有任何事件**。
+       *
+       * 后果：`targetId` 从玩家换成诱饵时，业务侧只会看到"还在战斗"，
+       * 而"玩家已经脱离视野"这件事从不发生——
+       * 表现为"敌人明明看着诱饵，BGM 却还在战斗状态"、
+       * "玩家的潜行 UI 一直显示已被发现"。
+       *
+       * 现在切换前补一条 `lost`（位置用旧目标的最后已知位置）。
+       */
+      if (prevTarget >= 0 && prevTarget !== bestTarget) {
+        this.onEvent?.({
+          type: 'lost',
+          selfId: p.id,
+          targetId: prevTarget,
+          x: prevX,
+          y: prevY,
+        });
       }
+      st.targetId = bestTarget;
 
       /**
        * 【⚠️ 曾经的 bug：视觉路径从不发 suspicious 事件】
@@ -806,6 +832,32 @@ export class PerceptionSystem {
       this.onEvent?.({ type: 'forgot', selfId, targetId: st.targetId });
       st.targetId = -1;
     }
+  }
+
+  /**
+   * 卸载（rule5）
+   *
+   * 【为什么 `reset()` 不够】
+   * `reset()` 只把每个感知者的**状态**换掉，
+   * `_perceivers` / `_targets` 两个 Map 里仍然挂着一整张感知图：
+   * 敌人对象、玩家对象、以及它们的位置引用。
+   * 换场景时如果不逐个 `removePerceiver`，
+   * 整个感知图会跟着系统对象一起滞留到下一次 GC。
+   *
+   * 另外 `onEvent` 是个外部闭包——只要还挂着，
+   * 闭包引用的整条作用域链（通常是整个战斗场景）都不会被回收。
+   *
+   * 【destroy 之后对象的状态】
+   * 感知者与目标都清空，`tick()` 退化成空转；
+   * 想继续用请重新构造。
+   */
+  destroy(): void {
+    this._perceivers.clear();
+    this._targets.clear();
+    this._stimuli.length = 0;
+    this._pendingAlerts.length = 0;
+    this._time = 0;
+    this.onEvent = undefined;
   }
 
   /** 清空（回合计/关卡切换） */

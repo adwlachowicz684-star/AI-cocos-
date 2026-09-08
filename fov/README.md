@@ -114,6 +114,20 @@ Shadowcasting **不是严格对称的**：可能出现
 
 `isSymmetric(ax, ay, bx, by, radius)` 可以检测特定两点是否对称。
 
+> ⚠️ **它是纯查询，调用前后 `explored` / `visible` 必须完全一致。**
+> 修复前它连调两次 `compute()`，第二次会把 B 的视野**写进 `explored`**，
+> 而且结束后 `visible` 停在 B 的视野上。
+> 实测（30×30 空地图）：`compute(10,10,6)` → `explored = 113`，
+> 调一次 `isSymmetric` 后变成 **148**。
+> 于是"探测双方是否互见"这个只读动作**不可逆地点亮了迷雾**，
+> AI 每查一次就点亮一小片，几场战斗后迷雾基本失效。
+> `explored` 只能靠 `resetExplored()` 全清（换关级操作），中途无法撤销。
+>
+> 现在两张图都快照、都还原。快照用 `Uint8Array.slice()`（零对象分配），
+> 而不是 `toArray()` + 逐格 `mark()`——后者会为每个可见格分配一个对象，
+> 在"每帧每怪都要判一次"的热路径上实测慢 **1.5~1.8 倍**，
+> 而且随 `explored` 累积越来越贵。
+
 ## API
 
 ### Shadowcasting
@@ -124,8 +138,16 @@ Shadowcasting **不是严格对称的**：可能出现
 ### Raycasting
 `compute(ox, oy, radius)` / `canSee`
 
+构造要求 `width` / `height` 为正，非正尺寸抛 `[Raycasting] 尺寸必须为正`
+（修复前 `new Raycasting(-5, 10)` 抛的是 `Invalid typed array length`，信息里没有单元名）。
+
 ### VisibilityMap
 `mark(x,y)` / `set(x,y,bool)` / `has(x,y)` / `clear()` / `count` / `toArray()`
+`mergeFrom(other)` / `snapshot()` / `restore(snap)`
+
+> `snapshot()` / `restore()` 是**零对象分配**的保存/还原（底层 `Uint8Array` 切片），
+> 用于 `isSymmetric` 这类"改完要还原"的场景。
+> `toArray()` 会为每个可见格分配一个对象，别在热路径上用它做快照。
 
 越界访问全部安全（返回 `false`）。
 

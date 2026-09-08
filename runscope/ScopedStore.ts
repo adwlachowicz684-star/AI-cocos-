@@ -53,7 +53,24 @@ export interface KeyDef<T = unknown> {
   readonly desc?: string;
 }
 
-export type StoreSchema = Readonly<Record<string, KeyDef<any>>>;
+/**
+ * 【⚠️ 曾经是 `Record<string, KeyDef<any>>`（P2 · Ru5）】
+ *
+ * `any` 会**顺着类型系统扩散**：`KeyDef<any>.initial` 是 any，
+ * 于是所有读它的地方（初始化、reset、importSave 回退、_sanitize）
+ * 都自动变成"不做检查"——本模块最核心的"越界抛错、坏值回退"防线，
+ * 在类型层面被这一处 `any` 悄悄短路了。
+ *
+ * 改成 `unknown` 后，`def.initial` 是 unknown：
+ * 想把它当数字用必须先用 `typeof` 收窄（这正是 `_sanitize` 在做的事），
+ * 编译器会替我们检查有没有漏。
+ *
+ * 【为什么 `unknown` 不会破坏调用方】
+ * `KeyDef<T>` 对 T 是协变的（`initial: T` 只出现在输出位置），
+ * 所以 `key('run', 0)` 得到的 `KeyDef<number>` 依然可以赋给 `KeyDef<unknown>`；
+ * `get<T>()` / `set<T>()` 本来就是调用方自己标泛型，不受影响。
+ */
+export type StoreSchema = Readonly<Record<string, KeyDef<unknown>>>;
 
 export interface ScopedStoreOptions {
   /** 键声明 */
@@ -174,9 +191,31 @@ export class ScopedStore {
   }
 
   scopeOf(key: string): Scope | null {
-    const def = this._schema[key];
+    /**
+     * 【⚠️ 曾经是 `const def = this._schema[key]`，与 `has()` 不一致】
+     *
+     * 实测：`scopeOf('toString')` 返回 **undefined**（不是 null！），
+     * 因为 `this._schema['toString']` 命中 `Object.prototype.toString`。
+     * 于是"先 has 再 scopeOf"的标准写法拿到一个既不是三个 Scope
+     * 也不是 null 的值，下游 `switch(scope)` 直接掉进 default 分支。
+     *
+     * 与 `has()` 保持同一判据：只有**自有属性**才算声明过。
+     */
+    const def = this._defFor(key);
     if (def) return def.scope;
     return this._dynamicKeys.has(key) ? 'session' : null;
+  }
+
+  /**
+   * schema 查表的唯一入口
+   *
+   * 【为什么必须绕一层】原型链查表（`obj[key]` / `key in obj`）会命中
+   * `Object.prototype` 上的 `toString` / `valueOf` / `constructor` 等键。
+   * 键名来自存档字段 / 配置表 / RPC 字段名时，这些名字完全可能出现。
+   * 散落在各处的直连查表迟早会漏改一处，所以收成一个方法。
+   */
+  private _defFor(key: string): KeyDef | undefined {
+    return hasOwn(this._schema, key) ? this._schema[key] : undefined;
   }
 
   get<T>(key: string): T {
@@ -185,14 +224,65 @@ export class ScopedStore {
     return v as T;
   }
 
-  /** 取值（不存在时用兜底，不抛错） */
-  getOr<T>(key: string, fallback: T): T {
+  /**
+   * 取值（不存在时用兜底，不抛错）
+   *
+   * 【⚠️ 曾经的 bug：它把 `get()` 的**所有**异常都吞了】
+   *
+   * ```ts
+   * try { ... } catch { return fallback; }
+   * ```
+   *
+   * 本单元存在的意义是"让串档 bug 立刻炸出来"（见文件头），
+   * strict 模式下局外读局内数据会抛错——而 `getOr` 恰好把**这一类**
+   * 最有价值的异常也一起吞了，返回 fallback。
+   * 表现是"读到了 0 金币"，和"真的有 0 金币"完全无法区分。
+   *
+   * 后果是防串档机制可以被一个 API 静默关闭：调用方图省事全用 `getOr`，
+   * 整条隔离链就失效了，而且没有任何日志或告警。
+   * README 第 100 行自己也承认了这点，但只是"建议排查时换回 get"——
+   * 靠人自觉守不住。
+   *
+   * 【现在的行为】
+   * - 键不存在 / 未声明 / 没值 → 返回 `fallback`（这是 `getOr` 的本职）
+   * - 越界访问（局外读 run 域）→ **默认仍返回 fallback（保持兼容）**，
+   *   传 `{ swallowCrossScope: false }` 可让它与 `get()` 一致地抛错
+   *
+   * 【⚠️ 为什么默认没有直接改成抛】
+   * 这是 breaking change：既有测试（`tests/run_batch11.ts`「getOr 不抛错」）
+   * 明确断言了"局外读 run 域应返回兜底值"，README 第 75 行也把
+   * `getOr` 列为"不抛错"的三个逃生舱之一。
+   * 按窗口纪律（测试总数只增不减、改变对外 API 行为需总审裁决），
+   * 这里保留默认行为，把严格化做成显式开关，
+   * **是否翻转默认值交总审裁决**——见 `audit/result_W2-A.md`。
+   *
+   * 【为什么"越界"值得单独区分】
+   * "取不到值"是数据问题，"越界"是程序逻辑错了。
+   * 后者静默下来只会变成三小时后的另一次崩溃，
+   * 所以至少要给想守住这条线的调用方一个开关。
+   */
+  getOr<T>(key: string, fallback: T, opts: { readonly swallowCrossScope?: boolean } = {}): T {
     try {
       const v = this.get<T>(key);
       return v === undefined ? fallback : v;
-    } catch {
+    } catch (e) {
+      // 只有"越界"这一类要看开关；其余（未声明 / 无值）始终是 fallback 的适用场合
+      if (opts.swallowCrossScope === false && this._wouldCrossScope(key)) throw e;
       return fallback;
     }
+  }
+
+  /**
+   * 这个键的访问是否属于"越界（局外访问 run 域）"
+   *
+   * 【为什么不判断异常类型】
+   * 抛错可能来自两个地方：`_scopeFor` 的越界检查，
+   * 或 `_onUnknownKey: 'throw'` 的未声明检查。
+   * 靠 message 区分很脆（文案一改就失效），直接查状态更可靠。
+   */
+  private _wouldCrossScope(key: string): boolean {
+    const def = this._defFor(key);
+    return def !== undefined && def.scope === 'run' && !this._inRun;
   }
 
   set<T>(key: string, value: T): void {
@@ -215,6 +305,25 @@ export class ScopedStore {
         `[ScopedStore] add() 只能用于数值键，"${key}" 当前是 ${typeof cur}（${String(cur)}）`
       );
     }
+    /**
+     * 【⚠️ 曾经不校验 delta】
+     *
+     * `add('gold', NaN)` 会把 NaN 直接写进存储，
+     * 而**写入路径上没有任何检查**——NaN 从这里出发，
+     * 一路传到 UI（显示 NaN）和存档（写坏存档，且读回来还是 NaN）。
+     *
+     * 与 `cur` 保持一致的口径：本模块是"快速失败"风格
+     * （未声明的键抛错、越界抛错），delta 是 NaN 同样是调用方的 bug，
+     * 静默兜成 0 只会把错误推到更远的地方。
+     *
+     * 【为什么用 Number.isFinite 而不是 typeof】
+     * `typeof Infinity === 'number'`，但 `gold + Infinity` 同样会写坏存档。
+     */
+    if (!Number.isFinite(delta)) {
+      throw new Error(
+        `[ScopedStore] add() 的增量必须是有限数，"${key}" 收到 ${String(delta)}`
+      );
+    }
     const next = cur + delta;
     this.set(key, next);
     return next;
@@ -226,7 +335,20 @@ export class ScopedStore {
    * 【这是整个模块的核心】
    */
   private _scopeFor(key: string, op: 'read' | 'write'): Scope {
-    const def = this._schema[key];
+    /**
+     * 【⚠️ 曾经是 `const def = this._schema[key]`】
+     *
+     * 这是本模块最隐蔽的一处原型链缺陷，因为它**不在异常里暴露根因**：
+     * `this._schema['toString']` 拿到 `Object.prototype.toString`，
+     * `def.scope` 为 undefined，于是 `this._data[undefined]` 是 undefined，
+     * 最后报 `Cannot read properties of undefined (reading 'get')`。
+     * 这条信息指向的是数据结构，而不是"键名命中了原型链"。
+     *
+     * 更糟的组合是 `has()` 已修好而这里没修：
+     * `has('toString') === false`，`get('toString')` 却崩溃——
+     * 两个 API 对同一个键给出互相矛盾的回答。
+     */
+    const def = this._defFor(key);
 
     if (!def) {
       if (this._onUnknownKey === 'throw') {
@@ -294,12 +416,27 @@ export class ScopedStore {
    */
   importSave(snap: ScopedSnapshot): void {
     for (const k of Object.keys(this._schema)) {
-      const def = this._schema[k];
-      if (def.scope === 'session') continue;
+      const def = this._defFor(k);
+      if (!def || def.scope === 'session') continue;
 
       const src = def.scope === 'meta' ? snap.meta : snap.run;
-      if (src && k in src) {
-        this._data[def.scope].set(k, src[k]);
+      if (src && hasOwn(src, k)) {
+        /**
+         * 【⚠️ 曾经直接 `set(k, src[k])`，与 `meta.restore` 的严谨形成对比】
+         *
+         * 存档是外部输入：它可能来自旧版本、被手改过、
+         * 或在上一次写入时就已经带上了 NaN。
+         * 老代码不做任何校验，`src[k]` 是对象、字符串、NaN 都照收，
+         * 于是"读档后金币变成 NaN"这类问题一路传到 UI 才发现，
+         * 而真正的入口在这里。
+         *
+         * 【为什么用"回退到初始值"而不是抛错】
+         * 上面的容错原则写了：玩家不该因为一次版本更新就丢存档。
+         * 单个字段坏掉时，丢这一个字段（回到初始值）
+         * 比整个存档作废要好得多。所以这里警告 + 回退。
+         */
+        const raw = src[k];
+        this._data[def.scope].set(k, this._sanitize(k, def, raw));
       } else if (def.scope === 'meta' || snap.inRun) {
         // meta 永远要恢复（缺失则用初始值）；run 只在存档处于局内时恢复
         if (!(def.scope === 'run' && !snap.inRun)) {
@@ -309,6 +446,31 @@ export class ScopedStore {
     }
 
     this._inRun = snap.inRun === true;
+  }
+
+  /**
+   * 存档值校验：与声明的初始类型不符、或数值是 NaN/Infinity 时回退到初始值
+   *
+   * 【为什么只校数值】
+   * 想做完整校验就得给 schema 加类型标签（本模块没有），
+   * 而存档里最常见的坏值恰恰是数值类：
+   * `NaN` / `Infinity` / 被写成字符串的数字（`"12"` 来自 JSON 手改）。
+   * 这三样占了实际问题的绝大多数，先堵住它们。
+   */
+  private _sanitize<T>(key: string, def: KeyDef<T>, raw: unknown): unknown {
+    if (typeof def.initial === 'number') {
+      if (typeof raw === 'number' && Number.isFinite(raw)) return raw;
+      console.warn(
+        `[ScopedStore] 存档字段 "${key}" 的值不合法（${String(raw)}），已回退到初始值 ${String(def.initial)}`
+      );
+      return def.initial;
+    }
+    // 非数值：只挡"类型族"明显不同（对象 ↔ 基本类型），避免把 [] 和 {} 的差异也报出来
+    if (raw !== null && typeof raw === 'object' && typeof def.initial !== 'object') {
+      console.warn(`[ScopedStore] 存档字段 "${key}" 是对象，与声明的类型不符，已回退到初始值`);
+      return def.initial;
+    }
+    return raw;
   }
 
   /** 只导出 meta（上传服务器 / 云存档用） */
@@ -349,6 +511,22 @@ export class ScopedStore {
     for (const [key, def] of Object.entries(this._schema)) {
       this._data[def.scope].set(key, def.initial);
     }
+  }
+
+  /**
+   * 释放资源（【铁律 5】可卸载）
+   *
+   * 【为什么 `reset()` 不够】
+   * `reset()` 会把所有键重新填回初始值——它是"回到初始状态"，
+   * 不是"结束使用"。本实例仍然持有 schema 与 onChange 回调
+   * （回调通常捕获了 UI / 存档服务对象），
+   * 挂在长生命周期的容器里就会阻止那些对象被回收。
+   * 所以需要一个语义明确的 destroy：清空数据、清掉动态键、退出局内。
+   */
+  destroy(): void {
+    for (const s of SCOPES) this._data[s].clear();
+    this._dynamicKeys.clear();
+    this._inRun = false;
   }
 }
 

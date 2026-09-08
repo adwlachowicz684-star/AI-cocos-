@@ -195,7 +195,25 @@ export class AudioManager {
     this._maxVoices = clampNum(cfg.maxVoices, 0, 512, 32);
     this._maxSamePerFrame = cfg.maxSameSoundPerFrame ?? 3;
     this._accumulate = cfg.accumulateOnDedupe ?? false;
-    this._master = clamp(cfg.masterVolume ?? 1, 0, 1);
+    /**
+     * 【⚠️ 主音量必须用 clampNum 收口，`clamp(v ?? 1, 0, 1)` 挡不住 NaN】
+     *
+     * `??` 只挡 null/undefined；而 `clamp` 本身是 `Math.min(Math.max(v, lo), hi)`，
+     * `Math.max(NaN, 0)` 仍是 **NaN** → 主音量直接变成 NaN。
+     *
+     * 实测（修复前）：`new AudioManager({masterVolume: NaN}).effectiveVolume(1)`
+     * 返回 **NaN**。这个 NaN 会一路传给引擎的音频接口，
+     * 表现通常是"静音"或"爆音"，而且**不报错、不打印任何警告**——
+     * 排查时只会看到"声音没了"，看不到音量字段是 NaN。
+     *
+     * 主音量的常见来源是玩家设置存档（拖滑块 → 序列化 → 读档），
+     * 存档被截断/版本升级字段缺失时就是 NaN，属于真实的到达路径。
+     *
+     * 【为什么下界是 0 上界是 1】
+     * 0 = 静音，是合法配置（不是非法值），不能被夹成 1。
+     * 这里要拦的只有 NaN 和越界值，顺手重定义合法语义会踩 `maxVoices` 那个坑。
+     */
+    this._master = clampNum(cfg.masterVolume, 0, 1, 1);
     this._catVol = new Map(Object.entries(cfg.categoryVolumes ?? {}));
   }
 
@@ -401,6 +419,26 @@ export class AudioManager {
     for (const h of this._active.values()) h.stopped = true;
     this._active.clear();
     this._pending.length = 0;
+  }
+
+  /**
+   * 【铁律 5】可卸载
+   *
+   * `stopAll()` 只停声音，**不清去重记录**——这是刻意的：
+   * 换场景时你想让"刚才播过"的记录继续生效，避免新场景开场的同一音效被误去重。
+   *
+   * `destroy()` 是"这个管理器不要了"，所以连去重记录一起清。
+   * 不清的话 `_lastPlayed` / `_frameCounts` 会一直吊着 soundId 字符串，
+   * 长期运行（音效 id 动态生成的场景，如 `hit_${uuid}`）就是纯泄漏。
+   *
+   * 【为什么不动 `_rejected` / `_deduped` / `_evicted` 统计】
+   * 调用方可能在销毁前刚读过 `describe()`；清掉统计等于抹掉现场。
+   * 这些是数字，不持有引用，GC 不关心它们。
+   */
+  destroy(): void {
+    this.stopAll();
+    this._lastPlayed.clear();
+    this._frameCounts.clear();
   }
 
   // ==================== 音量 ====================

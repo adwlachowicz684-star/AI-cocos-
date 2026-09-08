@@ -214,6 +214,25 @@ export function findPath(
 
   if (!grid.inBounds(start.x, start.y) || !grid.inBounds(goal.x, goal.y)) return null;
   if (!grid.isWalkable(goal.x, goal.y)) return null;
+  /**
+   * 【⚠️ 曾经只校验终点，不校验起点】
+   *
+   * 实测：5×5 网格把 (0,0) 设为不可走，`findPath(g, {0,0}, {4,4})`
+   * 照样返回一条**从墙里出发**的完整路径（长度 5）。
+   *
+   * 后果不是"多走一步"这么轻：
+   * 单位被推挤进墙里、或地形动态变化把脚下变成障碍时，
+   * 寻路依然"成功"，单位沿路径移动就穿墙出去了。
+   * 而调用方几乎都以"返回非 null"作为"可达"的依据，
+   * 于是兜底逻辑（传送回合法格 / 播放脱困动画）永远不触发。
+   *
+   * 【为什么直接返回 null 而不是"找最近合法格"】
+   * 与终点保持对称：终点在墙里返回 null，起点也该返回 null。
+   * "起点在墙里时自动找最近合法格"是另一个语义，
+   * 会让调用方分不清"我从 A 走到了 B"和"我从 A 附近走到了 B"，
+   * 真需要时应作为独立选项显式开启。
+   */
+  if (!grid.isWalkable(start.x, start.y)) return null;
 
   const sx = Math.floor(start.x);
   const sy = Math.floor(start.y);

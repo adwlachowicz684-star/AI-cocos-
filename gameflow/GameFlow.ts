@@ -30,6 +30,8 @@
  * 【无引擎依赖】
  */
 
+import { clampNum, safeDt } from '../_core/math';
+
 // ==================== 类型 ====================
 
 /** 一条转换规则 */
@@ -101,7 +103,36 @@ export class GameFlow<Ctx> {
   constructor(opts: GameFlowOptions<Ctx>) {
     this._context = opts.context;
     this._onChange = opts.onChange;
-    this._historyLimit = opts.historyLimit ?? 32;
+    /**
+     * 【⚠️ 为什么必须用 clampNum 而不是 `?? 32`】
+     *
+     * `historyLimit` 是**容量类字段**，而 `??` 只挡 `null`/`undefined`——
+     * NaN 会原样穿过去（"模式 B"）。
+     *
+     * 更糟的是它和 `_pushHistory` 的裁剪写法叠加后，
+     * 小值 / NaN 会让裁剪**反过来变成增长**。实测跑 200 次切换：
+     *
+     * ```
+     * historyLimit = 32（默认） → history 长度 32    ← 正常
+     * historyLimit = 1          → history 长度 401   ← 每次 +2
+     * historyLimit = 0          → history 长度 201   ← 每次 +1
+     * historyLimit = NaN        → history 长度 201   ← 每次 +1
+     * ```
+     *
+     * 根因是 `slice(-(keep - 1))`：keep ≤ 1 时参数变成 `slice(0)` 或正数，
+     * 退化成"几乎全量复制"，裁剪后长度不减反增。
+     * 而 `length > NaN` 恒为 false 时连裁剪分支都进不去。
+     *
+     * 后果是长会话下 `_history` 单调增长（内存泄漏，无报错），
+     * 且 `back()` 依赖 `history[length - 2]`，历史越长 `back()` 的语义越不可控。
+     *
+     * 【为什么下界是 1 而不是 0】
+     * 有人会把 0 理解成"不限制"，有人理解成"不保留历史"——
+     * 两种理解的实现完全不同，而这里的实现是第三种（无限增长）。
+     * 显式夹到 [1, 1e4] 是为了让"0 不代表不限制"变成编译期就能看见的事实，
+     * 避免出现第四种理解。
+     */
+    this._historyLimit = clampNum(opts.historyLimit, 1, 1e4, 32);
     this._initial = opts.initial;
 
     for (const d of opts.defs) {
@@ -248,12 +279,25 @@ export class GameFlow<Ctx> {
    * 3. 检查 auto 转换
    */
   update(dt = 0): void {
-    if (dt > 0) {
-      /**
-       * 【⚠️ 负 dt 不倒退】
-       * 切后台回来、时间校准、手滑传错，都可能给负 dt。
-       * 让 timeInState 变成负数会让"停留 3 秒后自动跳过"这类逻辑永不触发。
-       */
+    /**
+     * 【⚠️ 为什么用 safeDt(dt) 而不是 if (dt > 0)】
+     *
+     * `dt > 0` 挡得住负数和 0，但挡不住 **Infinity**
+     * ——`Infinity > 0` 是 true，于是 `timeInState` 一步变成 Infinity，
+     * 此后任何"停留 N 秒后自动跳过"的判断（`timeInState > 3`）
+     * 全部恒真，auto 转换在同一帧里被反复触发。
+     *
+     * 实测：`update(Infinity)` 之后 `timeInState === Infinity`。
+     *
+     * 触发源是现成的：`performance.now()` 差值在时钟回拨/暂停恢复时
+     * 可以算出 Infinity（除以 0 的 dt），而 Infinity 是**静默**的
+     * ——它不报错，只是让所有时间判断永远成立。
+     *
+     * 同批的 `tutorial`（:211）注释里明确写了
+     * "为什么不是 dt > 0：Infinity > 0 为 true"，本单元漏了这条。
+     * 全库统一用 `safeDt`（只有"有限且为正"才通过）。
+     */
+    if (safeDt(dt)) {
       this._timeInState += dt;
     }
 
@@ -274,15 +318,28 @@ export class GameFlow<Ctx> {
   // ==================== 内部 ====================
 
   private _findTransition(to: string): FlowTransition<Ctx> | null {
+    /**
+     * 【⚠️ 为什么删掉了原来那个"第一个 for 循环"】
+     *
+     * 原实现的第一个循环写作：
+     *
+     * ```typescript
+     * if (t.when(ctx) && (t.to === to || t.to === this._current)) {
+     *   if (t.to === to) return t;      // ← 唯一能 return 的分支
+     * }
+     * ```
+     *
+     * 内层又要求 `t.to === to`，于是外层那个 `|| t.to === this._current`
+     * **永远不会导致 return**——它唯一的两个作用是：
+     * ① 让 `t.when()` 被多调用一次（有副作用的 when 会被执行两遍）；
+     * ② 让读代码的人以为"self 转换在这里被特殊处理了"。
+     *
+     * 整个第一循环等价于"取第一个 when 成立且 to===to 的转换"，
+     * 与第二循环**逐字等价**——是残留的死代码，且带误导性注释
+     * （"force 时允许 self"，但本函数根本收不到 force 参数）。
+     */
     const cur = this._states.get(this._current);
     if (!cur) return null;
-    for (const t of cur.transitions ?? []) {
-      // force 时允许 self，这里按声明顺序取第一个满足的
-      if (t.when(this._context) && (t.to === to || t.to === this._current)) {
-        if (t.to === to) return t;
-      }
-    }
-    // 上面的写法对 self 转换有歧义，单独处理
     for (const t of cur.transitions ?? []) {
       if (t.to === to && t.when(this._context)) return t;
     }
@@ -309,12 +366,24 @@ export class GameFlow<Ctx> {
 
   private _pushHistory(id: string): void {
     this._history.push(id);
-    if (this._history.length > this._historyLimit) {
-      // 保留开头（初始状态）和最近的记录
-      const keep = this._historyLimit;
+    const keep = this._historyLimit;
+    if (this._history.length > keep) {
+      // 保留开头（初始状态）和最近的 keep - 1 条
+      /**
+       * 【⚠️ 为什么写成 `slice(length - (keep - 1))` 而不是 `slice(-(keep - 1))`】
+       *
+       * 负数参数的 `slice` 在 `keep <= 1` 时会变成另一个意思：
+       * `slice(-0)` 等于 `slice(0)`（**整段复制**），
+       * `slice(-(-1))` 等于 `slice(1)`（只砍掉开头一个）。
+       * 两种情况下裁剪后的数组都比裁剪前更长或等长——
+       * 裁剪代码变成了增长代码，而且没有任何报错。
+       *
+       * 用**正数起点**表达"取末尾 keep-1 条"没有这个歧义：
+       * `keep` 已由 `clampNum` 夹到 ≥ 1，起点永远落在数组内。
+       */
       this._history = [
         this._history[0],
-        ...this._history.slice(-(keep - 1)),
+        ...this._history.slice(this._history.length - (keep - 1)),
       ];
     }
   }

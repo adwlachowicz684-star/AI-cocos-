@@ -33,7 +33,23 @@
  */
 
 import { IDisposable } from '../_core/types';
-import { safeDt } from '../_core/math';
+import { safeDt, numOr } from '../_core/math';
+
+/**
+ * 秒数（等待时长 / 冷却时长）的收口
+ *
+ * 【为什么不能直接用 numOr】
+ * numOr 把 **±Infinity 也算作非有限值**并回落到默认值。
+ * 但 `Infinity` 在"等待/冷却"这个语境里是**合法且有用**的语义：
+ *   - `Wait(Infinity)`      = 永远等待（等外部条件打断）
+ *   - `Cooldown(Infinity)`  = 一次性技能，放完就永久进 CD
+ * 直接回落成 0 会把这两种意图反过来变成"立刻通过 / 完全没有冷却"，
+ * 属于静默改变既有行为。所以这里只收口 NaN 与负数，放行 Infinity。
+ */
+function fixSeconds(v: number): number {
+  if (v === Infinity) return Infinity;
+  return Math.max(0, numOr(v, 0));
+}
 
 export enum BTStatus {
   Success = 0,
@@ -62,6 +78,23 @@ export type BTChild<C> = IBTNode<C>;
  * Selector（选择节点）：依次尝试，第一个非 Failure 的结果作为结果
  * 语义："做 A，不行就做 B，再不行做 C"
  */
+/**
+ * 【⚠️ 为什么 destroy 要去重】
+ * 同一个节点实例被挂在多个位置是常见写法（比如"公共的前置检查"节点）。
+ * 老实现 `for (const c of this._children) c.destroy()` 会把它 destroy 两遍
+ * ——实测 Selector 里放两个相同子节点，destroy 计数是 2。
+ * 而 destroy 通常是"注销监听 / 归还对象池"，跑两遍可能二次归还同一个对象，
+ * 属于那种"当时不报错、以后随机崩"的问题。
+ */
+function destroyAllUnique(children: ReadonlyArray<IBTNode<unknown>>): void {
+  const seen = new Set<IBTNode<unknown>>();
+  for (const c of children) {
+    if (seen.has(c)) continue;
+    seen.add(c);
+    (c as IBTNode<unknown>).destroy();
+  }
+}
+
 export class Selector<C> implements IBTNode<C> {
   private _runningIndex = -1;
 
@@ -92,7 +125,7 @@ export class Selector<C> implements IBTNode<C> {
   }
 
   destroy(): void {
-    for (const c of this._children) c.destroy();
+    destroyAllUnique(this._children as ReadonlyArray<IBTNode<unknown>>);
   }
 }
 
@@ -131,7 +164,7 @@ export class Sequence<C> implements IBTNode<C> {
   }
 
   destroy(): void {
-    for (const c of this._children) c.destroy();
+    destroyAllUnique(this._children as ReadonlyArray<IBTNode<unknown>>);
   }
 }
 
@@ -143,20 +176,43 @@ export class Sequence<C> implements IBTNode<C> {
  *   'any'  —— 任一成功
  */
 export class Parallel<C> implements IBTNode<C> {
+  /** 已返回过 Success 的子节点下标（仅在 skipCompleted 时使用） */
+  private readonly _done = new Set<number>();
+
   constructor(
     public readonly name: string,
     private readonly _children: BTChild<C>[],
-    private readonly _policy: 'all' | 'any' = 'all'
+    private readonly _policy: 'all' | 'any' = 'all',
+    /**
+     * 已 Success 的子节点是否不再 tick（默认 false = 保持既有行为）
+     *
+     * 【⚠️ 默认为什么不开】
+     * 默认行为是每帧 tick **所有**子节点，包括已经 Success 的——
+     * 实测：一个已 Success 的 Action 在 3 帧内被重复执行 3 次。
+     * 若子节点是"播放音效""发射子弹"这类动作，就会被反复触发。
+     * 但 Parallel 也常被用来跑"需要每帧持续生效"的并行行为，
+     * 直接改成跳过会改变现有树的行为，所以做成可选项：
+     * 需要"一次性动作"语义时显式传 true。
+     */
+    private readonly _skipCompleted = false
   ) {}
 
   tick(ctx: C, bb: Blackboard, dt: number): BTStatus {
     let successCount = 0;
     let anyRunning = false;
 
-    for (const c of this._children) {
-      const s = c.tick(ctx, bb, dt);
-      if (s === BTStatus.Success) successCount++;
-      else if (s === BTStatus.Running) anyRunning = true;
+    for (let i = 0; i < this._children.length; i++) {
+      if (this._skipCompleted && this._done.has(i)) {
+        successCount++;
+        continue;
+      }
+      const s = this._children[i].tick(ctx, bb, dt);
+      if (s === BTStatus.Success) {
+        successCount++;
+        if (this._skipCompleted) this._done.add(i);
+      } else if (s === BTStatus.Running) {
+        anyRunning = true;
+      }
     }
 
     if (this._policy === 'any' && successCount > 0) return BTStatus.Success;
@@ -165,11 +221,12 @@ export class Parallel<C> implements IBTNode<C> {
   }
 
   reset(): void {
+    this._done.clear();
     for (const c of this._children) c.reset();
   }
 
   destroy(): void {
-    for (const c of this._children) c.destroy();
+    destroyAllUnique(this._children as ReadonlyArray<IBTNode<unknown>>);
   }
 }
 
@@ -224,19 +281,44 @@ export class Succeeder<C> implements IBTNode<C> {
 /**
  * Repeater：重复执行子节点 N 次（times = Infinity 表示无限）
  *
+ * 【⚠️ 子节点返回 Failure 时不会被上报，而是转成 Running】
+ * 只有次数用尽才返回 Success。也就是说挂在 Repeater 下的子节点
+ * 永远看不到 Failure 往外传——想让 Failure 终止循环，
+ * 得在 Repeater 外面套一层来判断。这里保持既有语义（改了会让现有树行为突变），
+ * 只把这条写清楚。
+ *
+ * 【⚠️ times = 0 表示"一次都不执行"】
+ * 老实现先 tick 子节点、再 `_count++ >= _times` 判定，
+ * 于是 times = 0 时子节点**仍会执行一次**才返回 Success。
+ * 现在在 tick 入口就判定，0 次 = 真的一次都不跑。
+ *
  * 【坑】无限 Repeater 下的子节点必须会返回 Success/Failure，
  * 如果永远 Running，Repeater 就永远计数不到，AI 会卡住。
  */
 export class Repeater<C> implements IBTNode<C> {
   private _count = 0;
+  private readonly _times: number;
 
   constructor(
     public readonly name: string,
     private readonly _child: BTChild<C>,
-    private readonly _times: number = Infinity
-  ) {}
+    times: number = Infinity
+  ) {
+    /**
+     * 【⚠️ times = NaN 会退化成"无限"】
+     * `_count >= NaN` 恒为 false，于是 Repeater 永不结束——
+     * 实测 100 帧内子节点被执行 100 次且状态始终是 Running。
+     * 次数来自配表（"重复 3 次攻击"），NaN 是漏填时的典型值，
+     * 用 numOr 收口成文档默认值 Infinity（与"不传参"一致）。
+     */
+    this._times = numOr(times, Infinity);
+  }
 
   tick(ctx: C, bb: Blackboard, dt: number): BTStatus {
+    // 0 次（或负数）= 不执行，直接算完成。
+    // 用肯定式取反写，NaN 也一并落在这一支（虽然构造时已收口）。
+    if (!(this._times > 0)) return BTStatus.Success;
+
     const s = this._child.tick(ctx, bb, dt);
 
     if (s === BTStatus.Running) return BTStatus.Running;
@@ -269,12 +351,22 @@ export class Repeater<C> implements IBTNode<C> {
  */
 export class CooldownDecorator<C> implements IBTNode<C> {
   private _remain = 0;
+  private readonly _seconds: number;
 
   constructor(
     public readonly name: string,
     private readonly _child: BTChild<C>,
-    private readonly _seconds: number
-  ) {}
+    seconds: number
+  ) {
+    // 【为什么要在构造函数里就把 _seconds 收口】
+    // 这个秒数来自配表（JSON/Excel 解析出来的 number），漏填时是 null、''、undefined。
+    // 原写法把它原样存下来：`_remain = NaN` 之后 `_remain > 0` 恒为 false
+    // —— 冷却**永不生效**，表现为技能每帧释放，而 `remain` 读到 NaN，
+    // 日志里也看不出异常。NaN 一旦进到 _remain 就没有自愈机会（后续只做减法）。
+    // 收口成"NaN / 负数 = 0 秒（即无冷却）"，让 remain 至少是个可观测的有限数。
+    // Infinity 保留原语义（放一次后永久冷却 = 一次性技能），见 fixSeconds。
+    this._seconds = fixSeconds(seconds);
+  }
 
   tick(ctx: C, bb: Blackboard, dt: number): BTStatus {
     if (this._remain > 0) {
@@ -351,13 +443,23 @@ export class Wait<C> implements IBTNode<C> {
   private _elapsed = 0;
   /** 首次进入时是否重置计时器（默认 true） */
   private readonly _autoReset: boolean;
+  private readonly _seconds: number;
 
   constructor(
     public readonly name: string,
-    private readonly _seconds: number,
+    seconds: number,
     autoReset = true
   ) {
     this._autoReset = autoReset;
+    // 【为什么要在构造函数里就把 _seconds 收口】
+    // 等待时长通常直接来自配表。漏填/填错（null、''、NaN）时原写法会把 NaN 存进 _seconds，
+    // 于是 tick 里的 `_elapsed >= this._seconds` 恒为 false ——
+    // **这个节点永远返回 Running**，整棵树的后续节点再也不执行。
+    // 表现为怪物站着不动、Boss 不放技能，而且不报错、不看日志完全定位不到
+    // （实测：Wait(0.1) 600 帧内成功 85 次，Wait(NaN) 是 0 次，状态始终 Running）。
+    // 收口成"非法值 = 0 秒"后，最坏情况是"不等待直接通过"，AI 退化但不会卡死。
+    // 负数同理：负的等待时长语义不明，一并夹到 0。
+    this._seconds = fixSeconds(seconds);
   }
 
   tick(_ctx: C, _bb: Blackboard, dt: number): BTStatus {

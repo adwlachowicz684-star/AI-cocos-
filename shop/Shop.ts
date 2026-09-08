@@ -60,7 +60,7 @@
  */
 
 import { needCount, hasOwn } from '../_core/guard';
-import { numOr } from '../_core/math';
+import { clampNum, numOr } from '../_core/math';
 
 /**
  * 安全读取钱包余额
@@ -85,6 +85,28 @@ import { numOr } from '../_core/math';
  * 这里只是把"没有"扩展成"没有或不可用"，保持一致；
  * 数量这类**调用方写错**的参数才走 `needCount` 抛错。
  */
+/**
+ * 归一化区间：顺序写反时交换，非数值时回落，并按需要夹下界
+ *
+ * @param range 原始区间
+ * @param minFloor 下界的最小值（库存用它夹到 0，价格倍率不夹）
+ */
+function normalizeRange(
+  range: readonly [number, number],
+  minFloor = -Infinity
+): [number, number] {
+  let lo = numOr(range[0], 1);
+  let hi = numOr(range[1], 1);
+  if (lo > hi) {
+    const t = lo;
+    lo = hi;
+    hi = t;
+  }
+  lo = Math.max(minFloor, lo);
+  hi = Math.max(lo, hi);
+  return [lo, hi];
+}
+
 function readWallet(wallet: Record<string, number>, currency: string): number {
   if (!hasOwn(wallet, currency)) return 0;
   return numOr(wallet[currency], 0);
@@ -144,10 +166,40 @@ export interface TradeResult {
   readonly available?: number;
 }
 
+export interface ShopOptions {
+  /**
+   * 流水上限（超出丢最老的）
+   *
+   * 【为什么必须有上界，默认 200 而不是无限】
+   * 商店流水是服务器常驻进程里增长最快的一类日志：
+   * 每个玩家每次购买/出售各一条。没有上限时，一次长会话累积几十万条后，
+   * 内存和 `netSpent()` 的遍历（每次全表扫描）会同步劣化。
+   * 实测（修复前）：连续 5000 次购买后 `log.length === 5000`，只增不减。
+   *
+   * 与 `currency` 单元的 `logLimit`（默认 200）对齐，口径一致。
+   */
+  readonly logLimit?: number;
+}
+
+/** 与 currency 单元一致的默认流水上限 */
+const DEFAULT_LOG_LIMIT = 200;
+
 export class Shop {
   private readonly _items = new Map<string, ShopItem>();
   private readonly _stock = new Map<string, StockEntry>();
   private _pricing: PricingFn | null = null;
+  private readonly _logLimit: number;
+
+  constructor(opts: ShopOptions = {}) {
+    /**
+     * 【为什么用 clampNum 而不是 `??`】
+     * `??` 挡不住 NaN，而 `logLimit = NaN` 会让
+     * `log.length > NaN` 恒为 false —— 等于"没有上限"，
+     * 正是这个字段要防的那件事。clampNum 兜到 200。
+     * 上界 1e7 是内存护栏：百万级流水约百 MB，再大就该换存储了。
+     */
+    this._logLimit = clampNum(opts.logLimit, 0, 1e7, DEFAULT_LOG_LIMIT);
+  }
 
   /**
    * 交易流水（用于统计与反作弊）
@@ -163,6 +215,26 @@ export class Shop {
     total: number;
     currency: string;
   }> = [];
+
+  /**
+   * 记一条流水并按 logLimit 裁剪
+   *
+   * 【为什么统一收口到这里】
+   * 裁剪逻辑如果散在 buy / sell 两处，迟早有一处漏掉——
+   * 而漏掉的那侧（比如 sell）会被反复调用（刷物品），涨得更快。
+   */
+  private _recordLog(entry: {
+    itemId: string;
+    side: TradeSide;
+    qty: number;
+    total: number;
+    currency: string;
+  }): void {
+    this._log.push(entry);
+    if (this._log.length > this._logLimit) {
+      this._log.splice(0, this._log.length - this._logLimit);
+    }
+  }
 
   // ==================== 商品定义 ====================
 
@@ -324,8 +396,31 @@ export class Shop {
     const candidates = pool ?? Array.from(this._items.keys());
     if (candidates.length === 0) return [];
 
-    const [mkMin, mkMax] = opts.markupRange ?? [1, 1];
-    const [stMin, stMax] = opts.stockRange ?? [1, 1];
+    /**
+     * 【⚠️ 区间必须归一化：min > max 会产出负数库存】
+     *
+     * `n = stMin + floor(rng * (stMax - stMin + 1))`，
+     * 当 `stMin > stMax` 时括号里是负数，结果跟着变负——
+     * 而 `-1` 在本单元是**"无限库存"**的语义，
+     * 于是"配错了区间"被静默翻译成"这件商品永远卖不完"。
+     * 实测（修复前）：`stockRange: [5, 1]` → `stockOf('a') === 2`；
+     * `stockRange: [0, -5]` → `stockOf('b') === -4`（无限）。
+     *
+     * 这是经济系统的静默失效，比抛错糟得多。
+     *
+     * 【为什么是"交换"而不是抛错】
+     * 区间来自配表/关卡生成参数，`restock` 又在刷每层货架时调用——
+     * 抛错等于整层生成失败。作者把上下界写反是**意图明确但顺序写错**，
+     * 交换后正好是他要的那个区间，代价最低。
+     *
+     * 【为什么 stock 的下界还要夹到 0】
+     * 交换只能救"顺序写反"，救不了"下界本身就是负的"（`[-5, 0]`）。
+     * 负数量没有业务含义，且同样会落到"无限库存"上，所以夹到 0。
+     */
+    const mkRange = normalizeRange(opts.markupRange ?? [1, 1]);
+    const stRange = normalizeRange(opts.stockRange ?? [1, 1], 0);
+    const [mkMin, mkMax] = mkRange;
+    const [stMin, stMax] = stRange;
 
     const picked: string[] = [];
     const bag = candidates.slice();
@@ -423,7 +518,7 @@ export class Shop {
     // 扣库存
     if (stock.count > 0) stock.count -= qty;
 
-    this._log.push({ itemId, side: 'buy', qty, total, currency });
+    this._recordLog({ itemId, side: 'buy', qty, total, currency });
     return { ok: true, unitPrice: unit, total };
   }
 
@@ -456,7 +551,7 @@ export class Shop {
     const stock = this._stock.get(itemId);
     if (stock && stock.count >= 0) stock.count += qty;
 
-    this._log.push({ itemId, side: 'sell', qty, total, currency });
+    this._recordLog({ itemId, side: 'sell', qty, total, currency });
     return { ok: true, unitPrice: unit, total };
   }
 
