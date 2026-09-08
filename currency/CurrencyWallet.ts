@@ -56,8 +56,6 @@
 
 // ==================== 类型 ====================
 
-import { clampNum } from '../_core/math';
-
 export interface CurrencyDef {
   readonly id: string;
   readonly name?: string;
@@ -116,43 +114,11 @@ export interface SpendResult {
 
 // ==================== 工具 ====================
 
-/**
- * 按精度取整（消除浮点误差）
- *
- * 【⚠️ 为什么要给结果加 `Number.isFinite` 兜底】
- *
- * `10 ** precision` 在 precision 稍大时就会溢出：`10 ** 400 === Infinity`。
- * 于是 `Math.round(v * Infinity) / Infinity` = `Infinity / Infinity` = **NaN**，
- * 而且**没有任何报错**——余额从此变成 NaN，后续所有 add/spend 继续传播 NaN。
- *
- * 实测（修复前），`precision: 400`：
- * ```
- * 初始余额 = NaN
- * add(gold, 5) -> applied = NaN，balance = NaN
- * ```
- * 而 `precision: -1` 恰好走 `precision <= 0` 分支，**碰巧安全**，
- * 这正是"越界值静默穿透"最难发现的地方：只有正数越界才会中招。
- *
- * 兜底策略：结果非有限时退化为 `Math.round(v)`（丢精度但保住量级），
- * 比返回 NaN 好——NaN 会让 `canAfford` 之类的比较全部恒假。
- */
+/** 按精度取整（消除浮点误差） */
 function quantize(v: number, precision: number): number {
   if (precision <= 0) return Math.round(v);
   const f = 10 ** precision;
-  const out = Math.round(v * f) / f;
-  /**
-   * 【为什么只对"结果"兜底，不对"入参"兜底】
-   *
-   * 曾经这里先判 `!Number.isFinite(v) → return 0`，
-   * 结果把 `cap === Infinity`（钻石不封顶）的货币算成了 `room === 0`，
-   * 于是 `exchange` 一律返回 `insufficient`——既有回归「兑换成功」当场变红。
-   *
-   * 教训：`Infinity` 在本模块是**合法入参**（不封顶货币），
-   * 非有限值里只有 NaN 是坏的，而 NaN 会自然传导成 NaN 结果。
-   * 所以守卫放在结果上：只有 `10 ** precision` 溢出才会产出 NaN，
-   * 那种情况退化成 `Math.round(v)` 丢精度但保住量级。
-   */
-  return Number.isFinite(out) ? out : Math.round(v);
+  return Math.round(v * f) / f;
 }
 
 // ==================== 实现 ====================
@@ -182,17 +148,7 @@ export class CurrencyWallet {
         initial: d.initial ?? 0,
         cap: d.cap ?? Infinity,
         floor: d.floor ?? 0,
-        /**
-         * 【为什么用 clampNum 而不是 `?? 0`】
-         *
-         * `??` 只挡 `undefined`，挡不住 NaN / Infinity / 越界的大数。
-         * 配置表里 `precision` 写 `4`（4 位小数）还是手误写成 `400`，
-         * 差别是**整个钱包静默变成 NaN**（见 quantize 的注释）。
-         *
-         * 上界取 10：超过 10 位小数在 float64 里已无意义（精度只有 ~15~17 位有效数字），
-         * 再大只会放大溢出风险。下界 0 保持"整数货币"的既有语义。
-         */
-        precision: clampNum(d.precision, 0, 10, 0),
+        precision: d.precision ?? 0,
         tracked: d.tracked ?? true,
         data: d.data ?? null,
       };
