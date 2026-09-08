@@ -206,6 +206,44 @@ export class VisibilityMap {
     }
     return out;
   }
+
+  /**
+   * 快照底层位图（**零对象分配**）
+   *
+   * 【⚠️ 为什么保存/还原要用它，而不是 `toArray()` + 逐格 `mark()`】
+   *
+   * `toArray()` 会为**每个可见格**分配一个 `{x, y}` 对象
+   * （见 `mergeFrom` 上方那段注释里同样的批评）。
+   * 快照一张 4000 格的图就是 4000 次分配，
+   * 而"保存 → 改 → 还原"这个动作在 `isSymmetric` 里**一次要来两回**。
+   *
+   * 底层本来就是 `Uint8Array`，直接 `slice()` 是 O(w·h) 次内存拷贝、
+   * **零对象分配**，还原也是一次 `set()`。
+   *
+   * 实测（60×60 地图，1000 次平均，验收方 W4-A 的数据）：
+   * ```
+   * 半径 6  → toArray 方案 0.0261 ms/次，切片方案 0.0154 ms/次（1.70x）
+   * 半径 12 → 0.0392 vs 0.0265（1.48x）
+   * ```
+   * 而且它随 explored 累积变贵（玩得越久越慢）。
+   *
+   * 【为什么返回的是副本而不是引用】
+   * 返回引用会让调用方拿到"跟着本图一起变"的快照，
+   * 那就不是快照了。`slice()` 保证与后续写入隔离。
+   */
+  snapshot(): Uint8Array {
+    return this._data.slice();
+  }
+
+  /** 从快照还原（与 `snapshot()` 配对） */
+  restore(snap: Uint8Array): void {
+    if (snap.length !== this._data.length) {
+      throw new Error(
+        `[VisibilityMap] 快照尺寸不一致：${snap.length} → ${this._data.length}`
+      );
+    }
+    this._data.set(snap);
+  }
 }
 
 // ============================================================
@@ -426,8 +464,13 @@ export class Shadowcasting {
      * 顺手做一次 `isSymmetric`，自己的 `visible` 就被换成了别人的视野——
      * 同样是"查询改了状态"。所以两张图都快照、都还原。
      */
-    const savedVisible = this.visible.toArray();
-    const savedExplored = this.explored.toArray();
+    /**
+     * 【为什么用 snapshot() / restore() 而不是 toArray() + 逐格 mark】
+     * 见 `VisibilityMap.snapshot()` 的注释：这里是**每帧每怪**都要跑的热路径
+     * （"怪物看不看得见我"），两次 toArray 的分配开销会随 explored 累积变贵。
+     */
+    const savedVisible = this.visible.snapshot();
+    const savedExplored = this.explored.snapshot();
 
     this.compute(ax, ay, radius);
     const ab = this.visible.has(bx, by);
@@ -435,16 +478,10 @@ export class Shadowcasting {
     this.compute(bx, by, radius);
     const ba = this.visible.has(ax, ay);
 
-    this._restore(this.visible, savedVisible);
-    this._restore(this.explored, savedExplored);
+    this.visible.restore(savedVisible);
+    this.explored.restore(savedExplored);
 
     return ab === ba;
-  }
-
-  /** 用坐标列表还原一张图（先清空再逐格标回） */
-  private _restore(map: VisibilityMap, snapshot: readonly IVec2[]): void {
-    map.clear();
-    for (const p of snapshot) map.mark(p.x, p.y);
   }
 
   /** 重置探索记录（换关卡时） */
