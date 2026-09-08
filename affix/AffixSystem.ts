@@ -213,33 +213,13 @@ export class AffixSystem {
     this._fallback = opts.fallbackOnEmpty ?? true;
 
     for (const r of this._rarities) {
-      /**
-       * 【⚠️ NaN 权重穿透了 `< 0` 判断】
-       *
-       * 原写法 `if (r.weight < 0) throw`：NaN < 0 恒为 false，
-       * 于是 NaN 权重一路带进 `_pickRarity`，`total` 变成 NaN：
-       *
-       *   实测（修复前）：common=100 / epic=NaN 时，
-       *   `_pickRarity` 200 次**全部返回最后一个稀有度**（epic），
-       *   一次 common 都没出过——权重表静默失效，且不报错。
-       *
-       * 否定式判断天然漏掉 NaN（模式 A），改成肯定式 `!(x >= 0)`。
-       */
-      if (!(r.weight >= 0)) {
-        throw new Error(`[Affix] 稀有度权重非法（负数或 NaN）：${r.id} = ${r.weight}`);
-      }
+      if (r.weight < 0) throw new Error(`[Affix] 稀有度权重不能为负：${r.id}`);
       this._rarityMap.set(r.id, r);
     }
 
     for (const d of opts.defs) {
       if (this._defs.has(d.id)) {
         throw new Error(`[Affix] 词条 id 重复：${d.id}`);
-      }
-      // 【模式 A】`d.min > d.max` 同样拦不住 NaN：NaN > NaN 恒为 false。
-      // 不拦的话 NaN 会一路走进 `_instantiate`，roll 出 value = NaN 的词条，
-      // 再经 aggregate → compute 把整条属性算成 NaN，且不报错。
-      if (!Number.isFinite(d.min) || !Number.isFinite(d.max)) {
-        throw new Error(`[Affix] 词条 ${d.id} 的数值范围不是有限数字：min=${d.min} max=${d.max}`);
       }
       if (d.min > d.max) {
         throw new Error(`[Affix] 词条 ${d.id} 的数值范围反了：min(${d.min}) > max(${d.max})`);
@@ -326,22 +306,6 @@ export class AffixSystem {
 
   /** 重铸整件装备的所有词条 */
   rerollAll(affixes: readonly Affix[], slot?: string): Affix[] {
-    /**
-     * 【⚠️ 曾经的 bug：degraded 只置 true，从不复位】
-     *
-     * 原实现只在"本次降级"的分支里 `= true`，没有 else 也没有入口复位，
-     * 于是它的实际语义是"**历史是否曾经降级过**"，而不是字段与 README
-     * 承诺的"**本次** reroll 是否降级"。
-     *
-     * 实测（修复前）：第 1 次 rerollAll 后置 true，
-     * 再跑 2 次（都没降级）后**仍是 true**。
-     * UI 拿它提示"这次洗练亏了，是否保留"会一直亮着，
-     * 玩家会以为每次都在亏。
-     *
-     * 修法：入口先复位，再在降级处置 true——让它真正表示"本次"。
-     */
-    this.lastRerollDegraded = false;
-
     const prevRarity = affixes.length > 0 ? this._highestRarity(affixes) : undefined;
     const out = this.roll(slot, affixes.length);
     // 【保底：不比原来差太多】
@@ -409,17 +373,12 @@ export class AffixSystem {
 
   private _pickRarity(): string {
     let total = 0;
-    // 【模式 B】`total += r.weight` 遇到 NaN 会把整个 total 变成 NaN，
-    // 于是 `total <= 0` 为 false（NaN 比较恒 false），不回落到第一个稀有度；
-    // 下面的 `x -= NaN` 让 `x <= 0` 也恒为 false，循环走完 →
-    // **永远返回最后一个稀有度**，权重表完全失效且静默。
-    // 收口成"非有限/负数都按 0 处理"，与"权重 0 = 抽不到"的语义一致。
-    for (const r of this._rarities) total += Math.max(0, numOr(r.weight, 0));
+    for (const r of this._rarities) total += r.weight;
     if (total <= 0) return this._rarities[0]?.id ?? 'common';
 
     let x = this._rng.next() * total;
     for (const r of this._rarities) {
-      x -= Math.max(0, numOr(r.weight, 0));
+      x -= r.weight;
       if (x <= 0) return r.id;
     }
     return this._rarities[this._rarities.length - 1]?.id ?? 'common';
@@ -444,10 +403,7 @@ export class AffixSystem {
       if (opts?.onlyStats && !opts.onlyStats.includes(d.stat)) continue;
       if (opts?.minRarity && this._tierOf(d.rarity) < this._tierOf(opts.minRarity)) continue;
 
-      // 【模式 B】`?? 1` 只挡 null/undefined，`Math.max(0, NaN)` 仍是 NaN。
-      // NaN 权重会让 total 变 NaN，走与 `_pickRarity` 完全相同的静默偏斜：
-      // 池子看起来有 N 条，实际永远抽最后一条。与稀有度权重同源，一并收口。
-      const w = Math.max(0, numOr(d.weight ?? 1, 0));
+      const w = Math.max(0, d.weight ?? 1);
       if (w <= 0) continue;
       pool.push(d);
       total += w;
@@ -457,7 +413,7 @@ export class AffixSystem {
 
     let x = this._rng.next() * total;
     for (const d of pool) {
-      x -= Math.max(0, numOr(d.weight ?? 1, 0));
+      x -= Math.max(0, d.weight ?? 1);
       if (x <= 0) return d;
     }
     return pool[pool.length - 1];
@@ -485,24 +441,7 @@ export class AffixSystem {
 
   private _instantiate(def: AffixDef): Affix {
     const rarity = this._rarityMap.get(def.rarity);
-    /**
-     * 【⚠️ valueScale 未校验：负数让值反向、NaN 让值变 NaN】
-     *
-     * 原写法 `rarity?.valueScale ?? 1`：
-     * - `??` 只挡 null/undefined，NaN 照穿 → `def.min * NaN` = NaN
-     *   → 实测（修复前）：min=5 max=10 的词条 roll 出 **value = NaN**
-     * - 负数同样照穿：valueScale=-1 时 [5,10] 变成 [-10,-5]，
-     *   **数值被整体反向**，实测 roll 出 -10
-     *
-     * 两种都不会报错，`aggregate` / `compute` 会安静地把 NaN 传下去。
-     *
-     * 收口到 **1（不放大不缩小）** 而不是 0：
-     * 实测验证过夹到 0 的方案——`valueScale=-1` 会让区间整个塌成 [0, 0]，
-     * 高稀有度词条变成"加 0"，比"没配 valueScale"还差，
-     * 而且看不出是配错了还是本来就该这样。1 是唯一的中性值。
-     */
-    const rawScale = numOr(rarity?.valueScale, 1);
-    const scale = rawScale >= 0 ? rawScale : 1;
+    const scale = rarity?.valueScale ?? 1;
 
     const p = Math.max(0, numOr(def.precision, 0));
     const f = Math.pow(10, p);
@@ -527,41 +466,18 @@ export class AffixSystem {
      */
     const rawLo = def.min * scale;
     const rawHi = def.max * scale;
-    let lo = Math.ceil(rawLo * f) / f;
-    let hi = Math.floor(rawHi * f) / f;
-
-    /**
-     * 【⚠️ 区间窄于一个精度单位时，"取整"和"落在区间内"不可兼得】
-     *
-     * 实测（修复前）：
-     *   min=1.2 max=1.4 precision=0 → lo=ceil(1.2)=2、hi=floor(1.4)=1
-     *     → `hi <= lo` 取 v=lo=2 → 量化后 2 → 再被 `v > hi` 收口成 **1**
-     *     → 1 不在 [1.2, 1.4] 内，配的"1.2~1.4 暴击倍率"实际 roll 出 1.0
-     *   min=0.05 max=0.07 precision=1 → 同理得到 **0**，不在 [0.05, 0.07] 内
-     *
-     * 两个边界都被"向内对齐"各推了一次，越推越远，最后落在一个
-     * **既不是 lo 也不是 hi、更不在配置区间里**的值上，且不报错。
-     * 策划配的数值范围是平衡性分析的依据，精度只是取整偏好，
-     * 所以这里**保范围、弃精度**：退回未取整的 [rawLo, rawHi] 且不再量化。
-     *
-     * 配置期就能发现这条路：`validateAffixPool` 会为这种情况出一条 warning。
-     */
-    let quantized = true;
-    if (hi < lo) {
-      lo = rawLo;
-      hi = rawHi;
-      quantized = false;
-    }
+    const lo = Math.ceil(rawLo * f) / f;
+    const hi = Math.floor(rawHi * f) / f;
 
     let v: number;
-    if (hi > lo) {
-      v = lo + this._rng.next() * (hi - lo);
-    } else {
-      // 区间被压成一个点（min === max，或上面退化后的单点）：取边界
+    if (hi <= lo) {
+      // 精度太粗导致区间被压没了：取边界（宁可固定值也不要越界）
       v = lo;
+    } else {
+      v = lo + this._rng.next() * (hi - lo);
     }
 
-    if (quantized) v = Math.round(v * f) / f;
+    v = Math.round(v * f) / f;
 
     // 双保险：浮点误差兜底
     if (v < lo) v = lo;
@@ -658,37 +574,8 @@ export function validateAffixPool(
     seen.add(d.id);
 
     if (d.min > d.max) errors.push(`词条 ${d.id} 范围反了：${d.min} > ${d.max}`);
-    if (!Number.isFinite(d.min) || !Number.isFinite(d.max)) {
-      errors.push(`词条 ${d.id} 的数值范围不是有限数字：min=${d.min} max=${d.max}`);
-    }
     if (!rarityMap.has(d.rarity)) errors.push(`词条 ${d.id} 的稀有度 ${d.rarity} 未定义`);
-    // 【模式 A】`(d.weight ?? 1) < 0` 拦不住 NaN，而 NaN 权重与"权重 0"不同：
-    // 它会让整个池子的 total 变 NaN，静默变成"永远抽最后一条"。
-    if (!((d.weight ?? 1) >= 0)) errors.push(`词条 ${d.id} 的权重非法（负数或 NaN）：${d.weight}`);
-
-    /**
-     * 【区间窄于一个精度单位 → 精度与范围不可兼得】
-     *
-     * `min=1.2 max=1.4 precision=0` 里不存在任何整数，
-     * roll 时会走 `_instantiate` 的"保范围、弃精度"分支（值不再满足精度）。
-     * 这不算错（不报错），但策划通常以为自己配的是"1.2~1.4 的整数"，
-     * 所以配置期必须说出来——否则只能靠玩家反馈"这词条数值不对"。
-     */
-    const p = Math.max(0, numOr(d.precision, 0));
-    const f = Math.pow(10, p);
-    const sc = (() => {
-      const raw = numOr(rarityMap.get(d.rarity)?.valueScale, 1);
-      return raw >= 0 ? raw : 1;
-    })();
-    const qLo = Math.ceil(d.min * sc * f) / f;
-    const qHi = Math.floor(d.max * sc * f) / f;
-    if (qHi < qLo) {
-      warnings.push(
-        `词条 ${d.id} 的区间 [${d.min}, ${d.max}]×${sc} 窄于一个精度单位 ${1 / f}，` +
-        `roll 出的值将不满足 precision=${p}（区间内没有可表示的取值）。` +
-        `建议放宽区间或减小 precision——此时以"落在区间内"优先`
-      );
-    }
+    if ((d.weight ?? 1) < 0) errors.push(`词条 ${d.id} 的权重为负`);
 
     if (d.percent && (d.precision ?? 0) === 0) {
       warnings.push(
@@ -699,26 +586,9 @@ export function validateAffixPool(
   }
 
   // ② 稀有度权重
-  // 【模式 B】NaN 权重会让 reduce 的结果变成 NaN，
-  // 于是 `NaN <= 0` 为 false —— 权重表已经失效了，校验却说没问题。
-  const totalRarityWeight = rarities.reduce((s, r) => s + Math.max(0, numOr(r.weight, 0)), 0);
-  const badRarityWeight = rarities.filter((r) => !(r.weight >= 0));
-  for (const r of badRarityWeight) {
-    errors.push(`稀有度 ${r.id} 的权重非法（负数或 NaN）：${r.weight}`);
-  }
+  const totalRarityWeight = rarities.reduce((s, r) => s + r.weight, 0);
   if (totalRarityWeight <= 0) {
     errors.push('所有稀有度的权重都是 0，将永远只能抽到默认稀有度');
-  }
-  // 【valueScale 未校验】负数会把整个区间反向，NaN 会让所有词条值变 NaN。
-  // 不阻断启动（配表疏忽不该开不了游戏），但必须报出来。
-  const badScale = rarities.filter(
-    (r) => r.valueScale !== undefined && !(r.valueScale >= 0)
-  );
-  for (const r of badScale) {
-    warnings.push(
-      `稀有度 ${r.id} 的 valueScale=${r.valueScale} 非法（负数或 NaN），` +
-      `roll 时按 1 处理——高稀有度不会更强`
-    );
   }
   const zeroWeight = rarities.filter((r) => r.weight === 0);
   if (zeroWeight.length > 0 && zeroWeight.length < rarities.length) {
