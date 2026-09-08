@@ -139,7 +139,7 @@ interface InputBufferOptions { window?: number; /* ... */ }
 
 串联使用，互不依赖。
 
-## 四个坑
+## 三个坑
 
 **① 暂停时必须传 dt = 0**
 否则暂停期间缓冲继续「老化」，恢复后输入已失效。
@@ -150,26 +150,6 @@ interface InputBufferOptions { window?: number; /* ... */ }
 
 **③ 搓招匹配后要清空队列**
 否则 `↓↘→A` 触发后队列里还剩 `→A`，下一个招式 `→A` 会立刻被误触发。
-
-**④ `maxQueue` / `window` 传 NaN 不会"按默认走"**
-`??` 只挡 `null` / `undefined`，NaN 会原样存进去：
-
-| 字段 | NaN 的后果 |
-|---|---|
-| `maxQueue` | 裁剪判定 `queue.length > NaN` 恒为 false → **队列永不裁剪**（实测连按 50 次后长度 50） |
-| `window` | `now - t <= NaN` 恒为 false → `peek` 永远 false、`consume` 时灵时不灵 |
-
-现在构造用 `clampNum(maxQueue, 1, 64, 6)` 与 `numOr(window, 0.15)`，
-`window` 的 setter 是 **`numOr(v, this._window)` 后再 `Math.max(0, …)`**——
-`Math.max(0, NaN)` 是 NaN，单独一个 `Math.max` 挡不住，所以必须先 `numOr`。
-
-> ⚠️ **非法值是"保持旧值"，不是兜成 0。**
-> 第一版 setter 写的是 `Math.max(0, numOr(v, 0))`，注释还论证"与构造函数同口径"——
-> 这是假的：构造函数兜 0.15，setter 兜 0。而命中判定是 `now - t <= window`，
-> `window = 0` 时只有"同一时间戳"成立，对"按下 → 下一帧消费"这个主力用法
-> **缓冲等于死了**（实测 `press` 后隔一帧 `consume()` = false），与没修之前一样。
-> 所以改成维持上一次的有效值：热更传 NaN 时至少不会把手感一键清空。
-> 显式传 `0` 是合法意图（"不要缓冲"），照旧接受。
 
 ### 搓招允许中间有多余输入
 
