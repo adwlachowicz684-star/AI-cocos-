@@ -72,7 +72,7 @@
  * 顿帧将永远结束不了——表现是"游戏卡住不动"。
  */
 
-import { clamp01, clampNum, safeDt } from '../_core/math';
+import { clamp01, clampNum } from '../_core/math';
 
 // ==================== 类型 ====================
 
@@ -114,27 +114,7 @@ export interface FeedbackOutput {
   readonly shake: number;
   /** 闪白强度 0~1 */
   readonly flash: number;
-  /**
-   * 数字弹出**强度** 0~1（不是进度）
-   *
-   * 【⚠️ 这里以前写的是"进度 0~1（1 = 刚触发，0 = 结束）"，是错的（P2）】
-   *
-   * 实测（修复前）：`play('heavy', 0.5)` 之后连续 40 帧采样，
-   * `popup` 恒为 `0.50`，直到 duration 结束的那一帧直接掉到 0。
-   * 也就是说它是"强度"（= 传入的 intensity × popup 层的 scale），
-   * 在整个持续期内**恒定不变**，不是从 1 递减到 0 的进度。
-   *
-   * 后果很具体：宿主若按文档把它当进度做飘字淡出，
-   * 会看到"飘字全程不淡出、结束瞬间突然消失"。
-   *
-   * 【为什么不直接把它改成真正的进度】
-   * 那是 breaking change——已按"强度"接的宿主会突然看到淡出。
-   * 这里选择改文档说清真实语义（全库共享模式 F：
-   * 文档与实现冲突时，要么改实现、要么改文档，**不能放着不管**）。
-   *
-   * 需要进度的宿主请自己按 duration 算：
-   * `1 - elapsed / duration`，或用 `takePopupPayloads()` 的时机自己维护生命周期。
-   */
+  /** 数字弹出进度 0~1（1 = 刚触发，0 = 结束） */
   readonly popup: number;
   /** 是否正在顿帧 */
   readonly inHitstop: boolean;
@@ -282,38 +262,14 @@ export class HitFeedback {
 
   constructor(opts: HitFeedbackOptions = {}) {
     this._profiles = { ...DEFAULT_PROFILES, ...(opts.profiles ?? {}) } as Record<HitKind, HitProfile>;
-    /**
-     * 【⚠️ 为什么不能用 `?? 1.5`（P2）】
-     * `??` 只挡 null/undefined，NaN 照穿。
-     * 之后 `Math.min(intensity, NaN) === NaN` → `eff = NaN`
-     * → 各层强度全是 NaN → `clamp01(NaN)` 也是 NaN
-     * → 震屏/闪白既不是"有"也不是"无"，而是 NaN，
-     * 宿主拿去做位移会算出 NaN 坐标：**整个表现层静默失效**。
-     * 实测（修复前）：`maxIntensity: NaN` 时 shake = NaN、flash = NaN
-     * （对照组 0.4 / 0.6）。
-     *
-     * 上界取 1e6 而不是某个"合理上限"：这是**强度倍率**，
-     * 宿主想叠到多大是它的自由；这里只负责挡住非有限值
-     * （见 _core 的 numOr 注释：给普通配置乱定上界会静默改掉合法配置）。
-     */
-    this._maxIntensity = clampNum(opts.maxIntensity, 0, 1e6, DEFAULT_MAX_INTENSITY);
+    this._maxIntensity = opts.maxIntensity ?? DEFAULT_MAX_INTENSITY;
     this._maxInstances = clampNum(opts.maxInstances, 1, 1e5, DEFAULT_MAX_INSTANCES);
     this._stackHitstop = opts.stackHitstop ?? false;
   }
 
   // ==================== 查询 ====================
 
-  /**
-   * 当前输出快照
-   *
-   * 【为什么每次都 new 一个对象，而不是复用同一个（P2）】
-   * 复用内部对象能让每帧零分配，但会破坏"快照"语义：
-   * 宿主写下 `const prev = fb.output` 后，
-   * 下次 `update()` 会把 prev 的内容一起改掉，
-   * 于是"这一帧和上一帧的对比"恒等——
-   * 做差分、做插值、做"强度突变检测"的宿主会全部失效。
-   * 每帧一个小对象的代价远小于这类静默错误，所以保留 new。
-   */
+  /** 当前输出快照 */
   get output(): FeedbackOutput {
     return {
       timeScale: this._timeScale,
@@ -409,22 +365,7 @@ export class HitFeedback {
    * 这是"手感糊掉"最常见的原因，而且很难联想到计时口径。
    */
   update(realDt: number): FeedbackOutput {
-    /**
-     * 【⚠️ 为什么必须用 safeDt，不能用 `!(realDt > 0)`（P1）】
-     *
-     * `Infinity > 0` 是 **true**，所以 `!(Infinity > 0)` 是 false——
-     * Infinity 直接穿透守卫进了下面的累加：
-     * `inst.elapsed += Infinity` → 每个实例的 elapsed 变成 Infinity
-     * → `_totalDuration` 判定全部到期 → 实例被一次性清空。
-     *
-     * 实测（修复前）：`update(Infinity)` 后 `activeCount` 从 1 变 0，
-     * **所有正在播放的震屏/闪白/飘字同一帧集体消失**。
-     *
-     * Infinity 的 dt 不是理论问题：切后台再回来、断点续跑、
-     * 时间戳倒着走之后取绝对值，都能产出巨大或无穷的 dt。
-     * 本单元其余计时都用的 `safeDt`，这里是漏掉的那一个。
-     */
-    if (!safeDt(realDt)) {
+    if (!(realDt > 0)) {
       return this.output;
     }
 
@@ -474,26 +415,6 @@ export class HitFeedback {
     this._flash = 0;
     this._popup = 0;
     this._lastKnockback = 0;
-  }
-
-  /**
-   * 卸载（P2）
-   *
-   * 【为什么需要它，而 clear 不够】
-   * `clear()` 是"游戏里"的语义：暂停、切场景后还要继续用。
-   * 缺的是"这个对象不要了"的语义——
-   * `_instances` 里每个实例都持有宿主传进来的 `payload`
-   * （伤害数值、坐标，甚至可能是实体引用），
-   * 只 clear 数组引用、不显式释放，这些 payload 会一直挂到下一次 GC。
-   *
-   * 这里显式把每个 payload 引用断开再清空，
-   * 让"卸载"和"清空"成为两件可区分的事。
-   */
-  destroy(): void {
-    for (const inst of this._instances) {
-      (inst as { payload: Readonly<Record<string, unknown>> | null }).payload = null;
-    }
-    this.clear();
   }
 
   /**
