@@ -129,27 +129,7 @@ export class WeightedTable<T> {
     if (n2 === 0 || this._items.length === 0) return [];
 
     const work = new WeightedTable<T>();
-    /**
-     * 【⚠️ 建临时表时必须跳过权重 ≤ 0 的项，不能直接 add】
-     *
-     * `setWeight(v, 0)` 是调用方"临时下架一个掉落"的自然写法，
-     * 它本身是合法的（setWeight 只要求 `weight >= 0`）。
-     * 但 `add()` 要求 `weight > 0`，于是：
-     *
-     *   同一个表：pick() 正常 → pickUnique() 抛
-     *   `[WeightedTable] 权重必须为正，实际 0`
-     *
-     * **同一份数据、两个 API、两种行为**——
-     * 而且炸的时机是"玩家点了三选一"，不是配表时。
-     *
-     * 【为什么用肯定式 `> 0` 而不是 `>= 0` 或 `!= 0`】
-     * 权重被污染成 NaN 时，`NaN > 0` 为 false → 该项被跳过，
-     * 不会带着 NaN 进前缀和（NaN 会让二分查找结果不可预期）。
-     * 否定式写法（如 `!(w <= 0)`）会把 NaN 放进来。
-     */
-    for (const it of this._items) {
-      if (it.weight > 0) work.add(it.value, it.weight);
-    }
+    for (const it of this._items) work.add(it.value, it.weight);
 
     const out: T[] = [];
     for (let i = 0; i < n2; i++) {
