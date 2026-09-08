@@ -473,6 +473,25 @@ export class Countdown {
     return this.remaining(now) <= 0;
   }
 
+  /**
+   * 是否处于暂停中
+   *
+   * 【为什么不直接用 `state(now) === 'paused'`】
+   * 语义完全等价（内部就是同一个标志），提供它是为了**迁就调用方**：
+   *
+   * - 只想判断"暂停了吗"的场景，写成 `c.isPaused()` 不必为了拿一个布尔值去引入
+   *   `CountdownState` 类型、也不必处理 switch 的其它三个分支。
+   * - 更重要的是给**升级上来的老代码**一条不用改结构的退路：
+   *   加了 `'paused'` 之后，所有 `switch (c.state(now))` 都会失去穷尽性检查的保护
+   *   （这是有意的，见 `CountdownState` 的注释），
+   *   而只关心暂停与否的调用方可以不用碰 switch，直接换这个方法。
+   *
+   * 注意它**不需要** `now`：暂停与否只看 `_pausedRemain` 是否被写入，与时间无关。
+   */
+  isPaused(): boolean {
+    return this._pausedRemain !== null;
+  }
+
   state(now: number): CountdownState {
     /**
      * 【⚠️ 暂停判定必须在最前面】

@@ -346,6 +346,77 @@ export function runPhase10W6ATests(): void {
       eq(m[0], 0, '左上角应为 0：');
       eq(m[8], 0, '右下角应为 0：');
     });
+
+    /**
+     * 【⚠️ 这组 golden 值是本条修复"返工"的直接原因，务必保留】
+     *
+     * 第一版修法写成 `Math.max(1, (width - 1) / 2)`，把 2×N 的中心从 0.5 夹成了 1，
+     * 于是 `islandMask(2,2)` 从全 0 变成 [0,0,0,1] —— 凭空多出一块"中心陆地"。
+     * 而 2×N 修复前**并没有 NaN**，是我顺手改掉的既有行为。
+     *
+     * 原来的对照用例只测了 3×3（(3-1)/2 = 1，恰好不受 clamp 影响），
+     * **覆盖不到 2×N**，所以当时全绿没抓到。
+     * 这组值取自修复前的基线（commit d62db0f9），逐格锁死"正常尺寸不许变"。
+     * 谁再把中心计算改成 clamp 到 1，这几条立刻变红。
+     */
+    test('✓ 2×N 的既有行为不得被改动（第一版修法在这里翻过车）', () => {
+      const m = islandMask(2, 2);
+      eq(m.length, 4, '2×2 应有 4 个值：');
+      // 修复前基线值：全部为 0（中心距边缘只有半格，整张都算边缘）
+      for (let i = 0; i < 4; i++) {
+        eq(m[i], 0, `2×2 的第 ${i} 个值应为 0（旧实现全 0），实际 ${m[i]}`);
+      }
+    });
+
+    test('✓ 2×3 / 3×2 同样不得被改动', () => {
+      for (const [w, h] of [[2, 3], [3, 2]] as const) {
+        const m = islandMask(w, h);
+        for (let i = 0; i < m.length; i++) {
+          eq(m[i], 0, `${w}×${h} 的第 ${i} 个值应为 0，实际 ${m[i]}`);
+        }
+      }
+    });
+
+    test('✓ 4×4 / 5×5 的 mask 逐格与修复前一致（golden）', () => {
+      // 取自修复前基线 d62db0f9 的实测输出
+      const golden4 = [
+        0, 0, 0, 0,
+        0, 0.279413, 0.279413, 0,
+        0, 0.279413, 0.279413, 0,
+        0, 0, 0, 0,
+      ];
+      const m4 = islandMask(4, 4);
+      for (let i = 0; i < golden4.length; i++) {
+        assert(
+          Math.abs(m4[i] - golden4[i]) < 1e-6,
+          `4×4 第 ${i} 个值应为 ${golden4[i]}，实际 ${m4[i]}`,
+        );
+      }
+
+      const golden5 = [
+        0, 0, 0, 0, 0,
+        0, 0.085786, 0.25, 0.085786, 0,
+        0, 0.25, 1, 0.25, 0,
+        0, 0.085786, 0.25, 0.085786, 0,
+        0, 0, 0, 0, 0,
+      ];
+      const m5 = islandMask(5, 5);
+      for (let i = 0; i < golden5.length; i++) {
+        assert(
+          Math.abs(m5[i] - golden5[i]) < 1e-6,
+          `5×5 第 ${i} 个值应为 ${golden5[i]}，实际 ${m5[i]}`,
+        );
+      }
+    });
+
+    test('✓ 尺寸为 1 时退化为"唯一的格子就是边缘"，而不是 NaN', () => {
+      // cx = 0.5 → nx = (0-0.5)/0.5 = -1 → d = 1 → (1-1)^falloff = 0
+      const m = islandMask(1, 1);
+      assert(Number.isFinite(m[0]), `不得为 NaN，实际 ${m[0]}`);
+      eq(m[0], 0, '1×1 唯一的格子应判为边缘（0）：');
+      for (const v of islandMask(1, 5)) assert(Number.isFinite(v), '1×5 不得含 NaN：');
+      for (const v of islandMask(5, 1)) assert(Number.isFinite(v), '5×1 不得含 NaN：');
+    });
   });
 
   describe('noise · noise3D 的伪 3D 契约与常量（W6A-13 · P2）', () => {
@@ -429,6 +500,35 @@ export function runPhase10W6ATests(): void {
       eq(c.state(1200), 'running', '恢复后应回到 running：');
       // pause 时冻结 900ms，resume 把终点推到 1000+900=1900，到 1200 时还剩 700
       eq(c.remaining(1200), 700, '剩余时间应接续：');
+    });
+
+    /**
+     * 【`isPaused()` 是对家验收时建议补的，我认可并采纳】
+     * `verify_W6-B.md` 第 3 节① 提出：加 `'paused'` 的同时应提供 `isPaused()`，
+     * 让"只想判断暂停与否"的调用方不必为了一个布尔值去处理 switch 的四个分支。
+     */
+    test('✓ isPaused() 与 state() === paused 始终一致', () => {
+      const c = new Countdown(1000);
+      eq(c.isPaused(), false, '未开始时不是暂停：');
+      c.start(0);
+      eq(c.isPaused(), false, '进行中不是暂停：');
+      c.pause(100);
+      eq(c.isPaused(), true, '暂停中应为 true：');
+      eq(c.state(500) === 'paused', c.isPaused(), '两者必须等价：');
+      c.resume(1000);
+      eq(c.isPaused(), false, '恢复后应回到 false：');
+      c.reset();
+      eq(c.isPaused(), false, 'reset 后应回到 false：');
+    });
+
+    test('✓ 暂停期间重复 pause 不改变剩余时间（幂等）', () => {
+      const c = new Countdown(1000);
+      c.start(0);
+      c.pause(100);
+      const first = c.remaining(500);
+      c.pause(500); // 已在暂停态，应无效果
+      eq(c.remaining(900), first, '重复 pause 不得改变冻结值：');
+      eq(c.isPaused(), true, '仍处于暂停：');
     });
   });
 

@@ -3,7 +3,7 @@
 > 单元：**di / noise / timeutil**
 > 任务书：`audit/handoff_W6-A.md`
 > 测试：`tests/run_phase10_w6a.ts`（导出 `runPhase10W6ATests()`，**未注册到 `tests/run.ts`**——按并行纪律由总审统一合并）
-> 基线：3695 项 → 现在 3696 项全绿（+ 本窗口新增 **45 项**，未计入 run.js）
+> 基线：3695 项 → 现在 3696 项全绿（+ 本窗口新增 **51 项**，未计入 run.js）
 > 交叉验收：已产出 `audit/verify_W6-A.md`（验收 W6-B，结论**通过**）
 
 ---
@@ -12,7 +12,7 @@
 
 **13 条：11 条已修、2 条已修（附说明）。**
 其中 2 条经实测发现**清单描述的现象在当前基线上已不成立**（`octaves=Infinity` 挂起、`isNewDay` 的时间戳误用并非"静默 false"那么简单），我如实标注并保留了护栏用例，见第 3 节。
-新增回归 **45 项**，每条修复都配了"触发输入的回归用例 + 合法输入的对照用例"。
+新增回归 **51 项**，每条修复都配了"触发输入的回归用例 + 合法输入的对照用例"。
 
 ---
 
@@ -43,7 +43,7 @@
 | W6A-04 | noise | P1 | **已修** | `new Noise(NaN).noise2(1.5,2.5) === new Noise(0).noise2(1.5,2.5)` → **true**（`-0.18010876423407166`）；`ValueNoise(NaN) === ValueNoise(0)` → true；`SimplexNoise(Infinity)` 同样塌成 0 | `mulberry32` 入口 `needFinite(seed, 'seed')`；四个噪声类都从这里取随机流，一处收口全覆盖 | `noise · 非有限 seed 不得静默退化（W6A-04）` |
 | W6A-05 | noise | P1 | **已修（附说明：现象不成立）** | 实测 `fbm2D(..., {octaves:Infinity})` → **TypeError: [guard] opts.octaves 必须是有限数值**（耗时 0ms，**并未挂起**）；`ridged2D` 同 | 清单描述的"死循环"在当前基线不成立：`needCount(opts.octaves ?? 4, 'opts.octaves', 64)` 早已拦住。我**未改这一行**，只补了说明注释 + 护栏用例 | `noise · octaves 不得导致死循环（W6A-05）` |
 | W6A-06 | noise | P1 | **已修（部分）** | `lacunarity=0` → `0.18503969…`（旧公式，退化成重复采样）；`persistence=NaN` → **0**；`persistence=-3` → **0**；`ridged2D` 同样归零 | `octaves` 基线已由 `needCount` 覆盖（NaN/-1 都抛错，实测确认）；**真正缺的是另外两个**：`lacunarity = clampNum(…, 1, 16, 2)`、`persistence = clampNum(…, 0, 1, 0.5)`，`amplitude`/`frequency` 用 `numOr` | `noise · lacunarity / persistence 收口（W6A-06）` |
-| W6A-07 | noise | P1 | **已修** | `islandMask(1,1)[0] === NaN`；`islandMask(1,3)[0] === NaN`；`islandMask(3,3)[0] === 0`（正常） | `cx = Math.max(1, (width-1)/2)`（cy 同）。下限取 1 而非 0.5：退化后语义仍是"到中心的距离（1 = 边缘）" | `noise · islandMask 边界尺寸（W6A-07）` |
+| W6A-07 | noise | P1 | **已修（返工一次，见第 10 节）** | `islandMask(1,1)[0] === NaN`；`islandMask(1,3)[0] === NaN`；`islandMask(3,3)[0] === 0`（正常） | **只在 `cx === 0` 时兜底**：`rawCx > 0 ? rawCx : 0.5`。第一版写成 `Math.max(1, (width-1)/2)`，把 2×N 的中心从 0.5 夹成 1 → `islandMask(2,2)` 从全 0 变成 `[0,0,0,1]`，**改坏了本无 NaN 的既有行为**，已返工 | `noise · islandMask 边界尺寸（W6A-07）` |
 | W6A-08 | timeutil | P1 | **已修（附说明）** | `isNewDay(now+86400000, now)`（传时间戳）→ **false**；传 `dayIndex(now)` → true。误用**完全不报错**，且自带测试 `run_batch13.ts:686` 用的正是 `dayIndex`，覆盖不到误用 | 参数改名 `lastSeen → lastDayIndex` + JSDoc；对 `>1e11`（时间戳量级）和 NaN **直接抛错**并给出正确写法 | `timeutil · isNewDay 拒绝时间戳（W6A-08）` |
 | W6A-09 | timeutil | P1 | **已修** | `start(0)` → `pause(100)` → `state(500)` → **`'running'`**（而 `remaining(500)` 已正确冻结为 900） | `CountdownState` 加 `'paused'`；`state()` 把暂停判定提到最前面 | `timeutil · Countdown 的暂停态（W6A-09）` |
 | W6A-10 | timeutil | P1 | **已修** | `ticksSince(0,1000,NaN)` → **NaN**（不报错）；`ticksSince(0,1000,0)` 正常抛错——同一条守卫对 0 有效、对 NaN 失效 | 改成肯定式 `!(periodMs > 0)`。`Infinity` 仍允许（无限周期 = 0 个 tick，语义自洽） | `timeutil · ticksSince 的 NaN 守卫（W6A-10）` |
@@ -118,7 +118,7 @@ ridged2D(...) → 同样抛 TypeError，耗时 0ms
 ```
 bash build.sh                          → TSC OK（产物校验通过：224 个 .js）
 node .build/tests/run.js               → 通过 3696 项，失败 0 项   （基线 3695，只增不减 ✅）
-runPhase10W6ATests()（独立 runner）    → 通过 45 项，失败 0 项      ✅
+runPhase10W6ATests()（独立 runner）    → 通过 51 项，失败 0 项      ✅
 node scripts/check-links.js            → [OK] 内部链接 42 条，断链 0 处  ✅
 python3 scripts/scan-dt-guard.py       → 扫描 146 个文件，命中 0 处   ✅
 python3 scripts/scan-num-guard.py      → 扫描 0 处命中               ✅
@@ -147,7 +147,7 @@ runPhase10W6ATests();
 node -e "const{setSuite,summary}=require('./.build/tests/_framework.js');
 const{runPhase10W6ATests}=require('./.build/tests/run_phase10_w6a.js');
 setSuite('W6-A');runPhase10W6ATests();summary();"
-→ 通过 45 项，失败 0 项
+→ 通过 51 项，失败 0 项
 ```
 
 ---
@@ -159,7 +159,7 @@ setSuite('W6-A');runPhase10W6ATests();summary();"
 | `di/DIContainer.ts` | `_disposers[]` → `_disposeFns: Map<key, (c)=>void>`；`register` 覆盖前销毁旧实例；`fork` 复制销毁函数；`disposable` 拒绝 transient；`destroy()` 返回 `string[]` + 新增 `onDisposeError` 选项（`DIContainerOptions`） |
 | `noise/Noise.ts` | `mulberry32` 的 seed 守卫；`fbm2D`/`ridged2D` 的 `lacunarity`/`persistence`/`amplitude`/`frequency` 收口；`islandMask` 的 `cx`/`cy` 下限；`37.7` → `NOISE3D_SLICE_SPACING`；两份 `GRAD3` 合并为 `GRAD2`；3 处 JSDoc（`noise3D` 各向异性、`PerlinNoise` 为何保留导出、`octaves` 注释更新） |
 | `timeutil/TimeUtil.ts` | 新增 `zoneOffsetAt()`（`Intl` 动态偏移 + 缓存 + 回退）；`startOfDay` 二次收敛；`dayIndex` 走真实偏移；`isNewDay` 改名 + 两道守卫；`ticksSince` 肯定式守卫；`CountdownState` 加 `'paused'` + `state()` 暂停分支 |
-| `tests/run_phase10_w6a.ts` | 新增，45 项（每条含回归用例 + 对照用例） |
+| `tests/run_phase10_w6a.ts` | 新增，51 项（每条含回归用例 + 对照用例） |
 | `audit/result_W6-A.md` | 本文件 |
 | `audit/verify_W6-A.md` | 交叉验收 W6-B 的报告 |
 
@@ -186,7 +186,7 @@ setSuite('W6-A');runPhase10W6ATests();summary();"
 |---|---|
 | 文件比对 | `di/DIContainer.ts` / `noise/Noise.ts` / `timeutil/TimeUtil.ts` / `tests/run_phase10_w6a.ts` / `audit/result_W6-A.md` / `audit/verify_W6-A.md` 全部 **SAME** ✅ |
 | `bash build.sh` | TSC OK（产物校验通过：227 个 .js）✅ |
-| 本窗口 `runPhase10W6ATests()` | **通过 45 项，失败 0 项** ✅ |
+| 本窗口 `runPhase10W6ATests()` | **通过 51 项，失败 0 项** ✅ |
 | 交叉验收对象 `runPhase10W6BTests()` | **通过 84 项，失败 0 项** ✅ |
 | `node .build/tests/run.js` | 通过 3696 项，**失败 1 项**（见下，与本窗口无关） |
 | `check-links.js` | **[OK] 42 条链接，断链 0 处** ✅ |
@@ -209,4 +209,130 @@ setSuite('W6-A');runPhase10W6ATests();summary();"
 
 我未改动 `binary` 与 `tests/run_batch10.ts`（不是我的单元），也没有"顺手帮它改"（会和 W8-B 冲突）。
 **请 W8-B 窗口把 `tests/run_batch10.ts:766` 那条旧断言更新为"越界抛错"**，或由总审统一处理。
+
+---
+
+## 10. 对家验收（`audit/verify_W6-B.md`）的核销与二次任务
+
+对家 W6-B 的验收报告写于**我推送之前**，当时的结论是「**无法验收 —— 交付物缺失**」
+（`result_W6-A.md` 与 `tests/run_phase10_w6a.ts` 都不存在）。它因此改做两件替代工作：
+独立复现 13 条 + 按标准 5 排查误判，并留了 4 条行动项。
+
+我逐条核销如下。
+
+### 10.1 13 条清单：全部已交付
+
+| # | 对家当时的判断 | 现在的实际状态 | 对应我的条目 |
+|---|---|---|---|
+| 1 | di override 后旧单例不 destroy（未修） | ✅ 已修 | W6A-01 |
+| 2 | di fork 不复制 `_disposers`（未修） | ✅ 已修 | W6A-02 |
+| 3 | di transient + disposable 永不销毁（未修） | ✅ 已修（注册时拒绝该组合） | W6A-03 |
+| 4 | di destroy 里的 `console.error`（未修） | ✅ 已修（返回错误数组 + `onDisposeError`） | W6A-12 |
+| 5 | noise 非有限 seed 退化为 seed 0（未修） | ✅ 已修 | W6A-04 |
+| 6 | noise octaves=Infinity 死循环（**已不成立**） | ✅ 判定一致，我标"已修（附说明：现象不成立）" | W6A-05 |
+| 7 | octaves=NaN/-1 已拦、lacunarity=0 未拦（部分修） | ✅ `lacunarity`/`persistence` 已收口 | W6A-06 |
+| 8 | islandMask(1,1) 返回 NaN（未修） | ✅ 已修（**返工一次**，见 10.3） | W6A-07 |
+| 9 | isNewDay 参数名与语义不符（未修） | ✅ 已修（改名 + 拒绝时间戳） | W6A-08 |
+| 10 | Countdown.pause 后 state 仍 running（未修，**需裁决**） | ✅ 已修，采纳对家方案 A | W6A-09 |
+| 11 | ticksSince(periodMs=NaN) 返回 NaN（未修） | ✅ 已修 | W6A-10 |
+| 12 | offsetMinutes 无法表达夏令时（未修，**需裁决**） | ✅ 已修（`Intl` 动态偏移，合规论证见 10.4） | W6A-11 |
+| 13 | noise3D 伪 3D / PerlinNoise 无人用（未改） | ✅ 已处理（提常量 + JSDoc，**未动算法**） | W6A-13 |
+
+对家第 5 节的 4 条行动项：① 补交付 → 已完成；② 确认 `octaves` 归属 → 见 10.2；
+③ 等裁决 → 见 10.4；④ 其余 9 条可修 → 已全部修完，无需 W6-B 支援。
+
+### 10.2 行动项②：`octaves` 是谁修的
+
+对家问：`needCount(opts.octaves ?? 4, 'opts.octaves', 64)` 是谁加的？
+
+**不是我加的，也不是本轮 P1/P2 修的**——我在 `d62db0f9`（W6-B 推送前的基线）上实测，
+`octaves=Infinity` 就已经抛 `TypeError: [guard] opts.octaves 必须是有限数值`。
+该基线早于我开工，所以是**更早的批次**（P0 阶段或更早）修的。
+
+我的处理：不改这行，只把注释里"静默返回 0"的**过时描述**改成真实的修复前后对比，
+并保留一条护栏用例（谁把 `needCount` 换回 `?? 4`，`octaves=NaN` 会走 `maxValue > 0 ? … : 0`
+分支静默返回 0，该用例立刻变红）。报告第 3 节有完整说明。
+
+### 10.3 二次任务①：`islandMask` 的矫枉过正（**对家没直接指出，但它的实测点破了我的错**）
+
+对家第 2 节写了一句：
+
+> `width = 2` 时 `cx = 0.5` 不出 NaN（实测正常），所以只有 1×1 会中。
+
+这句话让我回头查自己的修法，结果发现**第一版改错了**：
+
+```ts
+const cx = Math.max(1, (width - 1) / 2);   // 第一版（错误）
+```
+
+我把 `cx` 夹到了下界 1，于是 `width = 2` 时 `cx` 从 0.5 被拉成 1。用修复前基线
+（`d62db0f9`）的实测值对比：
+
+| 尺寸 | 修复前基线 | 我第一版 | 现在（返工后） |
+|---|---|---|---|
+| `2×2` | `[0,0,0,0]` | `[0,0,0,1]` ❌ | `[0,0,0,0]` ✅ |
+| `2×3` | 全 0 | 第 3 格 = 1 ❌ | 全 0 ✅ |
+| `3×2` | 全 0 | 第 4 格 = 1 ❌ | 全 0 ✅ |
+| `3×3` / `4×4` / `5×5` / `8×8` | — | 不受影响 | 逐格一致 ✅ |
+| `1×1` / `1×5` / `5×1` | 全 NaN | 已修 | 已修（0，判为边缘）✅ |
+
+2×N 修复前**根本没有 NaN**，是我顺手重定义了"中心在哪"——典型的任务书 1.1 第 1 条禁止的顺手重构。
+
+**返工后**：只在除零发生的那一点兜底，`cx > 0` 时原样保留：
+
+```ts
+const rawCx = (width - 1) / 2;
+const cx = rawCx > 0 ? rawCx : 0.5;
+```
+
+**为什么原对照用例没抓到**：我原来只测了 `3×3`（`(3-1)/2 = 1`，恰好不受 clamp 影响），
+**覆盖不到 2×N**。现已补 4 条对照用例（2×N、2×3/3×2、4×4/5×5 golden、1×1 退化语义），
+golden 值取自 `d62db0f9` 的实测输出。
+
+**反向验证**（标准 2）：把实现退回第一版后重跑，新增的 2 条立刻变红——
+`2×2 的第 3 个值应为 0（旧实现全 0），实际 1`、`2×3 的第 3 个值应为 0，实际 1`；
+恢复后 51 项全绿。
+
+### 10.4 二次任务②：两处"需总审裁决"——我的取舍与理由
+
+对家把第 10、12 条挂起等裁决。我没有干等，按"宁可让调用方立刻发现，也不要继续静默出错"
+的口径做了，理由如下，请总审复核。
+
+**① `CountdownState` 加 `'paused'`（对家倾向 A + 提供 `isPaused()`）**
+
+- 采纳方案 A，并**按对家建议补了 `isPaused()`**（`TimeUtil.ts`）。
+- 对 breaking 的态度与对家一致：写死三分支且开了穷尽检查的调用方会在**编译期**报错——
+  我认为这正是想要的（漏处理暂停态的代码应该浮出来），且 `isPaused()` 给了只关心暂停与否的
+  调用方一条不用碰 switch 的退路。
+
+**② 夏令时：`Intl` 是否违反铁律 3（对家质疑点，这里正面回答）**
+
+对家担心"用 `Intl` 属于宿主 API，需确认是否合规"。我的判断：**合规**，三条理由：
+
+1. 铁律 3 约束的是"**运行时依赖 0**：不得 import 任何第三方包"。
+   `Intl` 是 **ECMAScript 标准内置对象**（ECMA-402），与 `Date`/`Math` 同级，
+   **零 import**，不引入任何包。
+2. 铁律 1/2 约束的是"**不 import 引擎（`cc`）**"。`Intl` 不是 Cocos 引擎 API，
+   在任何 JS 运行时（浏览器 / Node / 引擎的 JS 层）都存在。
+3. 我**没有**改成必依赖：`zoneOffsetAt()` 在 `Intl` 不可用或时区名非合法 IANA 名时
+   **静默回退**到静态 `offsetMinutes`（即回到旧行为）。所以裁剪了 ICU 的宿主环境
+   **不会崩溃**，只是退化——这个取舍写进了第 8 节。
+
+需要总审注意的是：回退是**静默**的，排障时不易察觉。如果总审认为应该显式告警，
+我可以加一个可选开关，但默认保持静默（不能让"取不到时区"变成启动期崩溃）。
+
+### 10.5 收尾后的自检
+
+```
+bash build.sh                        → TSC OK（产物校验通过：224 个 .js）✅
+node .build/tests/run.js             → 通过 3696 项，失败 0 项            ✅
+runPhase10W6ATests()                 → 通过 51 项，失败 0 项              ✅
+check-links.js                       → [OK] 42 条链接，断链 0 处          ✅
+scan-dt-guard.py / scan-num-guard.py → 命中 0 处 / 0 处                  ✅
+check-random-source.py               → [OK]                              ✅
+check-dup-exports.py                 → [OK]                              ✅
+check-deps.js                        → 本窗口 3 个单元均已登记            ✅
+```
+
+测试数 **45 → 51**（新增 6 条）：islandMask 的 4 条防矫枉过正对照 + `isPaused()` 的 2 条。
 
