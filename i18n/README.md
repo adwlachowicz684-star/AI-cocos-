@@ -67,11 +67,10 @@ i18n.t('缺失的key');                      // '缺失的key'（回退，不是
 | `setLocaleTable(locale, table)` | 替换整个包（**热重载**） |
 | `setLocale(locale)` | 切换（不存在则保持，返回 false） |
 | `t(key, vars?)` | 翻译 |
-| `has(key, vars?)` | 能否翻出来（**与 `t()` 同一条查找路径**：含回退语言与复数变体） |
+| `has(key)` | 是否存在 |
 | `coverage(locale)` | 覆盖率 `{total, translated, missing}` |
 | `missingKeys` | 运行时缺失过的 key |
 | `onChange(fn)` | 语言切换回调（**UI 要自己刷新**） |
-| `onChange(fn)` 返回值 | 取消订阅（**可多播**：多个组件可同时订阅） |
 
 **未在上面列出的**：
 
@@ -92,38 +91,6 @@ i18n.t('缺失的key');                      // '缺失的key'（回退，不是
 > 热重载语言包（开发期改了 JSON 重新加载）必须用后者——
 > 用 `addLocale()` 的话，删掉的 key 还在，
 > 表现为"我明明删了这条文案怎么还显示"。
-
-> ⚠️ **`has()` 的口径必须与 `t()` 一致，别自己只查当前语言。**
-> 此前 `has()` 只查"当前语言的 key 本身"，于是
-> `has('ui.start') === false` 但 `t('ui.start') === '开始'`（来自回退语言）、
-> `has('item') === false` 但 `t('item', {n:3}) === '3 items'`（来自 `item_other`）。
-> 用 `has()` 决定"显示翻译还是显示 key"会得到大量假阴性——
-> 明明翻得出来却走了未翻译分支。
-> 现在两者共用同一条查找路径。
->
-> 【这次变更的代价，以及替代入口】
-> `has()` 不再能回答"**当前语言包**缺不缺这一条"——有回退语言时它恒为 `true`。
-> 本地化验收里"这份 en-US 还差几条"这类用法要改走 `coverage()`：
->
-> ```typescript
-> // ✗ 新口径下恒为 true，查不出 en 缺什么
-> if (!i18n.has(key)) missing.push(key);
->
-> // ✓ 按语言查缺失，用覆盖率
-> const { missing } = i18n.coverage('en-US');
-> ```
->
-> 实测：`zh` 有 3 条、`en` 只翻了 1 条时，
-> `has('ui.quit')` 为 `true`（回落中文），而 `coverage('en').missing` 正确列出
-> `['ui.quit', 'item']`。**单条判断用 `missing.includes(key)` 即可**，
-> 因此这里刻意不新增"只查当前语言"的 `has` 变体——
-> 两个长得像但口径不同的查询并存，比一个口径明确的查询更容易用错。
-
-> ⚠️ **覆盖率只认运行时能命中的复数形式（`_one` / `_other`）。**
-> CLDR 有六种复数形式，但本模块的 `_pluralKeyOf` 只实现 one/other。
-> 语言包只写 `item_few` / `item_many` 时：
-> 覆盖率曾报 100%，而 `t('item', {n:3})` 实际回落中文——**报告说谎比没有报告更糟**。
-> 现在这类 key 会被正确计入 missing。
 
 > ⚠️ **`destroy()` 之后 `onChange` 回调不再触发。**
 > 换场景时如果只切语言不 `destroy()`，
