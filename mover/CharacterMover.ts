@@ -158,6 +158,16 @@ export class CharacterMover {
   private _exX = 0;
   private _exY = 0;
   private _exTimer = 0;
+  /**
+   * **同一帧内**累计施加的冲量（跨帧清零，见 `update` 末尾）
+   *
+   * 【⚠️ 为什么 must 与 `_exX/_exY` 分开记】
+   * `_exX/_exY` 是"角色身上现在还残留多少外力"，它跨帧衰减但**不归零**；
+   * 而判"这一下算不算击退"要看的是**这一帧被推了多大力**，两者不是一回事。
+   * 混用会直接踩中传送带场景（详见 `addImpulse` 的注释）。
+   */
+  private _impulseX = 0;
+  private _impulseY = 0;
 
   // --- 状态 ---
   /** 是否正在被击退（供动画/输入系统调用） */
@@ -285,32 +295,67 @@ export class CharacterMover {
 
     // 限制总外力强度，防止叠加成火箭
     const mag = Math.sqrt(this._exX * this._exX + this._exY * this._exY);
-    let applied = mag;
     if (mag > cap && mag > 1e-9) {
       const k = cap / mag;
       this._exX *= k;
       this._exY *= k;
-      applied = cap;
     }
+
+    // 同帧累计（跨帧由 update 末尾清零）
+    this._impulseX += ix;
+    this._impulseY += iy;
 
     /**
      * 【⚠️ 外力存在期间才置 knocked】
      * 用"刚加过冲量"标记，而不是"外力 > 0"，
      * 否则传送带这种持续小外力会让角色永远处于击退态。
      *
-     * 【⚠️ 判据必须是**合成后**的总外力，不是本次冲量】
+     * 【⚠️ 判据要是"**同一帧内**的合成力"，既不是单次冲量，也不是跨帧总外力】
      *
-     * 原实现用单次冲量的 `mag2` 判断：
+     * 这一段改过两轮，两个方向都踩过坑，所以把两边的实测都记下来：
+     *
+     * **① 只看单次冲量（原实现）—— 漏判**
      * ```
      * maxSpeed = 6 → 阈值 3
      * addImpulse(2.5, 0) × 3  → 合成外力 7.5（明显在把玩家推开）
-     *                         但每次 mag2 = 2.5 < 3 → knocked 仍是 false
+     *                         但每次 mag = 2.5 < 3 → knocked 仍是 false
      * ```
      * 多个小击退（连击、多重小爆炸、弹幕推挤）合成很大时角色被明显推开，
-     * 却仍保有 100% 控制权——"击退形同虚设"，而且极难复现（要凑次数）。
-     * 改成看 `applied`（本次冲量叠加并限幅后的真实总外力）。
+     * 却仍保有 100% 控制权——"击退形同虚设"，且极难复现（要凑次数）。
+     *
+     * **② 看跨帧合成后的总外力（第一版修法）—— 误判**
+     * 直接换成 `applied`（叠加限幅后的总外力）确实修好了 ①，
+     * 但踩中了上面那段注释**明确警告要防**的传送带场景。
+     * 外力衰减是渐进的，持续施加会让它收敛到一个稳态：
+     * ```
+     * 每帧 addImpulse(0.5) × 600 帧 → 稳态外力 3.51 > 3 → knocked 590/600 帧
+     * 每帧 addImpulse(1.0)          → 稳态 7.01           → knocked 597/600 帧
+     * 每帧 addImpulse(2.0)          → 稳态 14.02          → knocked 599/600 帧
+     * ```
+     * （以上为验收方 W4-A 实测，本窗口已独立复现，数字一致）
+     * 而 `update` 里是 `const control = knocked ? knockbackControl : 1`、
+     * 默认 `knockbackControl = 0.3`——于是**玩家一踏上传送带，
+     * 操作权就从 100% 掉到 30%，只要还在上面就一直不恢复**。
+     * 不报错、不崩溃，只会被归因为"这游戏手感差"。
+     *
+     * **③ 同帧合成（当前实现）—— 两边都对**
+     * 关键在于区分**两种"多段击退"**：
+     * - 连击、多重爆炸、弹幕推挤：**同一帧内**连续 addImpulse，要合成；
+     * - 传送带、风力、持续推挤：**每帧一小次**，跨帧不该合成。
+     *
+     * 前者才是"多段击退"的真实形态。所以这里累加的是
+     * **同一帧内**的冲量（跨帧由 `update` 末尾清零），
+     * ① 的 3×2.5 = 7.5 仍然判得出，② 的传送带每帧只有 0.5~2，判不出。
+     *
+     * 【为什么取 `Math.min(frameMag, cap)`】
+     * 判据要反映"角色**实际**被推了多大力"。调用方显式传了很小的
+     * `maxExternal` 时，累加值虽大、实际施加的被限幅到 `cap`，
+     * 此时不该算击退——否则"被限成 1 的推力"也会让玩家掉到 30% 操作权。
      */
-    if (applied > this._cfg.maxSpeed * 0.5) this.knocked = true;
+    const frameMag = Math.sqrt(
+      this._impulseX * this._impulseX + this._impulseY * this._impulseY
+    );
+    if (Math.min(frameMag, cap) > this._cfg.maxSpeed * 0.5) this.knocked = true;
   }
 
   /** 清空外力（复位、切场景时用） */
@@ -318,6 +363,8 @@ export class CharacterMover {
     this._exX = 0;
     this._exY = 0;
     this._exTimer = 0;
+    this._impulseX = 0;
+    this._impulseY = 0;
     this.knocked = false;
   }
 
@@ -506,6 +553,24 @@ export class CharacterMover {
     if (ts > this._cfg.stopEpsilon * 2) {
       this._facing = Math.atan2(totalY, totalX);
     }
+
+    /**
+     * ⑨ 同帧冲量累加器清零
+     *
+     * 【⚠️ 为什么必须在这里清，而不是在 addImpulse 里判断"是不是同一帧"】
+     * 本类没有帧号——`dt` 是外部传进来的，mover 不知道"现在第几帧"。
+     * 于是"一帧"只能由调用方定义：**相邻两次 update 之间**。
+     *
+     * 这个语义与调用方的循环天然对齐：
+     * 收集输入/事件 → addImpulse（可能多次）→ update（推进一帧）。
+     * 清零放在 update 末尾，下一次 addImpulse 就是新的一帧。
+     *
+     * 【契约】调用方应当在每个渲染帧内**先施加冲量、再 update**。
+     * 若某帧跳过了 update（暂停、切后台），那些冲量会被算进下一次 update 之前
+     * 的同一"帧"——这在语义上是对的：没有推进时间，就没有"下一帧"。
+     */
+    this._impulseX = 0;
+    this._impulseY = 0;
   }
 
   /** 以固定加速度朝目标速度逼近（不会过冲） */
