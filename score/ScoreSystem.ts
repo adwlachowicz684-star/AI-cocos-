@@ -34,30 +34,6 @@
 
 import { clamp, clamp01, numOr, safeDt, inverseLerp } from '../_core/math';
 
-/**
- * 非有限数值的统一拒绝口径
- *
- * 【为什么是 throw 而不是"忽略并 warn"】
- * 评级是**结算时刻**读的东西：一次 NaN 进来，
- * `total()` 变 NaN → `s >= g.minScore` 对 NaN 恒为 false →
- * `grade()` 静默返回最后一档。玩家看到的是"这次打得很好却拿了 D"，
- * 而日志里什么都没有——**这是最贵的那种静默**。
- *
- * 实测（W3-A 复现脚本）：
- * ```
- * 正常两个指标 → total = 100  grade = S
- * add('kills', NaN) → total = NaN  grade = D   （无异常、无警告）
- * ```
- *
- * 在写入口就炸，能把"为什么是 D"这个问题在**录入那一行**暴露出来，
- * 而不是留到玩家看结算画面时才被发现。
- */
-function assertFinite(value: number, what: string): void {
-  if (!Number.isFinite(value)) {
-    throw new Error(`[Score] ${what} 必须是有限数字，收到 ${value}`);
-  }
-}
-
 // ============================================================
 // 数据结构
 // ============================================================
@@ -133,10 +109,6 @@ export interface ScoreSystemOptions {
    * - `'weighted'`（默认）：加权平均
    * - `'minimum'`：取最低分（木桶效应，硬核）
    * - `'weighted-with-floor'`：加权平均，但任一维度低于 floor 则降级
-   *
-   * 【⚠️ `weighted-with-floor` 是一票否决】
-   * 任一维度低于 `floor`，总分直接压到最低档的 `minScore`（通常是 0），
-   * 其余维度考得再好也没用。详见 README 第 4 节。
    */
   mode?: 'weighted' | 'minimum' | 'weighted-with-floor';
   /**
@@ -187,16 +159,7 @@ export class ScoreSystem {
 
     for (const m of opts.metrics) {
       if (this._metrics.has(m.id)) throw new Error(`[Score] 指标 id 重复：${m.id}`);
-      /**
-       * 【为什么构造时也要校验有限性】
-       * `weight < 0` 对 NaN 是 false（NaN 与任何值比较都返回 false），
-       * 所以 NaN 权重此前能一路进到 `total()`，把总分直接乘成 NaN。
-       * 实测：`new ScoreSystem({ metrics: [{ weight: NaN, ... }] })` 构造成功。
-       * 这里补上"肯定式"的有限性校验（本库最高频的失效模式）。
-       */
-      if (!(m.weight >= 0)) {
-        throw new Error(`[Score] 指标 ${m.id} 的权重不能为负，且必须是有限数，收到 ${m.weight}`);
-      }
+      if (m.weight < 0) throw new Error(`[Score] 指标 ${m.id} 的权重不能为负`);
       if (m.direction === 'lower-better' && m.zero <= m.par) {
         throw new Error(
           `[Score] 指标 ${m.id} 是 lower-better，zero(${m.zero}) 必须大于 par(${m.par})`
@@ -234,7 +197,6 @@ export class ScoreSystem {
     if (!this._metrics.has(id)) {
       throw new Error(`[Score] 未定义的指标：${id}（已定义：${this._order.join(', ')}）`);
     }
-    assertFinite(value, `指标 ${id} 的值`);
     this._values.set(id, value);
   }
 
@@ -350,23 +312,13 @@ export class ScoreSystem {
 
   private _scoreOne(m: MetricDef, raw: number): number {
     const t = inverseLerp(m.zero, m.par, raw);   // par 处 = 1，zero 处 = 0
-    /**
-     * 【方向已经隐含在 zero/par 里了，所以两个分支本来就是同一份代码】
-     *
-     * `inverseLerp(zero, par, raw)` 在 raw = zero 时得 0、raw = par 时得 1，
-     * 与"越大越好还是越小越好"无关——
-     * 方向的区别只体现在 **zero 与 par 谁大** 上：
-     * - lower-better（用时/受伤）：zero > par（构造时已校验）
-     * - higher-better（连击/击杀）：zero < par（构造时已校验）
-     *
-     * 也就是说 `direction` 这个字段在**评分这一行**不起作用，
-     * 它的实际约束力在构造校验（L91-100）和给调用方看的语义上。
-     *
-     * 旧写法把两个方向拆成两个 if 分支、分支体却完全相同，
-     * 读者会以为"这里以后可能不一样"而去找差异，找不到又不敢合并。
-     * 现在合并成一行并写明原因。
-     */
-    let s: number = clamp01(t) * 100;
+    let s: number;
+
+    if (m.direction === 'higher-better') {
+      s = clamp01(t) * 100;
+    } else {
+      s = clamp01(t) * 100;
+    }
 
     // 超额：越过 par 之后继续加分
     const overshoot = m.allowOvershoot !== false;
@@ -377,20 +329,6 @@ export class ScoreSystem {
     }
 
     return clamp(s, 0, m.allowOvershoot === false ? 100 : m.maxScore ?? 150);
-  }
-
-  /**
-   * 卸载（rule5）
-   *
-   * 【它和 reset() 的区别】
-   * `reset()` 把每个指标恢复到初始 raw 值，**对象还能继续用**；
-   * `destroy()` 是"这个对象不要了"——额外摘掉 `onGrade` 回调。
-   * 回调是个闭包，只要还挂着，它捕获的整条作用域链（通常含结算 UI）
-   * 都不会被回收。
-   */
-  destroy(): void {
-    this.reset();
-    this.onGrade = undefined;
   }
 }
 
@@ -442,17 +380,7 @@ export class StarRating {
   private readonly _stars: number;
 
   constructor(stars: number) {
-    /**
-     * 【⚠️ `Math.max(1, NaN)` 等于 NaN，不是 1】
-     * 星级来自配置表时 NaN 是可能的（缺字段、解析失败）。
-     * 后果链条很长但很确定：
-     *   `max` = NaN → `length >= NaN` 恒为 false
-     *   → `addCondition` 的条数上限**永远不触发**
-     *   → 可以无限加条件，`evaluate()` 能返回超过星级的星数
-     * 实测：`new StarRating(NaN).max` = NaN，连加 50 个条件都不报错。
-     * 所以这里走"肯定式"收口：`!(stars >= 1)` 时回落到 1。
-     */
-    this._stars = !(stars >= 1) ? 1 : Math.floor(stars);
+    this._stars = Math.max(1, stars);
   }
 
   addCondition(fn: (ctx: unknown) => boolean): this {
