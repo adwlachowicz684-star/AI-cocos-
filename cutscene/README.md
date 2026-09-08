@@ -90,7 +90,7 @@ cs.seek(2000);
 | 方法 | 说明 |
 |---|---|
 | `on(kind, handler)` | 注册某类 step 的回调 |
-| `play()` / `update(dt)` | 播放 / 推进（**异常 dt 会被丢弃**，见下） |
+| `play()` / `update(dt)` | 播放 / 推进 |
 | `seek(t)` | 跳到指定时刻（重放之前的 step） |
 | `skip()` | 快进到结尾 |
 | `stop()` | 停止（**不**应用终态） |
@@ -163,24 +163,6 @@ cs.seek(2000);
 > ⚠️ **`CutsceneCut` 是"本帧发生了什么"，不是"当前状态"。**
 > `update()` 返回它，你得把它应用到你的场景上
 > （移动镜头、播音效、显示字幕）。
-
-> ⚠️ **`update(dt)` 会丢弃异常 dt（NaN / 负数 / Infinity）。**
-> 这类帧曾经能直接吃进内部计时：
-> `Infinity` 会把 `time` 一下推到无穷并立刻 `finished`；
-> `NaN` 混进阻塞计时后 `_blockElapsed` 永远是 NaN，
-> `NaN >= timeoutMs` 恒为 false → **门永远解不开**，
-> 演出永久停在 `blocked`，上层"等演出结束"的等待逻辑永久挂起，且不报错。
-> 丢弃这一帧是唯一安全的做法——演出会慢一帧，但不会死。
-
-**构造参数**
-
-```typescript
-new Cutscene(def, { maxGatesPerTick: 64 })   // 默认 64
-```
-
-`maxGatesPerTick` 是"一帧最多解几道阻塞门"。
-门特别多时（连续几十个等待玩家按键的 step）一帧推不完，
-演出会**变慢**——这时候可以调大它。
 > 只读返回值而不应用的话，演出在逻辑上跑完了，画面什么都没变。
 
 > **`on()` 返回 `this`，可以链式注册多个 kind 的 handler。**
