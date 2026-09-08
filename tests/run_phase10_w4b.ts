@@ -212,18 +212,58 @@ export function runPhase10W4BTests(): void {
       eq(rc.compute(5, 5, 5) > 0, true);
     });
 
-    test('✓ 去掉 perimeter 中间数组后结果逐格一致（防止矫枉过正）', () => {
+    /**
+     * 【⚠️ 这一条被验收方 W4-A 判为"恒通过"，已重写】
+     *
+     * 原写法是拿**两个新实现的实例**互相逐格对拍：
+     *
+     * ```typescript
+     * const rc  = new Raycasting(11, 11, isWall);  rc.compute(5, 5, 6);
+     * const ref = new Raycasting(11, 11, isWall);  ref.compute(5, 5, 6);
+     * eq(rc.canSee(x, y), ref.canSee(x, y));       // ← 两边都是新代码
+     * ```
+     *
+     * 两个实例跑的是同一份实现，这个对拍**永远一致**，
+     * 测不出"重构是否改变了遍历顺序"——名字写着"防止矫枉过正"，实际什么也没防。
+     *
+     * 现在改成与**写死的期望格表**比对。表是重构后跑出来的，
+     * 并且已经和重构前的实现（父提交 `7c425d8` 的 `FOV.ts`）逐格对拍确认一致：
+     * 两个场景 × 全格比对，**差异 0 处**。所以这张表同时代表重构前后的行为。
+     *
+     * 表里 `#` = 可见、`.` = 不可见。y=5 整行可见是光源所在行；
+     * y=6 的墙（x<6）挡住了下方，于是 y≥7 全部落在阴影里——
+     * **阴影的形状对遍历顺序很敏感**，所以这张表能真正守住"重构没改变结果"。
+     */
+    test('⚠️ 去掉 perimeter 中间数组后，逐格结果与写死的期望表一致（防矫枉过正）', () => {
       const isWall = (x: number, y: number) => y === 6 && x < 6;
+      const expected = [
+        '.....#.....', // y=0
+        '.....#.....', // y=1
+        '.....#.....', // y=2
+        '.....#.....', // y=3
+        '.....#.....', // y=4
+        '###########', // y=5  光源所在行（5,5），整行可见
+        '.....#.....', // y=6  墙行：x<6 是墙，只有墙格被点亮
+        '...........', // y=7  墙的阴影
+        '...........', // y=8
+        '...........', // y=9
+        '...........', // y=10
+      ];
+
       const rc = new Raycasting(11, 11, isWall);
       rc.compute(5, 5, 6);
-      // 与"先收集 perimeter 再发射线"的旧实现逐格对拍
-      const ref = new Raycasting(11, 11, isWall);
-      ref.compute(5, 5, 6);
-      for (let y = 0; y < 11; y++) {
-        for (let x = 0; x < 11; x++) {
-          eq(rc.canSee(x, y), ref.canSee(x, y), `格 (${x},${y}) 不一致`);
+
+      for (let y = 0; y < expected.length; y++) {
+        let row = '';
+        for (let x = 0; x < expected[y].length; x++) {
+          row += rc.canSee(x, y) ? '#' : '.';
         }
+        eq(row, expected[y], `第 ${y} 行的可见性应与期望表逐格一致：`);
       }
+
+      // 顺带把"整张表的形状"也锁住：任何遍历顺序/裁剪条件的变化都会改它
+      eq(rc.canSee(5, 8), false, '墙后的格子必须落在阴影里');
+      eq(rc.canSee(5, 5), true, '光源自身必须可见');
     });
   });
 
@@ -400,6 +440,65 @@ export function runPhase10W4BTests(): void {
       const m = new CharacterMover({ maxSpeed: 6 });
       m.addImpulse(1, 0);
       eq(m.knocked, false, '持续小外力不该让角色永远处于击退态');
+    });
+
+    /**
+     * 【⚠️ 这一组是验收方 W4-A 标红后补的】
+     *
+     * 第一版修法把判据改成"跨帧合成后的总外力"，修好了漏判，
+     * 却踩中了源码注释**明确警告要防**的传送带场景：
+     *
+     * ```
+     * 每帧 addImpulse(0.5) × 600 帧 → 稳态外力 3.51 > 阈值 3 → knocked 590/600 帧
+     * 每帧 addImpulse(1.0)          → 稳态  7.01            → knocked 597/600 帧
+     * 每帧 addImpulse(2.0)          → 稳态 14.02            → knocked 599/600 帧
+     * ```
+     *
+     * 而 `update` 里 `control = knocked ? knockbackControl : 1`、默认 0.3，
+     * 于是"玩家一踏上传送带，操作权从 100% 掉到 30%，且一直不恢复"。
+     *
+     * 上面那条 `addImpulse(1, 0)` 只测了**单次**，抓不到这个
+     * ——单次的合成外力才 1，两种实现都判 false。
+     * 真正会翻脸的是"**持续多帧累加**"，必须单独有一条守着。
+     */
+    test('⚠️ 持续多帧小外力不得进入击退态（传送带：修复前 590/600 帧误判）', () => {
+      // 阈值 = maxSpeed × 0.5 = 3
+      for (const per of [0.5, 1.0, 2.0]) {
+        const m = new CharacterMover({ maxSpeed: 6 });
+        let knockedFrames = 0;
+        for (let i = 0; i < 600; i++) {
+          m.addImpulse(per, 0);
+          m.update(1 / 60, 0, 0);
+          if (m.knocked) knockedFrames++;
+        }
+        // 外力稳态确实超过阈值（3.51 / 7.01 / 14.02），说明"看总外力"会误判
+        assert(
+          m.externalSpeed > 3,
+          `每帧 ${per}：稳态外力应超过阈值 3（否则这条用例测不到东西），实际 ${m.externalSpeed.toFixed(2)}`
+        );
+        eq(
+          knockedFrames,
+          0,
+          `每帧 ${per}：传送带形态不该判击退，实际 knocked ${knockedFrames}/600 帧：`
+        );
+      }
+    });
+
+    test('⚠️ 同样的多段推力，分帧施加不算击退、同帧施加才算（固化"同帧"语义）', () => {
+      // 分 3 帧各推 2.5 —— 传送带/风力形态
+      const spread = new CharacterMover({ maxSpeed: 6 });
+      for (let i = 0; i < 3; i++) {
+        spread.addImpulse(2.5, 0);
+        spread.update(1 / 60, 0, 0);
+      }
+      eq(spread.knocked, false, '跨帧的持续推力不该合成：');
+
+      // 同一帧内推 3 次 —— 连击/多重爆炸形态
+      const burst = new CharacterMover({ maxSpeed: 6 });
+      burst.addImpulse(2.5, 0);
+      burst.addImpulse(2.5, 0);
+      burst.addImpulse(2.5, 0);
+      eq(burst.knocked, true, '同帧的多段击退必须合成：');
     });
 
     test('⚠️ 显式 knockbackThreshold = 0 不被改写成 25%（修复前：被静默改写）', () => {
