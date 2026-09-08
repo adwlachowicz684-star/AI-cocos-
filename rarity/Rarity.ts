@@ -32,8 +32,6 @@
  * 【无引擎依赖】
  */
 
-import { hasOwn } from '../_core/guard';
-
 // ==================== 类型 ====================
 
 export interface RarityDef {
@@ -106,32 +104,9 @@ export class Rarity {
       this._byId.set(d.id, d);
     }
 
-    // order 唯一性 + 有限性校验
+    // order 唯一性校验
     const orders = new Set<number>();
     for (const d of defs) {
-      /**
-       * 【⚠️ 为什么 order 也要查有限性（P1）】
-       *
-       * 同一个循环里 `weight` 用了肯定式 `!(d.weight > 0)` 把 NaN 挡在门外，
-       * `order` 却只查了重复——NaN 是"没见过的键"，唯一性检测天然放过它。
-       *
-       * 一个 NaN 混进比较器（`b.order - a.order` → NaN）之后，
-       * `Array.prototype.sort` 拿到的比较结果是 NaN，
-       * 排序结果**由引擎实现决定**（实测：保持原序）。
-       * 于是 `highest` / `lowest` / `compare` / `best` 全部错位，且不报错。
-       *
-       * 实测（修复前）：三条定义的 order 分别为 1 / NaN / 3 时，
-       * `highest.id` 返回 `a`（应为 `c`），`all` 顺序为 `a,b,c`（未排序）。
-       *
-       * 后果：保底系统按 `highest` 判定"给不给最稀有档"，
-       * 排序错 → 保底给错档位。文件头自称"排序稳定"，
-       * 实际在脏数据下完全不稳定。
-       */
-      if (!Number.isFinite(d.order)) {
-        throw new Error(
-          `[Rarity] order 必须是有限数："${d.id}" 的 order 为 ${d.order}`
-        );
-      }
       if (orders.has(d.order)) {
         throw new Error(
           `[Rarity] order 重复：${d.order}（"${d.id}" 与其他稀有度冲突）`
@@ -275,42 +250,10 @@ export class Rarity {
    * 【未出现的也有键】方便 UI 直接遍历，不用做存在性判断。
    */
   tally(ids: readonly string[]): Record<string, number> {
-    /**
-     * 【⚠️ 为什么不能直接 `out[id] += 1`（P2）】
-     *
-     * `{}` 字面量的原型是 `Object.prototype`，
-     * `out['__proto__'] = 0` **不会创建自有属性**，它走的是 `__proto__` 的 setter
-     * （这里是对象字面量，赋值被静默忽略）；
-     * 之后 `out['__proto__'] += 1` 读到的也是原型上的值（`undefined`），
-     * `undefined + 1 = NaN`，再赋值又被忽略。
-     *
-     * 实测（修复前）：`tally(['__proto__','__proto__','b'])` 返回 `{"b":1}`
-     * ——`get('__proto__')` 还能取到定义，但**计数整条丢失**，
-     * 属于"部分可用、计数丢失"的半失效状态，比直接报错难查得多。
-     *
-     * 稀有度 id 来自策划配表，`__proto__` / `constructor` 这类键
-     * 在"配表里写了个奇怪名字"或"读到了脏数据"时完全可能出现。
-     *
-     * 【为什么用 defineProperty 而不是 `Object.create(null)`】
-     * 后者也能修好计数，但返回的对象没有原型，
-     * 宿主调 `out.hasOwnProperty(...)` 会直接 TypeError。
-     * 用 defineProperty 把键定义成**自有可枚举属性**，
-     * 计数正确，同时保留普通对象该有的全部方法。
-     */
     const out: Record<string, number> = {};
-    const bump = (key: string, by: number): void => {
-      const cur = hasOwn(out, key) ? out[key]! : 0;
-      Object.defineProperty(out, key, {
-        value: cur + by,
-        enumerable: true,
-        writable: true,
-        configurable: true,
-      });
-    };
-
-    for (const d of this._defs) bump(d.id, 0);
+    for (const d of this._defs) out[d.id] = 0;
     for (const id of ids) {
-      bump(this.getOrFallback(id).id, 1);
+      out[this.getOrFallback(id).id] += 1;
     }
     return out;
   }
