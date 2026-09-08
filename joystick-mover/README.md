@@ -158,18 +158,6 @@ jm.onDirectionChange = (dir, mag) => { this.lastDir = { ...dir }; };
 
 表现为"方向偶尔跳变回上一次的值"——因为在别处改写了同一个对象。
 
-**需要留一份副本时，用 `snapshot()` / `evaluateInto()` 而不是手写展开**：
-
-```typescript
-const snap = jm.snapshot();              // 一次性拿到值拷贝（零引用）
-jm.evaluateInto(this._buf);              // 算进你自己的复用对象（零分配）
-```
-
-`evaluate()` 的零分配语义**没有改**（不 breaking）——它返回的仍是同一个复用对象。
-新增的这两个入口是为了让"我就是要存一份"这个需求有正解，
-而不是让每个人自己写 `{ ...jm.output.dir }`（`dir` 里还有 `magnitude`，
-少拷一个字段就是一个新坑）。
-
 ### ④ 抬起事件是**广播**的，非驱动手指抬起不能复位摇杆
 
 这是 2026-09-05 第三轮引擎实测才发现的——**前两轮都没测到**。
@@ -277,8 +265,6 @@ velocity = dir * magnitude * speed; // ✅ 渐进加速，手感线性
 | `onMove(id, x, y)` | 移动 |
 | `onUp(id)` | 抬起（自动归零） |
 | `evaluate()` | 计算输出（返回复用对象，零 GC） |
-| `snapshot()` | 输出的**值拷贝**（要存下来用这个） |
-| `evaluateInto(out)` | 算进调用方的复用对象（零分配） |
 | `setAxis(x, y)` | 外部驱动（键盘/手柄） |
 | `center` / `knob` | UI 定位用 |
 | `isActive` | 是否有触点 |
