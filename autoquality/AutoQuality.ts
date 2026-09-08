@@ -102,20 +102,6 @@ export interface AutoQualityConfig {
    * 有些项目宁可让玩家手动调高，也不愿自动升级后掉帧。
    */
   readonly allowUpgrade?: boolean;
-  /**
-   * 档位变化历史的最大保留条数（默认 50）
-   *
-   * 【⚠️ 为什么必须收口】
-   * 历史是"排查为什么降档"用的诊断数据，只关心最近若干次。
-   * 但它是只增不减的数组：长时间挂机 + 帧率在阈值附近抖动时，
-   * 一次升降就是一条，实测 360 帧的横跳能攒出 79 条，
-   * 挂机几小时就是几万条——为一个诊断字段付出持续增长的常驻内存。
-   *
-   * 【为什么是"丢最旧的"】
-   * 诊断价值随时效衰减："刚刚为什么降了"有用，
-   * "三小时前为什么降了"没人看。丢尾部不影响排查当下的问题。
-   */
-  readonly historyLimit?: number;
 }
 
 export interface AutoQualityState {
@@ -156,26 +142,14 @@ export class AutoQuality {
   private readonly _cooldownMs: number;
   private readonly _needStrikes: number;
   private readonly _allowUpgrade: boolean;
-  private readonly _historyLimit: number;
 
   private _level: QualityLevel;
   private readonly _byLevel = new Map<QualityLevel, QualityTier>();
 
-  /**
-   * 帧时间环形缓冲 + 三个统计量的唯一实现
-   *
-   * 【⚠️ 为什么统计逻辑要委托给 FpsMeter，而不是在本类里再写一遍】
-   * 本类原本自带 medianFps / averageFps / lowFps1Percent 三份实现，
-   * FpsMeter 里又有同名的三份，**逐行对比下来算法完全一样**。
-   *
-   * 两份实现的代价不是"多写几行"，而是**修 bug 要修两遍**：
-   * 中位数对 NaN 的处理、1% low 的取整方式、空窗口返回什么，
-   * 任何一处只改一边，就会出现"调试面板和自动降档读数不一致"，
-   * 而这类不一致不会报错，只会让人怀疑自己的眼睛。
-   *
-   * 现在本类只持有样本写入与冷却语义，统计全部由 `_meter` 负责。
-   */
-  private readonly _meter: FpsMeter;
+  /** 帧时间环形缓冲（毫秒） */
+  private readonly _samples: number[] = [];
+  private _sampleIdx = 0;
+  private _sampleCount = 0;
 
   private _cooldownLeft = 0;
   private _strikes = 0;
@@ -205,7 +179,6 @@ export class AutoQuality {
     this._cooldownMs = Math.max(0, numOr(cfg.cooldownMs, 2000));
     this._needStrikes = Math.max(1, numOr(cfg.consecutiveSamples, 3));
     this._allowUpgrade = cfg.allowUpgrade ?? true;
-    this._historyLimit = clampNum(cfg.historyLimit, 1, 1e6, 50);
 
     this._level = cfg.initialLevel ?? this._tiers[this._tiers.length - 1]!.level;
     if (!this._byLevel.has(this._level)) {
@@ -224,7 +197,7 @@ export class AutoQuality {
       );
     }
 
-    this._meter = new FpsMeter(this._window);
+    this._samples = new Array(this._window).fill(16.7);
   }
 
   // ==================== 采样 ====================
@@ -286,9 +259,11 @@ export class AutoQuality {
 
     // 写入环形缓冲（非法样本直接跳过，不占位）
     if (!validDtMs) return;
-    this._meter.tick(dtMs);
+    this._samples[this._sampleIdx] = dtMs;
+    this._sampleIdx = (this._sampleIdx + 1) % this._window;
+    if (this._sampleCount < this._window) this._sampleCount++;
 
-    if (!this._meter.settled) return;
+    if (this._sampleCount < this._window) return;
 
     // 决策
     const fps = this.medianFps;
@@ -325,7 +300,8 @@ export class AutoQuality {
   }
 
   private _resetWindow(): void {
-    this._meter.reset();
+    this._sampleCount = 0;
+    this._sampleIdx = 0;
     this._strikes = 0;
   }
 
@@ -342,7 +318,7 @@ export class AutoQuality {
     }
     const from = this._level;
     this._level = this._tiers[i - 1]!.level;
-    this._pushHistory({
+    this._history.push({
       from, to: this._level, at: this._now, fps,
       reason: `帧率 ${fps.toFixed(1)} < ${this._downFps}`,
     });
@@ -357,7 +333,7 @@ export class AutoQuality {
     }
     const from = this._level;
     this._level = this._tiers[i + 1]!.level;
-    this._pushHistory({
+    this._history.push({
       from, to: this._level, at: this._now, fps,
       reason: `帧率 ${fps.toFixed(1)} > ${this._upFps}`,
     });
@@ -368,27 +344,6 @@ export class AutoQuality {
     this._cooldownLeft = this._cooldownMs;
     this._timeInLevel = 0;
     this._resetWindow();
-  }
-
-  /**
-   * 写入一条档位变化历史（超上限时丢最旧的）
-   *
-   * 【为什么这里收口而不是在 push 的地方各写一遍】
-   * 历史有三处写入点（手动设置 / 自动降级 / 自动升级）。
-   * 容量上限如果散在三个地方，漏掉一处就会出现
-   * "手动切换不涨、自动切换涨"这种只对一半的修复。
-   */
-  private _pushHistory(rec: {
-    readonly from: QualityLevel;
-    readonly to: QualityLevel;
-    readonly at: number;
-    readonly fps: number;
-    readonly reason: string;
-  }): void {
-    this._history.push(rec);
-    if (this._history.length > this._historyLimit) {
-      this._history.splice(0, this._history.length - this._historyLimit);
-    }
   }
 
   // ==================== 帧率统计 ====================
@@ -412,28 +367,21 @@ export class AutoQuality {
    * 否则显示"—"或"测量中"。
    */
   get medianFps(): number {
-    return this._fpsOrIdle(this._meter.median);
+    if (this._sampleCount === 0) return 60;
+    const arr = [...this._samples.slice(0, this._sampleCount)].sort((a, b) => a - b);
+    const mid = arr.length >> 1;
+    const med = arr.length % 2 === 1
+      ? arr[mid]!
+      : (arr[mid - 1]! + arr[mid]!) / 2;
+    return med > 0 ? 1000 / med : 0;
   }
 
   /** 平均 fps（仅作参考/诊断用，不参与决策） */
   get averageFps(): number {
-    return this._fpsOrIdle(this._meter.average);
-  }
-
-  /**
-   * 空窗口时三个统计量统一返回 60
-   *
-   * 【⚠️ 为什么是 60 而不是 0】
-   * 0 会被调试面板显示成"帧率 0"，看起来像卡死了；
-   * 而空窗口的实际含义是"还没测出来"（刚切档 / 刚启动），不是"很慢"。
-   * 返回 60（假定正常）不会误导排查方向。
-   *
-   * FpsMeter 面向"我要真实读数"，空窗口返回 0；
-   * 本类面向"档位决策 + 面板显示"，返回 60。
-   * 两者语义不同，不是同一个数写错了两遍——委托时在这里收口。
-   */
-  private _fpsOrIdle(v: number): number {
-    return this._meter.sampleCount === 0 ? 60 : v;
+    if (this._sampleCount === 0) return 60;
+    let sum = 0;
+    for (let i = 0; i < this._sampleCount; i++) sum += this._samples[i]!;
+    return sum > 0 ? (1000 * this._sampleCount) / sum : 0;
   }
 
   /**
@@ -445,7 +393,12 @@ export class AutoQuality {
    * 平均 60 帧但每秒掉一次到 15 帧，体感依然很差。
    */
   get lowFps1Percent(): number {
-    return this._fpsOrIdle(this._meter.lowFps1Percent);
+    if (this._sampleCount === 0) return 60;
+    const arr = [...this._samples.slice(0, this._sampleCount)].sort((a, b) => b - a);
+    const n = Math.max(1, Math.floor(arr.length * 0.01));
+    let sum = 0;
+    for (let i = 0; i < n; i++) sum += arr[i]!;
+    return sum > 0 ? (1000 * n) / sum : 0;
   }
 
   // ==================== 手动控制 ====================
@@ -464,26 +417,11 @@ export class AutoQuality {
    */
   setManualLevel(level: QualityLevel): boolean {
     if (!this._byLevel.has(level)) return false;
-    /**
-     * 【⚠️ 必须在赋值之前取旧档位】
-     *
-     * 原写法先 `this._level = level` 再 `from: this._level`，
-     * 于是历史里每条手动切换都记成 `2 → 2`（from === to）。
-     *
-     * 后果不是"少记一个数"这么轻：
-     * `describe()` 里所有手动切换都渲染成 `· 2 → 2`，
-     * 玩家问"画质为什么降了"时，这段历史**完全看不出从哪切过来**——
-     * 它就是为此存在的，废掉之后等于没有。
-     *
-     * 自动升降档（_downgrade/_upgrade）早就正确取了 from，
-     * 只有手动这条路径写错了，属于同一份数据两种口径。
-     */
-    const from = this._level;
     this._level = level;
     this._locked = true;
     this._enterCooldown();
-    this._pushHistory({
-      from, to: level, at: this._now, fps: this.medianFps,
+    this._history.push({
+      from: this._level, to: level, at: this._now, fps: this.medianFps,
       reason: '玩家手动设置',
     });
     return true;
@@ -520,13 +458,12 @@ export class AutoQuality {
   }
 
   get state(): AutoQualityState {
-    const settled = this._meter.settled;
     return {
       level: this._level,
       tierName: this.tier.name,
       fps: this.medianFps,
-      fpsValid: settled && this._cooldownLeft <= 0,
-      settled,
+      fpsValid: this._sampleCount >= this._window && this._cooldownLeft <= 0,
+      settled: this._sampleCount >= this._window,
       coolingDown: this._cooldownLeft > 0,
       cooldownRemaining: Math.max(0, this._cooldownLeft),
       strikes: this._strikes,
@@ -572,29 +509,6 @@ export class AutoQuality {
       }
     }
     return lines.join('\n');
-  }
-
-  // ==================== 卸载 ====================
-
-  /**
-   * 释放采样缓冲与历史记录
-   *
-   * 【为什么要显式提供】
-   * 本类持有两个会随运行时间增长的容器：
-   * 采样窗口（`_window` 个帧时间）和档位历史（上限 `_historyLimit` 条）。
-   * 切场景时旧实例如果忘了丢，这两个数组会被一直钉在内存里。
-   *
-   * 【为什么不清 `_tiers` / 配置】
-   * 那些是构造期确定的只读数据，清掉之后 destroy 过的对象
-   * 连 `level` 都读不出来，比留着更糟。
-   * destroy 只清"累积出来的东西"。
-   */
-  destroy(): void {
-    this._history.length = 0;
-    this._meter.reset();
-    this._strikes = 0;
-    this._cooldownLeft = 0;
-    this._timeInLevel = 0;
   }
 
   // ==================== 便捷：预设档位 ====================
@@ -650,30 +564,9 @@ export class FpsMeter {
   private readonly _samples: number[];
   private _idx = 0;
   private _count = 0;
-  /** 排序结果缓存。null = 脏了，下次读要重排 */
-  private _sorted: number[] | null = null;
 
-  /**
-   * 【⚠️ 窗口大小必须收口，不能只写 Math.max(3, windowSize)】
-   *
-   * 原写法 `Math.max(3, NaN)` 得到 **NaN**（NaN 参与 max 会被"吞掉"成 NaN），
-   * 紧接着 `new Array(NaN)` 抛 `RangeError: Invalid array length`。
-   * 实测：`new FpsMeter(NaN)` 直接崩，构造函数就是崩溃点，
-   * 堆栈完全不会指向"是谁传了 NaN 进来"——配置是从外部读的，
-   * 排查时只能一行行回退去找那个来源。
-   *
-   * `Infinity` 同样崩（实测同样是 Invalid array length）。
-   *
-   * 【为什么这里值得单独强调】
-   * 同一个文件里的 `AutoQuality` 用 `clampNum(cfg.windowSize, 3, 1e6, 60)`
-   * 收口得很干净，`FpsMeter` 却用裸 `Math.max`——
-   * **两份配置来源相同，一个安全一个崩溃**，这本身就是最容易踩的坑：
-   * 调用方会以为"这个类对坏值是宽容的"，因为另一个类是宽容的。
-   *
-   * 统一用 `clampNum`：NaN / Infinity / 负数全部回落默认值 60。
-   */
   constructor(windowSize = 60) {
-    this._window = clampNum(windowSize, 3, 1e6, 60);
+    this._window = Math.max(3, windowSize);
     this._samples = new Array(this._window).fill(16.7);
   }
 
@@ -681,50 +574,12 @@ export class FpsMeter {
     this._samples[this._idx] = dtMs;
     this._idx = (this._idx + 1) % this._window;
     if (this._count < this._window) this._count++;
-    this._sorted = null;
-  }
-
-  /**
-   * 已写入的样本数（0 表示空窗口）
-   *
-   * 【为什么需要对外暴露】
-   * `median` / `average` 在空窗口时都返回 0，
-   * 而 0 既可能是"真的测得 0 fps"，也可能是"还没样本"。
-   * 调用方要区分这两种情况（例如"测量中"提示），只能靠这个字段。
-   */
-  get sampleCount(): number {
-    return this._count;
-  }
-
-  /**
-   * 升序排列的样本副本（带缓存）
-   *
-   * 【⚠️ 为什么要缓存】
-   * 三个统计量每次读取都要 `sort()`，而排序前的 `[...slice()]` 还会再分配一个数组。
-   * 调用方的典型用法是"每帧读一次中位数 + 每帧读一次状态"，
-   * 也就是每帧 2 次 O(n log n) + 2 次数组分配——
-   * 而**帧率监测恰恰是给性能已经不好的机器用的**，
-   * 在最需要省算力的时刻做最多的无用功。
-   *
-   * 样本只在 `tick()` 时变化，所以"写脏读缓存"是安全的：
-   * 两次 tick 之间不管读多少次，排一次就够。
-   *
-   * 【为什么用升序统一三个统计量】
-   * median 要升序取中间；1% low 要的是"帧时间最大的那 1%"（fps 最低），
-   * 也就是升序数组的**末尾** n 个。两者共用同一份升序缓存即可，
-   * 不需要再维护一份降序。
-   */
-  private _ascending(): readonly number[] {
-    if (this._sorted === null) {
-      this._sorted = [...this._samples.slice(0, this._count)].sort((a, b) => a - b);
-    }
-    return this._sorted;
   }
 
   /** 中位帧率（最常用，抗离群） */
   get median(): number {
     if (this._count === 0) return 0;
-    const arr = this._ascending();
+    const arr = [...this._samples.slice(0, this._count)].sort((a, b) => a - b);
     const mid = arr.length >> 1;
     const med = arr.length % 2 === 1
       ? arr[mid]!
@@ -750,11 +605,10 @@ export class FpsMeter {
    */
   get lowFps1Percent(): number {
     if (this._count === 0) return 0;
-    // 帧时间最大的 n 个 = fps 最低的 n 个 → 升序数组的末尾 n 个
-    const arr = this._ascending();
+    const arr = [...this._samples.slice(0, this._count)].sort((a, b) => b - a);
     const n = Math.max(1, Math.floor(arr.length * 0.01));
     let sum = 0;
-    for (let i = 0; i < n; i++) sum += arr[arr.length - 1 - i]!;
+    for (let i = 0; i < n; i++) sum += arr[i]!;
     return sum > 0 ? (1000 * n) / sum : 0;
   }
 
@@ -765,6 +619,5 @@ export class FpsMeter {
   reset(): void {
     this._count = 0;
     this._idx = 0;
-    this._sorted = null;
   }
 }
