@@ -246,7 +246,7 @@ export class EntityRegistry<T = unknown> {
 
     this._live++;
 
-    this._dispatch(this._onSpawn, (fn) => fn(id, entity));
+    for (const fn of this._onSpawn) fn(id, entity);
     return id;
   }
 
@@ -367,7 +367,7 @@ export class EntityRegistry<T = unknown> {
     rec.deathReason = reason;
     this._live--;
 
-    this._dispatch(this._onDeath, (fn) => fn(id, rec.entity, reason));
+    for (const fn of this._onDeath) fn(id, rec.entity, reason);
     return true;
   }
 
@@ -379,69 +379,21 @@ export class EntityRegistry<T = unknown> {
    * 换关卡时直接 destroy 全场，如果不触发，
    * "击杀计数"类成就就会**只在换关时**漏——极难发现。
    */
-  /**
-   * 卸载整个注册表（rule5 要求的 `destroy` 语义）
-   *
-   * 【为什么另外提供一个无参重载，而不是让调用方记住 `clear()`】
-   * rule5 的口径是"有 install 就要有对应的 uninstall/destroy"，
-   * 而外部清理代码（场景卸载、DI 容器销毁）通常只认 `destroy()` 这个名字。
-   * 本类此前只有 `clear()`，于是"按规则去调 destroy"的人
-   * 会撞上 `destroy(id)` 的必填参数——要么编译报错，
-   * 要么误传一个 id 只删了单个实体。
-   *
-   * 【为什么不改 `clear()` 的名字】
-   * `clear()` 已经被既有调用方和测试大量使用，改名是纯破坏。
-   * 这里只做**新增**：无参 `destroy()` 等价于 `clear()`。
-   */
-  destroy(): void;
-  destroy(id: number): boolean;
-  destroy(id?: number): boolean | void {
-    if (id === undefined) {
-      this.clear();
-      return;
-    }
-    /**
-     * 【⚠️ 为什么延迟分支也要先查一遍记录是否存在】
-     *
-     * 原实现在遍历中（`_iterating > 0`）**无条件**入队并返回 `true`。
-     * 于是同一个无效 id `999999`：
-     *
-     * ```
-     * 非遍历中 destroy(999999) → false
-     * forEach 内部 destroy(999999) → true    ← 同一个输入，两种相反的答案
-     * ```
-     *
-     * 而 `destroy()` 的返回值最常见的用法就是
-     * `if (reg.destroy(id)) { 释放资源 / 计数减一 }`——
-     * 在遍历上下文里会得到**假阳性**，
-     * 表现为"尸体清理计数偏大""同一份资源被释放两次"，
-     * 而且只在实体恰好在遍历中被销毁时复现，极难定位。
-     *
-     * 延迟的是"什么时候删"，不是"要不要删"——
-     * 存在性判定必须立刻做，返回值必须与 `_destroyNow` 一致。
-     */
+  destroy(id: number): boolean {
+    // 遍历中 → 推迟（连锁死亡安全）
     if (this._iterating > 0) {
-      if (this._findForDestroy(id) === null) return false;
       this._pendingDestroy.push(id);
       return true;
     }
     return this._destroyNow(id);
   }
 
-  /** 找可被销毁的记录；id 不存在或版本不符返回 null */
-  private _findForDestroy(id: number): EntityRecord<T> | null {
-    if (!isValidId(id)) return null;
-    const index = idIndex(id);
-    if (index >= this._slots.length) return null;
-    const rec = this._slots[index];
-    if (!rec || rec.id !== id) return null;
-    return rec;
-  }
-
   private _destroyNow(id: number): boolean {
-    const rec = this._findForDestroy(id);
-    if (rec === null) return false;
+    if (!isValidId(id)) return false;
     const index = idIndex(id);
+    if (index >= this._slots.length) return false;
+    const rec = this._slots[index];
+    if (!rec || rec.id !== id) return false;
 
     // 还活着 → 先走死亡流程
     if (rec.alive) {
@@ -449,7 +401,7 @@ export class EntityRegistry<T = unknown> {
       rec.deadFrame = this._frame;
       rec.deathReason = 'destroyed';
       this._live--;
-      this._dispatch(this._onDeath, (fn) => fn(id, rec.entity, 'destroyed'));
+      for (const fn of this._onDeath) fn(id, rec.entity, 'destroyed');
     }
 
     // 清理映射
@@ -465,7 +417,7 @@ export class EntityRegistry<T = unknown> {
     this._slots[index] = null;
     this._free.push(index);
 
-    this._dispatch(this._onDestroy, (fn) => fn(id));
+    for (const fn of this._onDestroy) fn(id);
     return true;
   }
 
@@ -488,7 +440,7 @@ export class EntityRegistry<T = unknown> {
         rec.alive = false;
         rec.deadFrame = this._frame;
         rec.deathReason = 'destroyed';
-        this._dispatch(this._onDeath, (fn) => fn(rec.id, rec.entity, 'destroyed'));
+        for (const fn of this._onDeath) fn(rec.id, rec.entity, 'destroyed');
       }
     }
 
@@ -577,39 +529,6 @@ export class EntityRegistry<T = unknown> {
       const i = this._onDestroy.indexOf(fn);
       if (i >= 0) this._onDestroy.splice(i, 1);
     };
-  }
-
-  /**
-   * 派发回调（**唯一入口**，五个派发点都走这里）
-   *
-   * 【⚠️ 为什么必须遍历副本，不能直接 `for (const fn of list)`】
-   *
-   * `on*()` 返回的是**取消函数**，而"触发一次就注销自己"是一次性监听
-   * 最常见的写法。取消函数内部是 `splice(i, 1)`
-   * ——直接遍历实时数组时，当前元素之后的所有元素下标**前移一位**，
-   * 于是紧跟其后的那个回调被整个跳过：
-   *
-   * ```
-   * 注册 A / B / C 三个 onSpawn，A 内部注销自己
-   * 修复前实测触发序列 = ["B","A"]     ← C 从未执行
-   * 修复后实测触发序列 = ["B","A","C"]
-   * ```
-   *
-   * 后果是"一次性监听"只要不是最后一个注册的，
-   * 它后面所有监听者在本次事件里全部静默失效：
-   * 掉落、计分、成就、死亡动画漏触发，不报错，
-   * 且是否复现取决于注册顺序——这是最难查的一类 bug。
-   *
-   * 遍历副本后，"本次事件的监听者名单"在派发开始时确定：
-   * 中途注销只影响**后续事件**，不影响本次。
-   * （这也是 Node.js EventEmitter 的语义。）
-   *
-   * 【为什么五个派发点统一走这里】
-   * `onSpawn` / `onDeath`（kill / destroy / clear 三处）/ `onDestroy`
-   * 分散五处，任何一处漏改都会重新长出同一个 bug。
-   */
-  private _dispatch<F>(list: readonly F[], call: (fn: F) => void): void {
-    for (const fn of list.slice()) call(fn);
   }
 
   // ==================== 帧 ====================
