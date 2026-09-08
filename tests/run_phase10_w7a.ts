@@ -340,12 +340,40 @@ export function runPhase10W7ATests(): void {
        * ```
        * `pixelToHex` 除以 size → Infinity → `Math.round(Infinity)` → Infinity，
        * 再传给 `hexDistance` 得到 Infinity，比较恒真/恒假，一路传染下去。
+       *
+       * 【⚠️ 两个函数的失效形态不一样（W7-B 交叉验收时指出）】
+       * - `pixelToHex` 是**除零** → ±Infinity，这条用例能直接抓到
+       * - `hexToPixel` 是**乘法**：`0 * √3 * (...)` = 0，**不会得到 NaN**
+       *   （只有 `q`/`r` 本身是 Infinity 时才会得到 NaN）
+       *
+       * 所以"两个函数都加 size 正性校验"这个修法里，
+       * `hexToPixel` 那半是**把"碰巧正确"变成"显式保证"**——
+       * 真正会出错的是下面那条负数用例，不是这条 size=0 的。
        */
       const px = hexToPixel({ q: 2, r: -1 }, 0);
       assert(Number.isFinite(px.x) && Number.isFinite(px.y), `hexToPixel 应有限，实际 ${JSON.stringify(px)}`);
 
       const hx = pixelToHex(25, -8, 0);
       assert(Number.isFinite(hx.q) && Number.isFinite(hx.r), `pixelToHex 应有限，实际 ${JSON.stringify(hx)}`);
+    });
+
+    test('⚠️ size 为负数时不得产出镜像坐标（hexToPixel 守卫的真正价值）', () => {
+      /**
+       * 【这条才是 `hexToPixel` 那道守卫真正挡住的东西】
+       * size = 0 时 `0 * x === 0` 碰巧给出原点，删掉守卫测试也照样过；
+       * 但 size < 0 时乘法不会归零，而是把整个六边形网格**镜像翻转**：
+       * `hexToPixel({q:2,r:-1}, -10)` 会得到 `{x: -25.98, y: 15}`（正常值的相反数）。
+       *
+       * 这种"图能画出来、位置全反了"的错误，比 NaN 更难查——
+       * 因为没有任何一个值是异常的。
+       */
+      const px = hexToPixel({ q: 2, r: -1 }, -10);
+      eq(px.x, 0, '负 size 应落回原点，而不是产出镜像坐标');
+      eq(px.y, 0);
+
+      const hx = pixelToHex(25, -8, -10);
+      eq(hx.q, 0, 'pixelToHex 同样：负 size 落回原点格');
+      eq(hx.r, 0);
     });
 
     test('正常 size 的像素互转可以往返（防止矫枉过正）', () => {
