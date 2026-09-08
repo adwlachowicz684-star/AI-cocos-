@@ -674,8 +674,7 @@ export function assignTypes(graph: RoomGraphData, spec: TypeSpec, rng?: IRandomS
   }
 
   // Boss 前必须有一个休息点（体验刚需）
-  // 传 `spec.fixed`：显式指定的层不该被兜底规则改写（见函数内注释）
-  ensureRestBeforeBoss(graph, r, spec.fixed);
+  ensureRestBeforeBoss(graph, r);
 }
 
 function neighborsPrev(graph: RoomGraphData, node: RoomNode): RoomNode[] {
@@ -708,11 +707,7 @@ function pickWeighted(pool: Record<string, number>, rng: IRandomSource, fallback
  *
  * 《杀戮尖塔》《哈迪斯》都遵守这条。
  */
-function ensureRestBeforeBoss(
-  graph: RoomGraphData,
-  rng: IRandomSource,
-  fixed?: Readonly<Record<number, string>>
-): void {
+function ensureRestBeforeBoss(graph: RoomGraphData, rng: IRandomSource): void {
   const before = graph.depth - 2;
   if (before < 1) return;
   const layer = graph.layers[before];
@@ -721,24 +716,7 @@ function ensureRestBeforeBoss(
   const has = layer.some((id) => graph.nodes[id].type === RoomTypes.REST);
   if (has) return;
 
-  /**
-   * 【⚠️ 为什么必须跳过 `spec.fixed` 指定的节点】
-   *
-   * `fixed` 的语义是"这一层的类型强制指定，覆盖权重随机"（见 `TypeSpec.fixed`）。
-   * 老实现在这里无差别 `graph.nodes[pick].type = REST`，
-   * 于是 `fixed[depth-2]` 被**静默改写**——调用方明明写了
-   * `fixed: { 3: 'shop' }`，Boss 前一层却变成了休息房，
-   * 而配置读起来完全没变，排查时只会怀疑自己配错了。
-   *
-   * 规则冲突时 `fixed` 优先：它是显式指令，本函数只是体验兜底。
-   * 若这一层**全部**被 fixed 指定（没有可改的节点），
-   * 则尊重配置、不强制休息——宁可让玩家少个回血点，
-   * 也不能让显式配置失效（后者是静默的错误，前者只是体验问题）。
-   */
-  const candidates = fixed && fixed[before] !== undefined ? [] : layer;
-  if (candidates.length === 0) return;
-
-  const pick = candidates[rInt(rng, candidates.length)];
+  const pick = layer[rInt(rng, layer.length)];
   graph.nodes[pick].type = RoomTypes.REST;
 }
 
@@ -757,32 +735,6 @@ export interface Diagnosis {
   deadEnds: number[];
   /** 交叉的路径对（不应有） */
   crossings: number;
-  /**
-   * 没有分配类型的节点数（只统计，不算 issue）
-   *
-   * 【⚠️ 为什么"部分节点没类型"必须有个出口，但不计入 `issues`】
-   *
-   * 老代码是一个**空 if 块**：
-   * ```ts
-   * if (emptyType > 0 && emptyType < nodes.length) {
-   *   // 类型未分配不算结构错误（允许只生成结构）
-   * }
-   * ```
-   * 这是"写了一半的校验"——条件算出来了却什么都不做。
-   * 后果：`generateRoomGraph` 默认只生成结构（所有节点 `type === ''`），
-   * 调用方忘了 `assignTypes` 时，"部分节点没类型"这个重要问题
-   * **永远不会被报出来**。
-   *
-   * 【为什么不能简单补一句 `issues.push(...)`】
-   * `generateRoomGraph` 在 `diagnose().ok === false` 时**直接抛错**，
-   * 而它自己生成的图就是全空类型（`emptyType === nodes.length`）。
-   * 一旦把 emptyType 计入 issues，生成函数会 100% 抛错——
-   * 修一个静默 bug 换来一个必崩 bug。
-   *
-   * 所以这里只把数量暴露出来，由调用方按自己的场景判断：
-   * "只生成结构"是合法用法，跟"我明明分配了类型却漏了几个"是两回事。
-   */
-  untyped: number;
 }
 
 /**
@@ -873,15 +825,17 @@ export function diagnose(graph: RoomGraphData, opts?: { requireReachable?: boole
   }
   if (crossings > 0) issues.push(`${crossings} 处路径交叉`);
 
-  // ⑤ 空类型（只统计，不构成 issue —— 见 Diagnosis.untyped 的注释）
+  // ⑤ 空类型
   const emptyType = nodes.filter((n) => n.type === '').length;
+  if (emptyType > 0 && emptyType < nodes.length) {
+    // 类型未分配不算结构错误（允许只生成结构）
+  }
 
   return {
     ok: issues.length === 0,
     issues,
     reachableFromEntry: reachable.size,
     canReachBoss: toBoss.size,
-    untyped: emptyType,
     deadEnds,
     crossings,
   };
@@ -1111,39 +1065,9 @@ export function findBestPath(
 
   for (const start of graph.layers[0]) dfs(start, 0);
 
-  /**
-   * 【⚠️ 为什么不再返回 `total: NaN`】
-   *
-   * 老写法在截断时返回 `{ path: 贪心结果, total: NaN }`。
-   * 调用方拿到 `truncated: true` 的同时拿到 `NaN`，
-   * 一旦把 `total` 用于比较或显示（"最优路线得分"、难度评估），
-   * **NaN 会静默传播**——所有比较恒 false，最优解永远是"第一个"，
-   * 而界面上可能显示成一个空白或 "NaN"。
-   * 实测（修复前）：`truncated = true  total = NaN`。
-   *
-   * 更麻烦的是它和 `path` **不自洽**：`path` 是贪心走出来的那条，
-   * `total` 却既不是它的分、也不是任何东西的分。
-   *
-   * 【修法：让 `total` 始终描述实际返回的 `path`】
-   * - 截断且已枚举到过完整路径 → 返回**已找到的最优解**（`best` / `bestScore`）。
-   *   它虽然不保证是全局最优（`truncated: true` 已经表达了这一点），
-   *   但它是真实存在的一条路径，且分数与路径一一对应。
-   * - 一条完整路径都没枚举到 → 退回贪心，并**现算**这条贪心路径的分，
-   *   而不是丢一个 NaN 出去。
-   *
-   * 【为什么不把 `total` 改成 `number | null`】
-   * 那会让所有现有调用方多一次判空，而本函数的设计意图是
-   * "宁可给个近似答案，也不要卡死"——近似答案本身就是有效数字。
-   */
-  if (truncated && best.length > 0) {
-    return { path: best, total: bestScore, considered, truncated: true };
-  }
-
   if (truncated || best.length === 0) {
-    // 退化：用贪心兜底，保证永远有返回值；总分按这条路径现算，不再返回 NaN
-    const path = findPath(graph, score);
-    const total = path.reduce((s, id) => s + score(nodes[id]), 0);
-    return { path, total, considered, truncated };
+    // 退化：用贪心兜底，保证永远有返回值
+    return { path: findPath(graph, score), total: NaN, considered, truncated };
   }
   return { path: best, total: bestScore, considered, truncated: false };
 }
