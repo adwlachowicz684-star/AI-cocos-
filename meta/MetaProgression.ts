@@ -278,6 +278,31 @@ export class MetaProgression {
       }
     }
 
+    /**
+     * 【为什么收集完还要立刻 warn 一次】
+     *
+     * 只收集、不吭声的话，笔误仍然只在"调用方主动查 `unknownRequires`"时才可见——
+     * 而配置校验恰恰是**最容易忘记主动查**的地方。
+     *
+     * W8-B 在验收本报告时建议的折中方案是"构造期出 warning，运行期保持跳过"，
+     * 本条采纳：warn 一次（汇总，不是每个笔误一条），
+     * 行为仍然不变（不抛错、不影响解锁），但开发环境**一定能看见**。
+     *
+     * 【为什么用 console.warn 而不是 throw】
+     * README 承诺"一个笔误不该让整个游戏起不来"，且有既有测试断言。
+     * 抛错会同时破坏这两者，属 breaking，需总审裁决（见 `audit/result_W8-A.md` §3.1）。
+     */
+    if (this._unknownRequires.length > 0) {
+      const detail = this._unknownRequires
+        .map((u) => `${u.node} → ${u.require}`)
+        .join('、');
+      console.warn(
+        `[MetaProgression] 检测到 ${this._unknownRequires.length} 处前置配置笔误` +
+        `（${detail}）：这些前置会被当作"不存在"跳过，` +
+        `对应节点可以绕过前置链直接解锁。请修正配置，或查询 unknownRequires 获取完整清单。`
+      );
+    }
+
     // 【构造时检测循环依赖】
     // 现在抛错，好过上线后玩家发现"这个永远解锁不了"。
     const cycle = this._findCycle();
