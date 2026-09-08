@@ -61,7 +61,6 @@
  */
 
 import { BinaryHeap } from '../ds/DataStructures';
-import { clampNum, numOr } from '../_core/math';
 
 export interface IPoint {
   readonly x: number;
@@ -130,16 +129,7 @@ export class AStar {
   // 复用的缓冲区（避免每次寻路都分配，减少 GC）
   private _gScore: Float64Array | null = null;
   private _cameFrom: Int32Array | null = null;
-  /**
-   * 【已删除的死代码：_openMark】
-   *
-   * 原实现在 `find()` 里维护一个 `Uint8Array` 标记"某格是否在开放列表中"，
-   * 但**全文件从未读过它**——"是否访问过"早由下面的 stamp 机制接管。
-   *
-   * 留着它的代价不是性能，是**误导**：后来的人会以为"开放列表有标记可用"，
-   * 于是写出 `if (openMark[i]) ...` 这种依赖，
-   * 而它只在 push 时被写、pop 时从不清除 —— 标记永远为真。
-   */
+  private _openMark: Uint8Array | null = null;
   private _stamp = 0;
   /**
    * visited / closed 都存" stamp 值"而不是布尔
@@ -170,45 +160,8 @@ export class AStar {
     this._opts = {
       allowDiagonal: opts.allowDiagonal ?? true,
       dontCrossCorners: opts.dontCrossCorners ?? true,
-      /**
-       * 【⚠️ 为什么 heuristicWeight 必须收口】
-       *
-       * 原写法 `opts.heuristicWeight ?? 1` 挡不住 NaN
-       * （`??` 只管 null/undefined）。而下面 `f = tentative + h * hw`
-       * 里只要 hw 是 NaN，**所有节点的 f 都变成 NaN**，
-       * 二叉堆的比较器 `a.f - b.f` 于是恒为 NaN → **堆序彻底失效**。
-       *
-       * 失效后 A* 退化成"随机顺序展开"，但它**仍然能找到一条合法路径**，
-       * 所以 `found` 是 true、路径也走得通 —— 只是不是最短的：
-       *
-       * ```
-       * 40×40 空地图 (0,0) → (39,39)：
-       *   默认配置   → found=true，路径长度 39，探索 40 个节点
-       *   hw = NaN   → found=true，路径长度 77（腰折路径），探索 79 个节点
-       * ```
-       *
-       * 表现是"这个 AI 好蠢，明明有直线却绕一大圈"，
-       * 因为路径合法、不报错，没人会怀疑 A* 本身。
-       */
-      heuristicWeight: numOr(opts.heuristicWeight, 1),
-      /**
-       * 【⚠️ 为什么 maxNodes 必须收口】
-       *
-       * 这个字段存在的唯一目的是"防止大地图 / 目标不可达时卡死"。
-       * 而 `opts.maxNodes ?? 100000` 挡不住 NaN，
-       * 于是 `explored > NaN` 恒为 false → **上限完全失效**：
-       *
-       * ```
-       * 40×40，中间一整列墙（目标不可达）：
-       *   maxNodes = 50   → 探索 51 个节点即停
-       *   maxNodes = NaN  → 探索 800 个节点（搜完整张可达区域）
-       * ```
-       *
-       * 配表漏填即失效，而且**越是"目标不可达"这种高频场景越吃亏**——
-       * 不可达查询本来就是最坏情况，一次就要搜完整张图，帧率断崖。
-       * 用 clampNum 同时定上界，是为了挡住 Infinity（1e7 个节点足以跑满任何地图）。
-       */
-      maxNodes: clampNum(opts.maxNodes, 1, 1e7, 100000),
+      heuristicWeight: opts.heuristicWeight ?? 1,
+      maxNodes: opts.maxNodes ?? 100000,
     };
     this._isWalkable = opts.isWalkable;
     this._costOf = opts.costOf;
@@ -227,6 +180,7 @@ export class AStar {
     const n = this._w * this._h;
     this._gScore = new Float64Array(n);
     this._cameFrom = new Int32Array(n);
+    this._openMark = new Uint8Array(n);
     this._stamps = new Int32Array(n);
     this._closedStamp = new Int32Array(n);
   }
@@ -272,6 +226,7 @@ export class AStar {
     const g = this._gScore!;
     const cameFrom = this._cameFrom!;
     const closed = this._closedStamp!;
+    const openMark = this._openMark!;
     const stamps = this._stamps!;
 
     // 用递增的 stamp 代替每次 clear()，避免 O(n) 清空
@@ -301,6 +256,7 @@ export class AStar {
     g[startIdx] = 0;
     cameFrom[startIdx] = -1;
     open.push({ idx: startIdx, f: 0 });
+    openMark[startIdx] = 1;
 
     let explored = 0;
 
@@ -363,6 +319,7 @@ export class AStar {
             : hx + hy;
 
           open.push({ idx: ni, f: tentative + h * hw });
+          openMark[ni] = 1;
         }
       }
     }
@@ -405,37 +362,9 @@ export class AStar {
  * 如果 `a` 能直线看到 `c`，那 `a→b→c` 里的 `b` 就是多余的。
  */
 export class PathSmoother {
-  /**
-   * @param walkable 通行判定。**由调用方保证越界时返回 false**（见下方说明）
-   * @param bounds 可选：地图尺寸。给了就能兜住"不检查越界的 walkable"
-   */
-  constructor(
-    private readonly _walkable: (x: number, y: number) => boolean,
-    private readonly _bounds: { width?: number; height?: number } = {},
-  ) {}
+  constructor(private readonly _walkable: (x: number, y: number) => boolean) {}
 
-  /**
-   * 两点之间是否无阻挡（Bresenham + 角点检查）
-   *
-   * 【⚠️ 为什么必须能自己拦越界】
-   *
-   * 这个循环是 `for(;;)`，**唯一的退出条件就是 `_walkable` 返回 false**。
-   * 一旦调用方传进来的 walkable 不检查越界——而最常见的写法恰恰不检查：
-   *
-   * ```typescript
-   * const sm = new PathSmoother((x, y) => grid[y][x] === 0);
-   * sm.hasLineOfSight(0, 0, 0, 10);   // 3×3 的图 → y=3 时 grid[3] 是 undefined
-   *                                   // TypeError: Cannot read properties of undefined
-   * ```
-   *
-   * 实测确实抛 TypeError（水平方向恰好不抛，是因为 Bresenham 先把 x 走到越界、
-   * 而 `grid[0][10]` 只是 undefined 不等于 0 → 返回 false；
-   * 垂直方向 `grid[3]` 整个是 undefined，取 `[0]` 才炸）。
-   * **能不能炸取决于目标点在哪个方向**——这种"有时崩有时不崩"最折磨人。
-   *
-   * 【修法】构造时可选传入地图尺寸；传了就在**调用 walkable 之前**判定越界。
-   * 没传（既有调用方式）时行为与原来完全一致，不会 breaking。
-   */
+  /** 两点之间是否无阻挡（Bresenham + 角点检查） */
   hasLineOfSight(x0: number, y0: number, x1: number, y1: number): boolean {
     let dx = Math.abs(x1 - x0);
     let dy = Math.abs(y1 - y0);
@@ -446,15 +375,7 @@ export class PathSmoother {
     let x = x0;
     let y = y0;
 
-    const bw = this._bounds.width;
-    const bh = this._bounds.height;
-    const known = bw !== undefined && bh !== undefined;
-    const inBounds = (px: number, py: number): boolean =>
-      !known || (px >= 0 && py >= 0 && px < (bw as number) && py < (bh as number));
-
     for (;;) {
-      // 越界一律视为阻挡：既防止 TypeError，也符合"地图外走不通"的语义
-      if (!inBounds(x, y)) return false;
       if (!this._walkable(x, y)) return false;
       if (x === x1 && y === y1) return true;
 
@@ -468,8 +389,6 @@ export class PathSmoother {
        * 如果这一步是斜的，两个正交格都要能走。
        */
       if (e2 > -dy && e2 < dx) {
-        // 角点检查的两个正交邻居同样可能越界（比主循环更早一步出界）
-        if (!inBounds(x + sx, y) || !inBounds(x, y + sy)) return false;
         if (!this._walkable(x + sx, y) || !this._walkable(x, y + sy)) return false;
       }
 
@@ -550,8 +469,6 @@ export class FlowField {
   private _dist: Float64Array;
   /** 下一步方向索引（0-7，-1 = 无） */
   private _dirs: Int8Array;
-  /** Dijkstra 的"已定型"标记（跨 build 复用，见 build 内注释） */
-  private _done: Uint8Array;
   private _goal: IPoint = { x: 0, y: 0 };
   private _built = false;
 
@@ -563,7 +480,6 @@ export class FlowField {
     this._allowDiagonal = allowDiagonal;
     this._dist = new Float64Array(this._w * this._h);
     this._dirs = new Int8Array(this._w * this._h);
-    this._done = new Uint8Array(this._w * this._h);
   }
 
   get width(): number {
@@ -591,6 +507,7 @@ export class FlowField {
    * 纯 BFS 会给出错误结果（对角线走 1 步和直线走 1 步代价不同）。
    */
   build(goal: IPoint): boolean {
+    const n = this._w * this._h;
     this._dist.fill(-1);
     this._dirs.fill(-1);
 
@@ -607,20 +524,7 @@ export class FlowField {
     heap.push({ idx: goalIdx, d: 0 });
 
     const dirs = this._allowDiagonal ? DIRS8 : DIRS4;
-    /**
-     * 【为什么复用 _done 而不是每次 new Uint8Array(n)】
-     *
-     * 原实现每次 build 都新分配一个 w×h 的标记数组，
-     * 而同一实例上的 `_dist` / `_dirs` 明明是复用的——**两处策略不一致**。
-     * 流场的典型用法是"目标一变就重算一次"（RTS 里每秒好几次），
-     * 每次丢一个 w×h 的数组，等于把 GC 压力**和地图大小绑在一起**：
-     * 512×512 的图就是每次 256KB。
-     *
-     * 复用后每次 build 只需 fill(0)（O(n)，但是原地写，极快），
-     * 与 `_dist.fill(-1)` / `_dirs.fill(-1)` 的既有做法一致。
-     */
-    const done = this._done;
-    done.fill(0);
+    const done = new Uint8Array(n);
 
     while (!heap.isEmpty) {
       const cur = heap.pop()!;
@@ -663,31 +567,9 @@ export class FlowField {
     return -1;
   }
 
-  /**
-   * 某格到目标的距离（-1 = 不可达）
-   *
-   * 【为什么 destroy() 之后必须显式返回 -1】
-   *
-   * `destroy()` 把 `_dist` 换成了长度 0 的数组（为了释放 w×h 的内存）。
-   * 之后 `this._dist[i]` 读出来是 **undefined**，不是 JSDoc 承诺的 -1：
-   *
-   * ```
-   * field.destroy();
-   * field.distanceAt(0, 0);   // undefined（typeof 'undefined'）
-   * ```
-   *
-   * 后果是**类型契约被破坏**：调用方按 `number` 继续算
-   * （`d < best`、`d + cost`、存进 Float64Array）会把 undefined 一路传下去，
-   * `undefined < 1` 是 false、`undefined + 1` 是 NaN —— 全程不报错，
-   * 但"距离比较"整段逻辑错了，表现为单位乱走或站着不动。
-   *
-   * 注意 `reachable()` 不受影响（`undefined >= 0` 也是 false，恰好正确），
-   * 所以这个 bug 只在**直接拿返回值做数值运算**时才显形——最难查的那种。
-   */
+  /** 某格到目标的距离（-1 = 不可达） */
   distanceAt(x: number, y: number): number {
     if (x < 0 || y < 0 || x >= this._w || y >= this._h) return -1;
-    // 已 destroy（_dist 被换成空数组）→ 按契约返回 -1，不能返回 undefined
-    if (this._dist.length === 0) return -1;
     return this._dist[y * this._w + x];
   }
 
@@ -737,7 +619,6 @@ export class FlowField {
   destroy(): void {
     this._dist = new Float64Array(0);
     this._dirs = new Int8Array(0);
-    this._done = new Uint8Array(0);
     this._built = false;
   }
 }
